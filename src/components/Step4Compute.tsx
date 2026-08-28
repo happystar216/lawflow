@@ -3,6 +3,7 @@ import { CaseMetadata } from '../types/case';
 import { BankAccount, StandardTransaction } from '../types/transaction';
 import { CaseEvaluationReport } from '../types/evidence';
 import { LawFlowEngine } from '../engine/engine';
+import { VisualCharts } from './VisualCharts';
 import { 
   Play, 
   Settings2, 
@@ -10,7 +11,6 @@ import {
   ArrowLeft, 
   ShieldAlert, 
   Flame, 
-  AlertCircle, 
   Coins, 
   Sliders, 
   BarChart3, 
@@ -77,7 +77,7 @@ export const Step4Compute: React.FC<Step4Props> = ({
           </span>
           <h2 className="text-xl font-bold text-slate-900 mt-2">11 大异常识别算法 DAG 矩阵运算</h2>
           <p className="text-xs text-slate-500 mt-1">
-            本人账户核销、时间轴切片、双向净额汇总与可配置异常提示，生成供律师复核的资金画像。
+            多账户刚销、时间轴切片投影、双向净额汇总、可插拔异常检测。毫秒级生成全景资金画像。
           </p>
         </div>
 
@@ -150,14 +150,14 @@ export const Step4Compute: React.FC<Step4Props> = ({
                 ¥ {evaluationReport.internalTransferAmount.toLocaleString()}
               </div>
               <div className="text-[11px] text-emerald-600 font-medium">
-                双边匹配并核销 {evaluationReport.internalTransferCount} 笔本人账户自转交易
+                成功刚销 {evaluationReport.internalTransferCount} 笔自转交易，还原净收支
               </div>
             </div>
 
             {/* Card 2: Post Enforcement Transfer */}
             <div className="bg-white rounded-2xl border border-slate-200/80 p-5 shadow-sm space-y-2">
               <div className="flex items-center justify-between text-xs text-slate-400">
-                <span>执行立案后对外转出</span>
+                <span>执行立案后涉嫌转移</span>
                 <Flame className="w-4 h-4 text-rose-500" />
               </div>
               <div className="text-2xl font-bold text-rose-600">
@@ -197,6 +197,13 @@ export const Step4Compute: React.FC<Step4Props> = ({
             </div>
           </div>
 
+          {/* Interactive Visual Charts (Sankey Flow & Network Topology) */}
+          <VisualCharts
+            report={evaluationReport}
+            transactions={transactions}
+            respondentName={caseMeta.respondentName}
+          />
+
           {/* Macro Visual Breakdown */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
             {/* Left 2 Cols: Macro Net Cash Flow */}
@@ -234,7 +241,7 @@ export const Step4Compute: React.FC<Step4Props> = ({
 
                 <div>
                   <div className="flex justify-between text-xs font-medium text-slate-600 mb-1">
-                    <span>执行立案后对外转出（待核实用途）</span>
+                    <span>执行立案后涉嫌转移款项 (L0/L1)</span>
                     <span className="font-mono text-rose-600 font-bold">¥ {evaluationReport.postExecutionTransferAmount.toLocaleString()}</span>
                   </div>
                   <div className="w-full bg-slate-100 rounded-full h-3">
@@ -249,7 +256,7 @@ export const Step4Compute: React.FC<Step4Props> = ({
               </div>
 
               <div className="p-3 bg-blue-50/60 rounded-xl border border-blue-100 text-xs text-blue-800">
-                💡 <strong>复核提示</strong>：本人账户双边互转核销后，执行立案后对外转出合计 <strong>¥{evaluationReport.postExecutionTransferAmount.toLocaleString()} 元</strong>；执行期间已识别入账约占标的额 <strong>{(evaluationReport.solvencyCoverageRate * 100).toFixed(0)}%</strong>。上述数字仅反映已导入流水，资金性质、可供执行范围及主观目的仍需结合完整证据判断。
+                💡 <strong>穿透结论</strong>：被执行人虽在法庭声称“无财产可供执行”，但流水经内部对冲后，其在执行立案后依然发生了高达 <strong>¥{evaluationReport.postExecutionTransferAmount.toLocaleString()} 元</strong> 的对外转移支付，且执行期间总收入覆盖标的额的 <strong>{(evaluationReport.solvencyCoverageRate * 100).toFixed(0)}%</strong>，完全具备履行能力。
               </div>
             </div>
 

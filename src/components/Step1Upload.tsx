@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
-import { UploadCloud, FileSpreadsheet, FileText, CheckCircle2, ArrowRight, ArrowLeft, Trash2, PlusCircle, AlertCircle } from 'lucide-react';
+import { UploadCloud, FileSpreadsheet, FileText, FileImage, CheckCircle2, ArrowRight, ArrowLeft, Trash2, PlusCircle, AlertCircle, Scan } from 'lucide-react';
 import { BankAccount, StandardTransaction } from '../types/transaction';
 import { parseExcelBankStatement } from '../parsers/excelParser';
 import { parsePdfBankStatement } from '../parsers/pdfParser';
+import { parseImageBankStatementWithOcr } from '../parsers/ocrParser';
 
 interface Step1Props {
   accounts: BankAccount[];
@@ -21,11 +22,13 @@ export const Step1Upload: React.FC<Step1Props> = ({
 }) => {
   const [isDragging, setIsDragging] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [ocrStatus, setOcrStatus] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const handleFiles = async (files: FileList | File[]) => {
     setIsProcessing(true);
     setErrorMessage(null);
+    setOcrStatus(null);
 
     const newAccounts = [...accounts];
     const newTransactions = [...transactions];
@@ -35,16 +38,28 @@ export const Step1Upload: React.FC<Step1Props> = ({
       const name = file.name.toLowerCase();
 
       try {
-        if (name.endsWith('.xlsx') || name.endsWith('.csv')) {
+        if (name.endsWith('.xlsx') || name.endsWith('.xls') || name.endsWith('.csv')) {
+          setOcrStatus(`正在解析 Excel: ${file.name}...`);
           const { account, transactions: parsedTx } = await parseExcelBankStatement(file);
           newAccounts.push(account);
           newTransactions.push(...parsedTx);
         } else if (name.endsWith('.pdf')) {
+          setOcrStatus(`正在解析 PDF 对账单: ${file.name}...`);
           const { account, transactions: parsedTx } = await parsePdfBankStatement(file);
           newAccounts.push(account);
           newTransactions.push(...parsedTx);
+        } else if (name.endsWith('.png') || name.endsWith('.jpg') || name.endsWith('.jpeg') || name.endsWith('.webp') || name.endsWith('.bmp')) {
+          // Trigger OCR for image
+          const { account, transactions: parsedTx } = await parseImageBankStatementWithOcr(
+            file,
+            (status, prog) => {
+              setOcrStatus(`${status} (${Math.round(prog * 100)}%)`);
+            }
+          );
+          newAccounts.push(account);
+          newTransactions.push(...parsedTx);
         } else {
-          setErrorMessage(`不支持的文件格式: ${file.name}，请上传 .xlsx、.csv 或文本型 .pdf 流水。`);
+          setErrorMessage(`不支持的文件格式: ${file.name}，请上传 Excel、PDF 或扫描图片。`);
         }
       } catch (err: any) {
         console.error('Error parsing file:', file.name, err);
@@ -53,6 +68,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
     }
 
     setIsProcessing(false);
+    setOcrStatus(null);
     onDataUpdated(newAccounts, newTransactions);
   };
 
@@ -77,9 +93,9 @@ export const Step1Upload: React.FC<Step1Props> = ({
         <span className="text-xs font-semibold uppercase tracking-wider text-blue-600 bg-blue-50 px-2.5 py-1 rounded-md">
           Step 1 / 6 证据上传
         </span>
-        <h2 className="text-xl font-bold text-slate-900 mt-2">多源银行流水批量拖拽与智能入库</h2>
+        <h2 className="text-xl font-bold text-slate-900 mt-2">多源异构银行流水批量拖拽与 OCR 智能入库</h2>
         <p className="text-xs text-slate-500 mt-1">
-          支持工行、农行、中行、建行、招行等多家银行的 .xlsx、CSV 与文本型 PDF 对账单。老式 .xls 请先另存为 .xlsx。
+          支持工行、农行、中行、建行、招行等多家银行标准/非标 Excel、CSV、电子 PDF 对账单及<strong>扫描件/手机翻拍图片 OCR 解析</strong>。
         </p>
 
         {/* Upload Zone */}
@@ -101,21 +117,28 @@ export const Step1Upload: React.FC<Step1Props> = ({
             拖拽银行流水文件至此，或点击选择文件
           </h3>
           <p className="text-xs text-slate-400 mt-1">
-            支持 .xlsx / .csv / .pdf 格式（支持单次上传多份流水）
+            支持 .xlsx / .xls / .csv / .pdf / 扫描图片 (.png, .jpg)
           </p>
 
           <label className="mt-4 inline-block">
             <span className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-medium text-xs cursor-pointer shadow-sm transition">
-              {isProcessing ? '正在解析中...' : '选择电脑中的流水文件'}
+              {isProcessing ? '正在处理中...' : '选择电脑中的流水文件'}
             </span>
             <input
               type="file"
               multiple
-              accept=".xlsx,.csv,.pdf"
+              accept=".xlsx,.xls,.csv,.pdf,.png,.jpg,.jpeg,.webp,.bmp"
               onChange={e => e.target.files && handleFiles(e.target.files)}
               className="hidden"
             />
           </label>
+
+          {ocrStatus && (
+            <div className="mt-4 inline-flex items-center space-x-2 px-3 py-1.5 rounded-full bg-blue-50 border border-blue-200 text-xs text-blue-700 animate-pulse">
+              <Scan className="w-3.5 h-3.5" />
+              <span>{ocrStatus}</span>
+            </div>
+          )}
         </div>
 
         {errorMessage && (
@@ -140,7 +163,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
             <input
               type="file"
               multiple
-              accept=".xlsx,.csv,.pdf"
+              accept=".xlsx,.xls,.csv,.pdf,.png,.jpg,.jpeg,.webp,.bmp"
               onChange={e => e.target.files && handleFiles(e.target.files)}
               className="hidden"
             />
@@ -163,12 +186,21 @@ export const Step1Upload: React.FC<Step1Props> = ({
                     <div className="w-8 h-8 rounded-lg bg-blue-100 text-blue-700 flex items-center justify-center">
                       {acc.fileType === 'pdf' ? (
                         <FileText className="w-4 h-4" />
+                      ) : acc.fileType === 'ocr' ? (
+                        <FileImage className="w-4 h-4 text-purple-600" />
                       ) : (
                         <FileSpreadsheet className="w-4 h-4" />
                       )}
                     </div>
                     <div>
-                      <div className="text-xs font-bold text-slate-800">{acc.bankName}</div>
+                      <div className="text-xs font-bold text-slate-800 flex items-center space-x-1.5">
+                        <span>{acc.bankName}</span>
+                        {acc.fileType === 'ocr' && (
+                          <span className="px-1.5 py-0.2 rounded bg-purple-100 text-purple-700 text-[10px] font-bold">
+                            OCR识别
+                          </span>
+                        )}
+                      </div>
                       <div className="text-[11px] text-slate-500 font-mono">{acc.accountNumber}</div>
                     </div>
                   </div>
@@ -198,7 +230,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
                 </div>
 
                 <div className="flex items-center justify-between text-[10px] text-slate-400 pt-1">
-                  <span>文件: {acc.fileName}</span>
+                  <span className="truncate max-w-[200px]">文件: {acc.fileName}</span>
                   <span className="flex items-center text-emerald-600 font-medium space-x-1">
                     <CheckCircle2 className="w-3 h-3" />
                     <span>解析就绪</span>
@@ -221,9 +253,9 @@ export const Step1Upload: React.FC<Step1Props> = ({
 
           <button
             onClick={onNext}
-            disabled={accounts.length === 0 || transactions.length === 0}
+            disabled={accounts.length === 0}
             className={`flex items-center space-x-2 px-6 py-2.5 rounded-xl font-medium text-sm transition ${
-              accounts.length > 0 && transactions.length > 0
+              accounts.length > 0
                 ? 'bg-blue-600 hover:bg-blue-700 text-white shadow-md shadow-blue-500/20'
                 : 'bg-slate-200 text-slate-400 cursor-not-allowed'
             }`}

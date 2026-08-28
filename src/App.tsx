@@ -1,10 +1,11 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { CaseMetadata } from './types/case';
 import { BankAccount, StandardTransaction } from './types/transaction';
 import { CaseEvaluationReport } from './types/evidence';
 import { LawFlowEngine } from './engine/engine';
 import { Header } from './components/Header';
 import { PasswordGate } from './components/PasswordGate';
+import { CaseManagerModal } from './components/CaseManagerModal';
 import { WorkflowStepper, WorkflowStep } from './components/WorkflowStepper';
 import { Step0CaseSetup } from './components/Step0CaseSetup';
 import { Step1Upload } from './components/Step1Upload';
@@ -14,32 +15,69 @@ import { Step4Compute } from './components/Step4Compute';
 import { Step5PostAnnotation } from './components/Step5PostAnnotation';
 import { Step6Export } from './components/Step6Export';
 import { SAMPLE_CASE, SAMPLE_ACCOUNTS, SAMPLE_TRANSACTIONS } from './demo/sampleData';
+import { CaseRecord, saveCaseRecord, listSavedCases } from './store/caseStore';
 
 export const App: React.FC = () => {
   const engine = useMemo(() => new LawFlowEngine(), []);
 
-  const createBlankCase = (): CaseMetadata => ({
-    id: `CASE_${Date.now()}`,
-    caseNumber: '',
-    courtName: '',
-    applicantName: '',
-    respondentName: '',
-    targetAmount: 0,
-    createdAt: new Date().toISOString().slice(0, 10),
-    updatedAt: new Date().toISOString().slice(0, 10),
-    timeline: { customNodes: [] },
-    declaredAssets: []
-  });
-
-  // Real matters start blank. The sample matter is loaded only through the
-  // explicit demo action so it cannot be mistaken for user data.
-  const [caseMeta, setCaseMeta] = useState<CaseMetadata>(() => createBlankCase());
-  const [accounts, setAccounts] = useState<BankAccount[]>([]);
-  const [transactions, setTransactions] = useState<StandardTransaction[]>([]);
+  // Active Case State
+  const [caseMeta, setCaseMeta] = useState<CaseMetadata>(SAMPLE_CASE);
+  const [accounts, setAccounts] = useState<BankAccount[]>(SAMPLE_ACCOUNTS);
+  const [transactions, setTransactions] = useState<StandardTransaction[]>(SAMPLE_TRANSACTIONS);
   const [evaluationReport, setEvaluationReport] = useState<CaseEvaluationReport | null>(null);
 
   const [currentStep, setCurrentStep] = useState<WorkflowStep>(0);
-  const [completedSteps, setCompletedSteps] = useState<Set<WorkflowStep>>(new Set());
+  const [completedSteps, setCompletedSteps] = useState<Set<WorkflowStep>>(new Set([0, 1, 2, 3, 4, 5]));
+  const [isCaseManagerOpen, setIsCaseManagerOpen] = useState(false);
+
+  const isInitialMount = useRef(true);
+
+  // Initial Load on mount
+  useEffect(() => {
+    async function init() {
+      const savedList = await listSavedCases();
+      if (savedList.length > 0) {
+        const first = savedList[0];
+        setCaseMeta(first.metadata);
+        setAccounts(first.accounts || []);
+        setTransactions(first.transactions || []);
+        if (first.evaluationReport) {
+          setEvaluationReport(first.evaluationReport);
+        } else if ((first.transactions || []).length > 0) {
+          const { report, processedTransactions } = engine.evaluateCase(
+            first.metadata,
+            first.transactions,
+            first.accounts
+          );
+          setEvaluationReport(report);
+          setTransactions(processedTransactions);
+        }
+      } else {
+        // Fallback demo
+        handleResetToDemo();
+      }
+    }
+    init();
+  }, []);
+
+  // Auto-Save active case to IndexedDB CaseStore on modifications
+  useEffect(() => {
+    if (isInitialMount.current) {
+      isInitialMount.current = false;
+      return;
+    }
+
+    if (caseMeta && caseMeta.id) {
+      const record: CaseRecord = {
+        metadata: caseMeta,
+        accounts,
+        transactions,
+        evaluationReport,
+        updatedAt: new Date().toISOString()
+      };
+      saveCaseRecord(record).catch(err => console.warn('Auto-save error', err));
+    }
+  }, [caseMeta, accounts, transactions, evaluationReport]);
 
   const handleResetToDemo = () => {
     setCaseMeta(SAMPLE_CASE);
@@ -54,15 +92,46 @@ export const App: React.FC = () => {
     setTransactions(processedTransactions);
     setCurrentStep(4); // Jump straight to computation dashboard
     setCompletedSteps(new Set([0, 1, 2, 3, 4, 5]));
+
+    saveCaseRecord({
+      metadata: SAMPLE_CASE,
+      accounts: SAMPLE_ACCOUNTS,
+      transactions: processedTransactions,
+      evaluationReport: report,
+      updatedAt: new Date().toISOString()
+    });
   };
 
   const handleNewCase = () => {
-    setCaseMeta(createBlankCase());
+    const blankCase: CaseMetadata = {
+      id: `CASE_${Date.now()}`,
+      caseNumber: '',
+      courtName: '',
+      applicantName: '',
+      respondentName: '',
+      targetAmount: 0,
+      createdAt: new Date().toISOString().slice(0, 10),
+      updatedAt: new Date().toISOString().slice(0, 10),
+      timeline: {
+        customNodes: []
+      },
+      declaredAssets: []
+    };
+    setCaseMeta(blankCase);
     setAccounts([]);
     setTransactions([]);
     setEvaluationReport(null);
     setCurrentStep(0);
     setCompletedSteps(new Set());
+  };
+
+  const handleSelectCaseFromStore = (record: CaseRecord) => {
+    setCaseMeta(record.metadata);
+    setAccounts(record.accounts || []);
+    setTransactions(record.transactions || []);
+    setEvaluationReport(record.evaluationReport || null);
+    setCurrentStep(record.transactions?.length > 0 ? 4 : 0);
+    setCompletedSteps(new Set([0, 1, 2, 3, 4, 5]));
   };
 
   const handleLock = () => {
@@ -85,6 +154,7 @@ export const App: React.FC = () => {
           currentCase={caseMeta}
           onResetToDemo={handleResetToDemo}
           onNewCase={handleNewCase}
+          onOpenCaseManager={() => setIsCaseManagerOpen(true)}
           onLock={handleLock}
         />
 
@@ -201,6 +271,15 @@ export const App: React.FC = () => {
         <footer className="bg-white border-t border-slate-200 py-4 text-center text-xs text-slate-400">
           执析宝 (LawFlow) · 执行律师银行流水智能分析与取证系统 · 维护于 GitHub & 部署于 Cloudflare Serverless
         </footer>
+
+        {/* Case Manager Modal */}
+        <CaseManagerModal
+          isOpen={isCaseManagerOpen}
+          onClose={() => setIsCaseManagerOpen(false)}
+          currentCaseId={caseMeta.id}
+          onSelectCase={handleSelectCaseFromStore}
+          onNewCase={handleNewCase}
+        />
       </div>
     </PasswordGate>
   );
