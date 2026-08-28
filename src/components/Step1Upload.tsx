@@ -3,6 +3,7 @@ import { UploadCloud, FileSpreadsheet, FileText, FileImage, CheckCircle2, ArrowR
 import { BankAccount, StandardTransaction } from '../types/transaction';
 import { parseExcelBankStatement } from '../parsers/excelParser';
 import { parsePdfWithBaiduCloud, getBaiduCredentials, saveBaiduCredentials, BaiduCredentials } from '../parsers/baiduCloudOcr';
+import { parsePdfWithAliyunEcs, DEFAULT_ECS_HOST } from '../parsers/aliyunEcsOcr';
 
 interface Step1Props {
   accounts: BankAccount[];
@@ -72,16 +73,24 @@ export const Step1Upload: React.FC<Step1Props> = ({
           newAccounts.push(account);
           newTransactions.push(...parsedTx);
         } else if (name.endsWith('.pdf') || name.endsWith('.png') || name.endsWith('.jpg') || name.endsWith('.jpeg') || name.endsWith('.webp') || name.endsWith('.bmp')) {
-          setOcrStatus(`正在调用百度智能云官方 AI 模型解析: ${file.name}...`);
-          const { account, transactions: parsedTx } = await parsePdfWithBaiduCloud(
-            file,
-            creds,
-            (status: string, prog: number) => {
+          let parsedResult;
+          try {
+            setOcrStatus(`正在通过阿里云 ECS 极速并发引擎解析: ${file.name}...`);
+            parsedResult = await parsePdfWithAliyunEcs(file, DEFAULT_ECS_HOST, (status: string, prog: number) => {
               setOcrStatus(`${status} (${Math.round(prog * 100)}%)`);
-            }
-          );
-          newAccounts.push(account);
-          newTransactions.push(...parsedTx);
+            });
+          } catch (ecsErr: any) {
+            console.warn('Aliyun ECS parse attempt failed, falling back to Baidu Cloud OCR:', ecsErr);
+            setOcrStatus(`正在切换至百度智能云官方备用通道解析: ${file.name}...`);
+            parsedResult = await parsePdfWithBaiduCloud(file, creds, (status: string, prog: number) => {
+              setOcrStatus(`${status} (${Math.round(prog * 100)}%)`);
+            });
+          }
+
+          if (parsedResult) {
+            newAccounts.push(parsedResult.account);
+            newTransactions.push(...parsedResult.transactions);
+          }
         } else {
           setErrorMessage(`不支持的文件格式: ${file.name}，请上传 Excel、CSV、PDF 或扫描图片。`);
         }
