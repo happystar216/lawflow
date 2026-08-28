@@ -1,9 +1,10 @@
-import React, { useState } from 'react';
-import { UploadCloud, FileSpreadsheet, FileText, FileImage, CheckCircle2, ArrowRight, ArrowLeft, Trash2, PlusCircle, AlertCircle, Scan, Cpu } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { UploadCloud, FileSpreadsheet, FileText, FileImage, CheckCircle2, ArrowRight, ArrowLeft, Trash2, PlusCircle, AlertCircle, Scan, ShieldCheck, Cloud, Key, Check } from 'lucide-react';
 import { BankAccount, StandardTransaction } from '../types/transaction';
 import { parseExcelBankStatement } from '../parsers/excelParser';
 import { parsePdfBankStatement } from '../parsers/pdfParser';
 import { parseImageBankStatementWithOcr } from '../parsers/ocrParser';
+import { parsePdfWithBaiduCloud, getBaiduCredentials, saveBaiduCredentials, BaiduCredentials } from '../parsers/baiduCloudOcr';
 
 interface Step1Props {
   accounts: BankAccount[];
@@ -24,8 +25,35 @@ export const Step1Upload: React.FC<Step1Props> = ({
   const [isProcessing, setIsProcessing] = useState(false);
   const [ocrStatus, setOcrStatus] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  
+  // Baidu Cloud OCR state
+  const [useBaiduCloud, setUseBaiduCloud] = useState<boolean>(true);
+  const [apiKey, setApiKey] = useState('');
+  const [secretKey, setSecretKey] = useState('');
+  const [isConfigOpen, setIsConfigOpen] = useState(false);
+  const [isSaved, setIsSaved] = useState(false);
+
+  useEffect(() => {
+    const creds = getBaiduCredentials();
+    if (creds) {
+      setApiKey(creds.apiKey);
+      setSecretKey(creds.secretKey);
+      setUseBaiduCloud(true);
+    }
+  }, []);
+
+  const handleSaveKeys = () => {
+    if (apiKey.trim() && secretKey.trim()) {
+      saveBaiduCredentials(apiKey.trim(), secretKey.trim());
+      setIsSaved(true);
+      setTimeout(() => setIsSaved(false), 2500);
+    }
+  };
 
   const handleFiles = async (files: FileList | File[]) => {
+    const fileList = Array.from(files);
+    if (fileList.length === 0) return;
+
     setIsProcessing(true);
     setErrorMessage(null);
     setOcrStatus(null);
@@ -33,28 +61,43 @@ export const Step1Upload: React.FC<Step1Props> = ({
     const newAccounts = [...accounts];
     const newTransactions = [...transactions];
 
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i];
+    for (let i = 0; i < fileList.length; i++) {
+      const file = fileList[i];
       const name = file.name.toLowerCase();
 
       try {
         if (name.endsWith('.xlsx') || name.endsWith('.xls') || name.endsWith('.csv')) {
-          setOcrStatus(`正在解析 Excel: ${file.name}...`);
+          setOcrStatus(`正在解析 Excel 文件: ${file.name}...`);
           const { account, transactions: parsedTx } = await parseExcelBankStatement(file);
           newAccounts.push(account);
           newTransactions.push(...parsedTx);
         } else if (name.endsWith('.pdf')) {
-          setOcrStatus(`正在加载 PDF: ${file.name}...`);
-          const { account, transactions: parsedTx } = await parsePdfBankStatement(
-            file,
-            (status, prog) => {
-              setOcrStatus(`${status} (${Math.round(prog * 100)}%)`);
-            }
-          );
-          newAccounts.push(account);
-          newTransactions.push(...parsedTx);
+          if (useBaiduCloud && apiKey.trim() && secretKey.trim()) {
+            setOcrStatus(`正在使用百度智能云高精 OCR 解析: ${file.name}...`);
+            const creds: BaiduCredentials = { apiKey: apiKey.trim(), secretKey: secretKey.trim() };
+            const { account, transactions: parsedTx } = await parsePdfWithBaiduCloud(
+              file,
+              creds,
+              (status, prog) => {
+                setOcrStatus(`${status} (${Math.round(prog * 100)}%)`);
+              }
+            );
+            newAccounts.push(account);
+            newTransactions.push(...parsedTx);
+          } else {
+            setOcrStatus(`正在加载本地 PDF 文件: ${file.name}...`);
+            const arrayBuffer = await file.arrayBuffer();
+            const { account, transactions: parsedTx } = await parsePdfBankStatement(
+              file.name,
+              arrayBuffer,
+              (status, prog) => {
+                setOcrStatus(`${status} (${Math.round(prog * 100)}%)`);
+              }
+            );
+            newAccounts.push(account);
+            newTransactions.push(...parsedTx);
+          }
         } else if (name.endsWith('.png') || name.endsWith('.jpg') || name.endsWith('.jpeg') || name.endsWith('.webp') || name.endsWith('.bmp')) {
-          // Trigger PaddleOCR for image
           const { account, transactions: parsedTx } = await parseImageBankStatementWithOcr(
             file,
             (status, prog) => {
@@ -67,7 +110,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
           setErrorMessage(`不支持的文件格式: ${file.name}，请上传 Excel、PDF 或扫描图片。`);
         }
       } catch (err: any) {
-        console.error('Error parsing file:', file.name, err);
+        console.error('Error processing file:', file.name, err);
         setErrorMessage(`解析文件 ${file.name} 失败: ${err.message || '格式无法识别'}`);
       }
     }
@@ -81,7 +124,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
     e.preventDefault();
     setIsDragging(false);
     if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      handleFiles(e.dataTransfer.files);
+      handleFiles(Array.from(e.dataTransfer.files));
     }
   };
 
@@ -99,15 +142,100 @@ export const Step1Upload: React.FC<Step1Props> = ({
           <span className="text-xs font-semibold uppercase tracking-wider text-blue-600 bg-blue-50 px-2.5 py-1 rounded-md">
             Step 1 / 6 证据上传
           </span>
-          <span className="inline-flex items-center space-x-1 px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 text-[11px] font-medium">
-            <Cpu className="w-3 h-3" />
-            <span>PaddleOCR 飞桨表格引擎已就绪</span>
-          </span>
+
+          <div className="flex items-center space-x-2">
+            <button
+              onClick={() => setIsConfigOpen(!isConfigOpen)}
+              className="inline-flex items-center space-x-1.5 px-3 py-1 rounded-full bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 text-xs font-medium transition"
+            >
+              <Cloud className="w-3.5 h-3.5 text-blue-600" />
+              <span>{apiKey && secretKey ? '百度智能云官方 OCR 已配置' : '配置百度智能云 OCR Key'}</span>
+            </button>
+
+            <span className="inline-flex items-center space-x-1 px-2.5 py-0.5 rounded-full bg-slate-50 text-slate-600 border border-slate-200 text-[11px] font-medium">
+              <ShieldCheck className="w-3 h-3 text-blue-600" />
+              <span>司法证据智能识别就绪</span>
+            </span>
+          </div>
         </div>
+
+        {/* Baidu Cloud OCR Config Box */}
+        {isConfigOpen && (
+          <div className="mt-4 p-5 rounded-2xl bg-gradient-to-br from-blue-50/70 to-indigo-50/40 border border-blue-100 text-xs space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center space-x-2 font-bold text-slate-800">
+                <Key className="w-4 h-4 text-blue-600" />
+                <span>百度智能云官方 OCR 密钥设置</span>
+              </div>
+              <a
+                href="https://console.bce.baidu.com/ai/#/ai/ocr/overview/index"
+                target="_blank"
+                rel="noreferrer"
+                className="text-blue-600 hover:underline font-medium text-[11px]"
+              >
+                前往百度云控制台获取 Key →
+              </a>
+            </div>
+
+            <p className="text-[11px] text-slate-500">
+              配置后，所有银行流水扫描件与复杂表格将直连<strong>百度官方最高精度 PaddleOCR 云集群</strong>，享受每月免费额度与高精度印章穿透。密钥仅保存在您的浏览器本地，绝不经过第三方服务器。
+            </p>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-[11px] font-semibold text-slate-700 mb-1">API Key:</label>
+                <input
+                  type="text"
+                  value={apiKey}
+                  onChange={e => setApiKey(e.target.value)}
+                  placeholder="如: nO1uD... (从百度云应用列表复制)"
+                  className="w-full px-3 py-2 rounded-lg border border-slate-300 text-xs focus:ring-2 focus:ring-blue-500 font-mono bg-white"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-semibold text-slate-700 mb-1">Secret Key:</label>
+                <input
+                  type="password"
+                  value={secretKey}
+                  onChange={e => setSecretKey(e.target.value)}
+                  placeholder="如: cY2eK... (从百度云应用列表复制)"
+                  className="w-full px-3 py-2 rounded-lg border border-slate-300 text-xs focus:ring-2 focus:ring-blue-500 font-mono bg-white"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between pt-2">
+              <label className="flex items-center space-x-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={useBaiduCloud}
+                  onChange={e => setUseBaiduCloud(e.target.checked)}
+                  className="rounded text-blue-600"
+                />
+                <span className="text-slate-700 font-medium">启用百度智能云高精度识别引擎</span>
+              </label>
+
+              <button
+                onClick={handleSaveKeys}
+                className="px-4 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-medium text-xs flex items-center space-x-1 shadow-sm transition"
+              >
+                {isSaved ? (
+                  <>
+                    <Check className="w-3.5 h-3.5" />
+                    <span>保存成功</span>
+                  </>
+                ) : (
+                  <span>保存并生效</span>
+                )}
+              </button>
+            </div>
+          </div>
+        )}
 
         <h2 className="text-xl font-bold text-slate-900 mt-2">多源异构银行流水批量拖拽与智能解析</h2>
         <p className="text-xs text-slate-500 mt-1">
-          支持工行、农行、中行、建行、招行等多家银行标准/非标 Excel、CSV、电子版 PDF 对账单，以及<strong>多页扫描件 PDF / 手机拍照图片 PaddleOCR 自动识别</strong>。
+          支持工行、农行、中行、建行、招行等多家银行标准/非标 Excel、CSV、电子版 PDF 对账单，以及<strong>多页扫描件 PDF / 纸质流水翻拍图像的高精度自动识别</strong>。
         </p>
 
         {/* Upload Zone */}
@@ -134,13 +262,13 @@ export const Step1Upload: React.FC<Step1Props> = ({
 
           <label className="mt-4 inline-block">
             <span className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-medium text-xs cursor-pointer shadow-sm transition">
-              {isProcessing ? '正在处理中...' : '选择电脑中的流水文件'}
+              {isProcessing ? '正在智能解析中...' : '选择电脑中的流水文件'}
             </span>
             <input
               type="file"
               multiple
               accept=".xlsx,.xls,.csv,.pdf,.png,.jpg,.jpeg,.webp,.bmp"
-              onChange={e => e.target.files && handleFiles(e.target.files)}
+              onChange={e => e.target.files && handleFiles(Array.from(e.target.files))}
               className="hidden"
             />
           </label>
@@ -176,7 +304,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
               type="file"
               multiple
               accept=".xlsx,.xls,.csv,.pdf,.png,.jpg,.jpeg,.webp,.bmp"
-              onChange={e => e.target.files && handleFiles(e.target.files)}
+              onChange={e => e.target.files && handleFiles(Array.from(e.target.files))}
               className="hidden"
             />
           </label>
@@ -208,8 +336,8 @@ export const Step1Upload: React.FC<Step1Props> = ({
                       <div className="text-xs font-bold text-slate-800 flex items-center space-x-1.5">
                         <span>{acc.bankName}</span>
                         {acc.fileType === 'ocr' && (
-                          <span className="px-1.5 py-0.2 rounded bg-purple-100 text-purple-700 text-[10px] font-bold">
-                            PaddleOCR识别
+                          <span className="px-1.5 py-0.2 rounded bg-purple-100 text-purple-700 text-[10px] font-medium">
+                            扫描件智能提取
                           </span>
                         )}
                       </div>
