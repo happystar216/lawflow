@@ -1,5 +1,5 @@
 import React from 'react';
-import { Scale, Cloud, RefreshCw, GitBranch, FolderOpen } from 'lucide-react';
+import { Scale, RefreshCw, FolderOpen } from 'lucide-react';
 import { CaseMetadata } from '../types/case';
 import { User } from '../types/user';
 import { UserMenu } from './UserMenu';
@@ -33,7 +33,7 @@ export const Header: React.FC<HeaderProps> = ({
                 执析宝 (LawFlow)
               </span>
               <span className="text-[10px] uppercase tracking-wider font-semibold px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-400 border border-blue-500/30">
-                CF Serverless
+                专业司法版
               </span>
             </div>
             <p className="text-xs text-slate-400">执行律师银行流水智能穿透与取证系统</p>
@@ -71,16 +71,6 @@ export const Header: React.FC<HeaderProps> = ({
             <RefreshCw className="w-3.5 h-3.5" />
             <span>新建案件</span>
           </button>
-
-          <a
-            href="https://github.com/happystar216/lawflow"
-            target="_blank"
-            rel="noreferrer"
-            className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition flex items-center space-x-1"
-            title="GitHub 源码仓库"
-          >
-            <GitBranch className="w-4 h-4" />
-          </a>
 
           {/* User Account Menu */}
           {currentUser && (

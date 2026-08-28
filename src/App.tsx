@@ -80,7 +80,6 @@ export const App: React.FC = () => {
           setCompletedSteps(new Set([0, 1, 2, 3, 4, 5]));
         }
       } else {
-        // Fresh clean case
         handleNewCase();
       }
     }
@@ -264,7 +263,7 @@ export const App: React.FC = () => {
       </main>
 
       <footer className="bg-white border-t border-slate-200 py-4 text-center text-xs text-slate-400">
-        执析宝 (LawFlow) · 执行律师银行流水智能分析与取证系统 · 维护于 GitHub & 部署于 Cloudflare Serverless
+        © 执析宝 (LawFlow) · 执行律师银行流水智能穿透与司法取证系统 · 本地沙箱加密运算
       </footer>
 
       {/* Case Manager Modal */}
