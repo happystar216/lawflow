@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { UploadCloud, FileSpreadsheet, FileText, FileImage, CheckCircle2, ArrowRight, ArrowLeft, Trash2, PlusCircle, AlertCircle, Scan } from 'lucide-react';
+import { UploadCloud, FileSpreadsheet, FileText, FileImage, CheckCircle2, ArrowRight, ArrowLeft, Trash2, PlusCircle, AlertCircle, Scan, Cpu } from 'lucide-react';
 import { BankAccount, StandardTransaction } from '../types/transaction';
 import { parseExcelBankStatement } from '../parsers/excelParser';
 import { parsePdfBankStatement } from '../parsers/pdfParser';
@@ -54,7 +54,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
           newAccounts.push(account);
           newTransactions.push(...parsedTx);
         } else if (name.endsWith('.png') || name.endsWith('.jpg') || name.endsWith('.jpeg') || name.endsWith('.webp') || name.endsWith('.bmp')) {
-          // Trigger OCR for image
+          // Trigger PaddleOCR for image
           const { account, transactions: parsedTx } = await parseImageBankStatementWithOcr(
             file,
             (status, prog) => {
@@ -95,12 +95,19 @@ export const Step1Upload: React.FC<Step1Props> = ({
     <div className="max-w-5xl mx-auto py-8 px-4 sm:px-6 space-y-6">
       {/* Step Header */}
       <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm p-6">
-        <span className="text-xs font-semibold uppercase tracking-wider text-blue-600 bg-blue-50 px-2.5 py-1 rounded-md">
-          Step 1 / 6 证据上传
-        </span>
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <span className="text-xs font-semibold uppercase tracking-wider text-blue-600 bg-blue-50 px-2.5 py-1 rounded-md">
+            Step 1 / 6 证据上传
+          </span>
+          <span className="inline-flex items-center space-x-1 px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 text-[11px] font-medium">
+            <Cpu className="w-3 h-3" />
+            <span>PaddleOCR 飞桨表格引擎已就绪</span>
+          </span>
+        </div>
+
         <h2 className="text-xl font-bold text-slate-900 mt-2">多源异构银行流水批量拖拽与智能解析</h2>
         <p className="text-xs text-slate-500 mt-1">
-          支持工行、农行、中行、建行、招行等多家银行标准/非标 Excel、CSV、电子版 PDF 对账单，以及<strong>多页扫描件 PDF / 手机拍照图片 OCR 自动识别</strong>。
+          支持工行、农行、中行、建行、招行等多家银行标准/非标 Excel、CSV、电子版 PDF 对账单，以及<strong>多页扫描件 PDF / 手机拍照图片 PaddleOCR 自动识别</strong>。
         </p>
 
         {/* Upload Zone */}
@@ -202,7 +209,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
                         <span>{acc.bankName}</span>
                         {acc.fileType === 'ocr' && (
                           <span className="px-1.5 py-0.2 rounded bg-purple-100 text-purple-700 text-[10px] font-bold">
-                            OCR识别
+                            PaddleOCR识别
                           </span>
                         )}
                       </div>
