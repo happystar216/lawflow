@@ -10,7 +10,7 @@ export interface OcrProgressInfo {
 
 export type OcrProgressCallback = (info: OcrProgressInfo) => void;
 
-export const DEFAULT_ECS_HOST = 'https://registered-armor-lbs-married.trycloudflare.com';
+export const DEFAULT_ECS_HOST = '';
 
 /**
  * Real-time SSE Stream Consumer:
@@ -27,7 +27,7 @@ export async function parsePdfWithAliyunEcs(
   const formData = new FormData();
   formData.append('file', file);
 
-  const cleanHost = ecsHost.replace(/\/+$/, '');
+  const cleanHost = ecsHost ? ecsHost.replace(/\/+$/, '') : '';
   const url = `${cleanHost}/api/parse-bank-statement-stream`;
 
   if (onProgress) {
