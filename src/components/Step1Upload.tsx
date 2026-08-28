@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { UploadCloud, FileSpreadsheet, FileText, FileImage, CheckCircle2, ArrowRight, ArrowLeft, Trash2, PlusCircle, AlertCircle, ShieldCheck, Sparkles } from 'lucide-react';
 import { BankAccount, StandardTransaction } from '../types/transaction';
 import { parseExcelBankStatement } from '../parsers/excelParser';
-import { parsePdfWithAliyunEcs, DEFAULT_ECS_HOST } from '../parsers/aliyunEcsOcr';
+import { parsePdfWithAliyunEcs, DEFAULT_ECS_HOST, OcrProgressInfo } from '../parsers/aliyunEcsOcr';
 
 interface Step1Props {
   accounts: BankAccount[];
@@ -21,7 +21,8 @@ export const Step1Upload: React.FC<Step1Props> = ({
 }) => {
   const [isDragging, setIsDragging] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
-  const [ocrStatus, setOcrStatus] = useState<string | null>(null);
+  const [progressInfo, setProgressInfo] = useState<OcrProgressInfo | null>(null);
+  const [statusText, setStatusText] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const handleFiles = async (files: FileList | File[]) => {
@@ -30,7 +31,8 @@ export const Step1Upload: React.FC<Step1Props> = ({
 
     setIsProcessing(true);
     setErrorMessage(null);
-    setOcrStatus(null);
+    setProgressInfo(null);
+    setStatusText(null);
 
     const newAccounts = [...accounts];
     const newTransactions = [...transactions];
@@ -41,17 +43,17 @@ export const Step1Upload: React.FC<Step1Props> = ({
 
       try {
         if (name.endsWith('.xlsx') || name.endsWith('.xls') || name.endsWith('.csv')) {
-          setOcrStatus(`正在解析结构化电子流水: ${file.name}...`);
+          setStatusText(`正在解析结构化电子流水: ${file.name}...`);
           const { account, transactions: parsedTx } = await parseExcelBankStatement(file);
           newAccounts.push(account);
           newTransactions.push(...parsedTx);
         } else if (name.endsWith('.pdf') || name.endsWith('.png') || name.endsWith('.jpg') || name.endsWith('.jpeg') || name.endsWith('.webp') || name.endsWith('.bmp')) {
-          setOcrStatus(`正在智能解析流水文件: ${file.name}...`);
           const { account, transactions: parsedTx } = await parsePdfWithAliyunEcs(
             file,
             DEFAULT_ECS_HOST,
-            (status: string) => {
-              setOcrStatus(status);
+            (info: OcrProgressInfo) => {
+              setProgressInfo(info);
+              if (info.statusText) setStatusText(info.statusText);
             }
           );
           newAccounts.push(account);
@@ -66,7 +68,8 @@ export const Step1Upload: React.FC<Step1Props> = ({
     }
 
     setIsProcessing(false);
-    setOcrStatus(null);
+    setProgressInfo(null);
+    setStatusText(null);
     onDataUpdated(newAccounts, newTransactions);
   };
 
@@ -110,7 +113,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
           上传银行流水证据文件
         </h1>
         <p className="text-sm text-slate-500 mt-1">
-          支持各大商业银行导出的 Excel/CSV 电子流水、PDF 扫描件及调查令回执照片。系统将自动进行文字提取、印章滤除与平账对账。
+          支持各大商业银行导出的 Excel/CSV 电子流水、PDF 扫描件及调查令回执照片。系统支持 100+ 页长卷扫描件全自动印章穿透与实时逐页对账。
         </p>
       </div>
 
@@ -149,19 +152,43 @@ export const Step1Upload: React.FC<Step1Props> = ({
             </label>
             <span className="text-slate-600 text-base"> 或直接拖拽文件到这里</span>
             <p className="text-xs text-slate-400 mt-1">
-              支持格式：.xlsx, .xls, .csv, .pdf, .jpg, .png, .jpeg（支持 100+ 页长卷扫描件）
+              支持格式：.xlsx, .xls, .csv, .pdf, .jpg, .png, .jpeg（单文件支持 100+ 页扫描件）
             </p>
           </div>
 
           {isProcessing && (
-            <div className="w-full max-w-md bg-blue-50/80 border border-blue-200 rounded-xl p-4 text-center space-y-2 mt-4 shadow-sm">
-              <div className="flex items-center justify-center space-x-2 text-blue-700 font-medium text-sm">
-                <div className="w-4 h-4 border-2 border-blue-600 border-t-transparent rounded-full animate-spin" />
-                <span>{ocrStatus || '正在进行流水识别与智能平账分析...'}</span>
+            <div className="w-full max-w-lg bg-blue-50/90 border border-blue-200 rounded-2xl p-5 text-left space-y-3 mt-4 shadow-sm">
+              <div className="flex items-center justify-between text-blue-900 font-semibold text-sm">
+                <div className="flex items-center space-x-2">
+                  <div className="w-4 h-4 border-2 border-blue-600 border-t-transparent rounded-full animate-spin flex-shrink-0" />
+                  <span className="truncate">{statusText || '正在初始化智能识别引擎...'}</span>
+                </div>
+                {progressInfo && progressInfo.totalPages > 0 && (
+                  <span className="text-xs font-mono font-bold text-blue-700 bg-blue-100/80 px-2 py-0.5 rounded-full flex-shrink-0 ml-2">
+                    {progressInfo.percent}%
+                  </span>
+                )}
               </div>
-              <p className="text-xs text-slate-500">
-                正在执行文字提取、印章穿透与交易对账，多页扫描件请稍候...
-              </p>
+
+              {/* Real-time Streaming Progress Bar */}
+              {progressInfo && progressInfo.totalPages > 0 && (
+                <div className="space-y-1.5">
+                  <div className="w-full h-2.5 bg-blue-200/60 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-gradient-to-r from-blue-600 to-indigo-600 rounded-full transition-all duration-300 ease-out"
+                      style={{ width: `${Math.max(progressInfo.percent, 3)}%` }}
+                    />
+                  </div>
+                  <div className="flex justify-between text-[11px] text-slate-500 font-medium pt-0.5">
+                    <span>
+                      已完成：<strong>{progressInfo.currentPage}</strong> / {progressInfo.totalPages} 页
+                    </span>
+                    <span>
+                      已提取有效明细：<strong className="text-emerald-700">{progressInfo.totalTransactions}</strong> 笔
+                    </span>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
