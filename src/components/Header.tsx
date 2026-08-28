@@ -32,8 +32,8 @@ export const Header: React.FC<HeaderProps> = ({
               <span className="font-bold text-lg tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-white via-slate-100 to-slate-300">
                 执析宝 (LawFlow)
               </span>
-              <span className="text-[10px] uppercase tracking-wider font-semibold px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-400 border border-blue-500/30">
-                专业司法版
+              <span className="text-[10px] uppercase tracking-wider font-semibold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                v3.0 Qwen3.8-Flash 极速版
               </span>
             </div>
             <p className="text-xs text-slate-400">执行律师银行流水智能穿透与取证系统</p>
