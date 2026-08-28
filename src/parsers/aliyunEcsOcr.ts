@@ -1,6 +1,6 @@
 import { BankAccount, StandardTransaction } from '../types/transaction';
 
-export type OcrProgressCallback = (status: string, progress: number) => void;
+export type OcrProgressCallback = (status: string) => void;
 
 export const DEFAULT_ECS_HOST = 'https://registered-armor-lbs-married.trycloudflare.com';
 
@@ -12,7 +12,7 @@ export async function parsePdfWithAliyunEcs(
   account: BankAccount;
   transactions: StandardTransaction[];
 }> {
-  if (onProgress) onProgress('正在将流水文件上传至阿里云高并发 PaddleOCR 引擎...', 0.15);
+  if (onProgress) onProgress('正在上传并分析银行流水文件...');
 
   const formData = new FormData();
   formData.append('file', file);
@@ -20,7 +20,7 @@ export async function parsePdfWithAliyunEcs(
   const cleanHost = ecsHost.replace(/\/+$/, '');
   const url = `${cleanHost}/api/parse-bank-statement`;
 
-  if (onProgress) onProgress('阿里云服务器正在进行多进程并行切页与印章穿透识别...', 0.4);
+  if (onProgress) onProgress('AI 引擎正在逐页提取交易明细与印章穿透...');
 
   const resp = await fetch(url, {
     method: 'POST',
@@ -29,17 +29,17 @@ export async function parsePdfWithAliyunEcs(
 
   if (!resp.ok) {
     const errText = await resp.text();
-    throw new Error(`阿里云 OCR 解析失败 (${resp.status}): ${errText || '请检查服务器或网络'}`);
+    throw new Error(`流水解析失败 (${resp.status}): ${errText || '请检查文件格式或网络连接'}`);
   }
 
-  if (onProgress) onProgress('正在同步结构化流水并校验平账...', 0.9);
+  if (onProgress) onProgress('正在完成数据结构化与平账校验...');
 
   const data = await resp.json();
   if (data.status !== 'success' || !data.account) {
-    throw new Error(data.detail || data.error || '识别结果异常');
+    throw new Error(data.detail || data.error || '流水数据提取异常');
   }
 
-  if (onProgress) onProgress(`阿里云极速识别完成！共提取 ${data.transactions.length} 笔证据流水`, 1.0);
+  if (onProgress) onProgress(`解析完成，共提取 ${data.transactions.length} 笔交易记录`);
 
   return {
     account: data.account,

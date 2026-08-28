@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { UploadCloud, FileSpreadsheet, FileText, FileImage, CheckCircle2, ArrowRight, ArrowLeft, Trash2, PlusCircle, AlertCircle, Server, ShieldCheck } from 'lucide-react';
+import { UploadCloud, FileSpreadsheet, FileText, FileImage, CheckCircle2, ArrowRight, ArrowLeft, Trash2, PlusCircle, AlertCircle, ShieldCheck, Sparkles } from 'lucide-react';
 import { BankAccount, StandardTransaction } from '../types/transaction';
 import { parseExcelBankStatement } from '../parsers/excelParser';
 import { parsePdfWithAliyunEcs, DEFAULT_ECS_HOST } from '../parsers/aliyunEcsOcr';
@@ -41,17 +41,17 @@ export const Step1Upload: React.FC<Step1Props> = ({
 
       try {
         if (name.endsWith('.xlsx') || name.endsWith('.xls') || name.endsWith('.csv')) {
-          setOcrStatus(`正在解析 Excel 结构化流水: ${file.name}...`);
+          setOcrStatus(`正在解析结构化电子流水: ${file.name}...`);
           const { account, transactions: parsedTx } = await parseExcelBankStatement(file);
           newAccounts.push(account);
           newTransactions.push(...parsedTx);
         } else if (name.endsWith('.pdf') || name.endsWith('.png') || name.endsWith('.jpg') || name.endsWith('.jpeg') || name.endsWith('.webp') || name.endsWith('.bmp')) {
-          setOcrStatus(`正在通过阿里云 ECS 专属引擎解析: ${file.name}...`);
+          setOcrStatus(`正在智能解析流水文件: ${file.name}...`);
           const { account, transactions: parsedTx } = await parsePdfWithAliyunEcs(
             file,
             DEFAULT_ECS_HOST,
-            (status: string, prog: number) => {
-              setOcrStatus(`${status} (${Math.round(prog * 100)}%)`);
+            (status: string) => {
+              setOcrStatus(status);
             }
           );
           newAccounts.push(account);
@@ -61,7 +61,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
         }
       } catch (err: any) {
         console.error('Error processing file:', file.name, err);
-        setErrorMessage(`解析文件 ${file.name} 失败: ${err.message || '格式无法识别'}`);
+        setErrorMessage(`解析文件 ${file.name} 失败: ${err.message || '文件格式无法识别或内容损坏'}`);
       }
     }
 
@@ -94,14 +94,14 @@ export const Step1Upload: React.FC<Step1Props> = ({
           </span>
 
           <div className="flex items-center space-x-2">
-            <span className="inline-flex items-center space-x-1.5 px-3 py-1 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 text-xs font-medium">
-              <Server className="w-3.5 h-3.5 text-emerald-600" />
-              <span>阿里云专属高精 PaddleOCR 引擎 (114.55.73.208)</span>
+            <span className="inline-flex items-center space-x-1.5 px-3 py-1 rounded-full bg-blue-50 text-blue-700 border border-blue-200 text-xs font-medium">
+              <Sparkles className="w-3.5 h-3.5 text-blue-600" />
+              <span>AI 银行流水智能穿透引擎已就绪</span>
             </span>
 
-            <span className="inline-flex items-center space-x-1 px-2.5 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200 text-[11px] font-medium">
-              <ShieldCheck className="w-3 h-3 text-blue-600" />
-              <span>司法印章自动穿透</span>
+            <span className="inline-flex items-center space-x-1 px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 text-[11px] font-medium">
+              <ShieldCheck className="w-3 h-3 text-emerald-600" />
+              <span>司法印章自动滤除</span>
             </span>
           </div>
         </div>
@@ -110,7 +110,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
           上传银行流水证据文件
         </h1>
         <p className="text-sm text-slate-500 mt-1">
-          支持各大商业银行导出的 Excel/CSV 电子流水、PDF 扫描件及调查令回执照片。由专属阿里云服务器进行高并发多进程解析与智能平账。
+          支持各大商业银行导出的 Excel/CSV 电子流水、PDF 扫描件及调查令回执照片。系统将自动进行文字提取、印章滤除与平账对账。
         </p>
       </div>
 
@@ -149,18 +149,18 @@ export const Step1Upload: React.FC<Step1Props> = ({
             </label>
             <span className="text-slate-600 text-base"> 或直接拖拽文件到这里</span>
             <p className="text-xs text-slate-400 mt-1">
-              支持格式：.xlsx, .xls, .csv, .pdf, .jpg, .png, .jpeg（单文件支持 100+ 页扫描件）
+              支持格式：.xlsx, .xls, .csv, .pdf, .jpg, .png, .jpeg（支持 100+ 页长卷扫描件）
             </p>
           </div>
 
           {isProcessing && (
-            <div className="w-full max-w-md bg-blue-50 border border-blue-200 rounded-xl p-4 text-center space-y-2 mt-4">
+            <div className="w-full max-w-md bg-blue-50/80 border border-blue-200 rounded-xl p-4 text-center space-y-2 mt-4 shadow-sm">
               <div className="flex items-center justify-center space-x-2 text-blue-700 font-medium text-sm">
                 <div className="w-4 h-4 border-2 border-blue-600 border-t-transparent rounded-full animate-spin" />
-                <span>{ocrStatus || '正在分析文件结构并执行 OCR 解析...'}</span>
+                <span>{ocrStatus || '正在进行流水识别与智能平账分析...'}</span>
               </div>
               <p className="text-xs text-slate-500">
-                阿里云服务器正在进行多进程并发文字提取、印章滤除与交易对账，请稍候...
+                正在执行文字提取、印章穿透与交易对账，多页扫描件请稍候...
               </p>
             </div>
           )}
