@@ -1,8 +1,7 @@
-import React, { useState, useEffect } from 'react';
-import { UploadCloud, FileSpreadsheet, FileText, FileImage, CheckCircle2, ArrowRight, ArrowLeft, Trash2, PlusCircle, AlertCircle, Scan, ShieldCheck, Cloud, Key, Check } from 'lucide-react';
+import React, { useState } from 'react';
+import { UploadCloud, FileSpreadsheet, FileText, FileImage, CheckCircle2, ArrowRight, ArrowLeft, Trash2, PlusCircle, AlertCircle, Server, ShieldCheck } from 'lucide-react';
 import { BankAccount, StandardTransaction } from '../types/transaction';
 import { parseExcelBankStatement } from '../parsers/excelParser';
-import { parsePdfWithBaiduCloud, getBaiduCredentials, saveBaiduCredentials, BaiduCredentials } from '../parsers/baiduCloudOcr';
 import { parsePdfWithAliyunEcs, DEFAULT_ECS_HOST } from '../parsers/aliyunEcsOcr';
 
 interface Step1Props {
@@ -24,28 +23,6 @@ export const Step1Upload: React.FC<Step1Props> = ({
   const [isProcessing, setIsProcessing] = useState(false);
   const [ocrStatus, setOcrStatus] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  
-  // Baidu Cloud OCR credentials state
-  const [apiKey, setApiKey] = useState('');
-  const [secretKey, setSecretKey] = useState('');
-  const [isConfigOpen, setIsConfigOpen] = useState(false);
-  const [isSaved, setIsSaved] = useState(false);
-
-  useEffect(() => {
-    const creds = getBaiduCredentials();
-    if (creds) {
-      setApiKey(creds.apiKey);
-      setSecretKey(creds.secretKey);
-    }
-  }, []);
-
-  const handleSaveKeys = () => {
-    if (apiKey.trim() && secretKey.trim()) {
-      saveBaiduCredentials(apiKey.trim(), secretKey.trim());
-      setIsSaved(true);
-      setTimeout(() => setIsSaved(false), 2000);
-    }
-  };
 
   const handleFiles = async (files: FileList | File[]) => {
     const fileList = Array.from(files);
@@ -57,10 +34,6 @@ export const Step1Upload: React.FC<Step1Props> = ({
 
     const newAccounts = [...accounts];
     const newTransactions = [...transactions];
-    const creds: BaiduCredentials = {
-      apiKey: apiKey.trim(),
-      secretKey: secretKey.trim()
-    };
 
     for (let i = 0; i < fileList.length; i++) {
       const file = fileList[i];
@@ -73,24 +46,16 @@ export const Step1Upload: React.FC<Step1Props> = ({
           newAccounts.push(account);
           newTransactions.push(...parsedTx);
         } else if (name.endsWith('.pdf') || name.endsWith('.png') || name.endsWith('.jpg') || name.endsWith('.jpeg') || name.endsWith('.webp') || name.endsWith('.bmp')) {
-          let parsedResult;
-          try {
-            setOcrStatus(`正在通过阿里云 ECS 极速并发引擎解析: ${file.name}...`);
-            parsedResult = await parsePdfWithAliyunEcs(file, DEFAULT_ECS_HOST, (status: string, prog: number) => {
+          setOcrStatus(`正在通过阿里云 ECS 专属引擎解析: ${file.name}...`);
+          const { account, transactions: parsedTx } = await parsePdfWithAliyunEcs(
+            file,
+            DEFAULT_ECS_HOST,
+            (status: string, prog: number) => {
               setOcrStatus(`${status} (${Math.round(prog * 100)}%)`);
-            });
-          } catch (ecsErr: any) {
-            console.warn('Aliyun ECS parse attempt failed, falling back to Baidu Cloud OCR:', ecsErr);
-            setOcrStatus(`正在切换至百度智能云官方备用通道解析: ${file.name}...`);
-            parsedResult = await parsePdfWithBaiduCloud(file, creds, (status: string, prog: number) => {
-              setOcrStatus(`${status} (${Math.round(prog * 100)}%)`);
-            });
-          }
-
-          if (parsedResult) {
-            newAccounts.push(parsedResult.account);
-            newTransactions.push(...parsedResult.transactions);
-          }
+            }
+          );
+          newAccounts.push(account);
+          newTransactions.push(...parsedTx);
         } else {
           setErrorMessage(`不支持的文件格式: ${file.name}，请上传 Excel、CSV、PDF 或扫描图片。`);
         }
@@ -129,256 +94,181 @@ export const Step1Upload: React.FC<Step1Props> = ({
           </span>
 
           <div className="flex items-center space-x-2">
-            <button
-              onClick={() => setIsConfigOpen(!isConfigOpen)}
-              className="inline-flex items-center space-x-1.5 px-3 py-1 rounded-full bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 text-xs font-medium transition"
-            >
-              <Cloud className="w-3.5 h-3.5 text-blue-600" />
-              <span>{apiKey && secretKey ? '百度智能云官方 OCR 已就绪' : '配置百度云 Key'}</span>
-            </button>
+            <span className="inline-flex items-center space-x-1.5 px-3 py-1 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 text-xs font-medium">
+              <Server className="w-3.5 h-3.5 text-emerald-600" />
+              <span>阿里云专属高精 PaddleOCR 引擎 (114.55.73.208)</span>
+            </span>
 
-            <span className="inline-flex items-center space-x-1 px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 text-[11px] font-medium">
-              <ShieldCheck className="w-3 h-3 text-emerald-600" />
-              <span>百度智能云官方高精引擎</span>
+            <span className="inline-flex items-center space-x-1 px-2.5 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200 text-[11px] font-medium">
+              <ShieldCheck className="w-3 h-3 text-blue-600" />
+              <span>司法印章自动穿透</span>
             </span>
           </div>
         </div>
 
-        {/* Baidu Cloud Config Modal / Drawer */}
-        {isConfigOpen && (
-          <div className="mt-4 p-5 rounded-2xl bg-gradient-to-br from-blue-50/70 to-indigo-50/40 border border-blue-100 text-xs space-y-4">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center space-x-2 font-bold text-slate-800">
-                <Key className="w-4 h-4 text-blue-600" />
-                <span>百度智能云官方 OCR 密钥设置</span>
-              </div>
-              <a
-                href="https://console.bce.baidu.com/ai/#/ai/ocr/overview/index"
-                target="_blank"
-                rel="noreferrer"
-                className="text-blue-600 hover:underline font-medium text-[11px]"
-              >
-                前往百度云控制台获取 Key →
-              </a>
-            </div>
-
-            <p className="text-[11px] text-slate-500">
-              系统直连<strong>百度官方最高精度 PaddleOCR 云集群</strong>，享受每月免费额度与高精度印章穿透。密钥保存在您的浏览器本地，绝不泄露给任何第三方。
-            </p>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              <div>
-                <label className="block text-[11px] font-semibold text-slate-700 mb-1">API Key:</label>
-                <input
-                  type="text"
-                  value={apiKey}
-                  onChange={e => setApiKey(e.target.value)}
-                  placeholder="从百度云应用列表复制"
-                  className="w-full px-3 py-2 rounded-lg border border-slate-300 text-xs focus:ring-2 focus:ring-blue-500 font-mono bg-white"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-semibold text-slate-700 mb-1">Secret Key:</label>
-                <input
-                  type="password"
-                  value={secretKey}
-                  onChange={e => setSecretKey(e.target.value)}
-                  placeholder="从百度云应用列表复制"
-                  className="w-full px-3 py-2 rounded-lg border border-slate-300 text-xs focus:ring-2 focus:ring-blue-500 font-mono bg-white"
-                />
-              </div>
-            </div>
-
-            <div className="flex justify-end pt-2">
-              <button
-                onClick={handleSaveKeys}
-                className="px-4 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-medium text-xs flex items-center space-x-1 shadow-sm transition"
-              >
-                {isSaved ? (
-                  <>
-                    <Check className="w-3.5 h-3.5" />
-                    <span>保存成功</span>
-                  </>
-                ) : (
-                  <span>保存配置</span>
-                )}
-              </button>
-            </div>
-          </div>
-        )}
-
-        <h2 className="text-xl font-bold text-slate-900 mt-2">多源异构银行流水批量拖拽与智能解析</h2>
-        <p className="text-xs text-slate-500 mt-1">
-          支持工行、农行、中行、建行、光大、招行等多家银行标准/非标 Excel、CSV 电子对账单，以及<strong>多页扫描件 PDF / 纸质流水翻拍图像的百度官方高精度自动识别</strong>。
+        <h1 className="text-2xl font-bold text-slate-900 mt-3">
+          上传银行流水证据文件
+        </h1>
+        <p className="text-sm text-slate-500 mt-1">
+          支持各大商业银行导出的 Excel/CSV 电子流水、PDF 扫描件及调查令回执照片。由专属阿里云服务器进行高并发多进程解析与智能平账。
         </p>
+      </div>
 
-        {/* Upload Zone */}
-        <div
-          onDragOver={e => { e.preventDefault(); setIsDragging(true); }}
-          onDragLeave={() => setIsDragging(false)}
-          onDrop={handleDrop}
-          className={`mt-6 border-2 border-dashed rounded-2xl p-8 text-center transition-all ${
-            isDragging
-              ? 'border-blue-500 bg-blue-50/50'
-              : 'border-slate-300 hover:border-blue-400 bg-slate-50/50'
-          }`}
-        >
-          <div className="w-14 h-14 rounded-2xl bg-blue-100/70 text-blue-600 flex items-center justify-center mx-auto mb-4">
-            <UploadCloud className="w-7 h-7" />
+      {/* Upload Zone */}
+      <div
+        onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+        onDragLeave={() => setIsDragging(false)}
+        onDrop={handleDrop}
+        className={`relative border-2 border-dashed rounded-2xl p-10 text-center transition-all bg-white shadow-sm ${
+          isDragging
+            ? 'border-blue-500 bg-blue-50/50 scale-[1.005]'
+            : 'border-slate-300 hover:border-slate-400'
+        }`}
+      >
+        <input
+          type="file"
+          id="file-upload"
+          multiple
+          accept=".xlsx,.xls,.csv,.pdf,.png,.jpg,.jpeg,.webp,.bmp"
+          onChange={(e) => e.target.files && handleFiles(e.target.files)}
+          className="hidden"
+          disabled={isProcessing}
+        />
+
+        <div className="flex flex-col items-center justify-center space-y-4">
+          <div className={`p-4 rounded-full transition-transform ${isDragging ? 'bg-blue-100 scale-110' : 'bg-slate-100'}`}>
+            <UploadCloud className={`w-10 h-10 ${isDragging ? 'text-blue-600' : 'text-slate-500'}`} />
           </div>
 
-          <h3 className="text-sm font-semibold text-slate-800">
-            拖拽银行流水文件至此，或点击选择文件
-          </h3>
-          <p className="text-xs text-slate-400 mt-1">
-            支持 .xlsx / .xls / .csv / .pdf (电子版及扫描件) / 扫描图片 (.png, .jpg)
-          </p>
+          <div className="space-y-1">
+            <label
+              htmlFor="file-upload"
+              className="text-base font-semibold text-blue-600 hover:text-blue-700 cursor-pointer hover:underline"
+            >
+              点击选择文件
+            </label>
+            <span className="text-slate-600 text-base"> 或直接拖拽文件到这里</span>
+            <p className="text-xs text-slate-400 mt-1">
+              支持格式：.xlsx, .xls, .csv, .pdf, .jpg, .png, .jpeg（单文件支持 100+ 页扫描件）
+            </p>
+          </div>
 
-          <label className="mt-4 inline-block">
-            <span className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-medium text-xs cursor-pointer shadow-sm transition">
-              {isProcessing ? '正在智能解析中...' : '选择电脑中的流水文件'}
-            </span>
-            <input
-              type="file"
-              multiple
-              accept=".xlsx,.xls,.csv,.pdf,.png,.jpg,.jpeg,.webp,.bmp"
-              onChange={e => e.target.files && handleFiles(Array.from(e.target.files))}
-              className="hidden"
-            />
-          </label>
+          {isProcessing && (
+            <div className="w-full max-w-md bg-blue-50 border border-blue-200 rounded-xl p-4 text-center space-y-2 mt-4">
+              <div className="flex items-center justify-center space-x-2 text-blue-700 font-medium text-sm">
+                <div className="w-4 h-4 border-2 border-blue-600 border-t-transparent rounded-full animate-spin" />
+                <span>{ocrStatus || '正在分析文件结构并执行 OCR 解析...'}</span>
+              </div>
+              <p className="text-xs text-slate-500">
+                阿里云服务器正在进行多进程并发文字提取、印章滤除与交易对账，请稍候...
+              </p>
+            </div>
+          )}
 
-          {ocrStatus && (
-            <div className="mt-4 inline-flex items-center space-x-2 px-3.5 py-1.5 rounded-full bg-blue-50 border border-blue-200 text-xs text-blue-700 animate-pulse">
-              <Scan className="w-3.5 h-3.5" />
-              <span>{ocrStatus}</span>
+          {errorMessage && (
+            <div className="flex items-center space-x-2 text-red-600 bg-red-50 border border-red-200 px-4 py-2 rounded-xl text-xs mt-2">
+              <AlertCircle className="w-4 h-4 flex-shrink-0" />
+              <span>{errorMessage}</span>
             </div>
           )}
         </div>
-
-        {errorMessage && (
-          <div className="mt-4 p-3 rounded-lg bg-rose-50 border border-rose-200 text-xs text-rose-700 flex items-center space-x-2">
-            <AlertCircle className="w-4 h-4 flex-shrink-0" />
-            <span>{errorMessage}</span>
-          </div>
-        )}
       </div>
 
-      {/* Uploaded Accounts Summary */}
-      <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm p-6">
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="text-sm font-bold text-slate-800 flex items-center space-x-2">
-            <span>已成功解析的银行卡账户</span>
-            <span className="text-xs font-normal text-slate-400">（共 {accounts.length} 个账户，{transactions.length} 笔交易）</span>
-          </h3>
-
-          <label className="cursor-pointer text-xs font-medium text-blue-600 hover:text-blue-700 flex items-center space-x-1">
-            <PlusCircle className="w-3.5 h-3.5" />
-            <span>追加新流水文件</span>
-            <input
-              type="file"
-              multiple
-              accept=".xlsx,.xls,.csv,.pdf,.png,.jpg,.jpeg,.webp,.bmp"
-              onChange={e => e.target.files && handleFiles(Array.from(e.target.files))}
-              className="hidden"
-            />
-          </label>
-        </div>
-
-        {accounts.length === 0 ? (
-          <div className="text-center py-10 text-slate-400 text-xs">
-            暂无已导入的流水文件，请从上方拖拽上传。
+      {/* Uploaded Accounts List */}
+      {accounts.length > 0 && (
+        <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm p-6 space-y-4">
+          <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+            <div className="flex items-center space-x-2">
+              <CheckCircle2 className="w-5 h-5 text-emerald-500" />
+              <h2 className="text-base font-semibold text-slate-900">
+                已成功导入账户 ({accounts.length})
+              </h2>
+            </div>
+            <span className="text-xs text-slate-500">
+              共计 {transactions.length} 笔流水记录
+            </span>
           </div>
-        ) : (
+
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {accounts.map(acc => (
+            {accounts.map((acc) => (
               <div
                 key={acc.accountNumber}
-                className="rounded-xl border border-slate-200/80 p-4 bg-slate-50/50 hover:bg-slate-50 transition space-y-3 relative group"
+                className="flex items-start justify-between p-4 rounded-xl border border-slate-200 hover:border-slate-300 bg-slate-50/50 hover:bg-slate-50 transition"
               >
-                <div className="flex items-start justify-between">
-                  <div className="flex items-center space-x-2.5">
-                    <div className="w-8 h-8 rounded-lg bg-blue-100 text-blue-700 flex items-center justify-center">
-                      {acc.fileType === 'pdf' ? (
-                        <FileText className="w-4 h-4" />
-                      ) : acc.fileType === 'ocr' ? (
-                        <FileImage className="w-4 h-4 text-purple-600" />
-                      ) : (
-                        <FileSpreadsheet className="w-4 h-4" />
-                      )}
+                <div className="flex items-start space-x-3">
+                  <div className="p-2.5 rounded-lg bg-blue-100/70 text-blue-700 mt-0.5">
+                    {acc.fileType === 'excel' || acc.fileType === 'csv' ? (
+                      <FileSpreadsheet className="w-5 h-5" />
+                    ) : acc.fileType === 'pdf' ? (
+                      <FileText className="w-5 h-5" />
+                    ) : (
+                      <FileImage className="w-5 h-5" />
+                    )}
+                  </div>
+                  <div>
+                    <div className="flex items-center space-x-2">
+                      <span className="font-semibold text-slate-900 text-sm">{acc.bankName}</span>
+                      <span className="text-xs px-2 py-0.5 rounded-full bg-slate-200/70 text-slate-700 font-mono">
+                        {acc.accountNumber.slice(-4) ? `...${acc.accountNumber.slice(-4)}` : acc.accountNumber}
+                      </span>
                     </div>
-                    <div>
-                      <div className="text-xs font-bold text-slate-800 flex items-center space-x-1.5">
-                        <span>{acc.bankName}</span>
-                        {acc.fileType === 'ocr' && (
-                          <span className="px-1.5 py-0.2 rounded bg-purple-100 text-purple-700 text-[10px] font-medium">
-                            百度云高精识别
-                          </span>
-                        )}
-                      </div>
-                      <div className="text-[11px] text-slate-500 font-mono">{acc.accountNumber}</div>
+                    <p className="text-xs text-slate-600 mt-1">
+                      户名: <span className="font-medium">{acc.accountName}</span> | 来源文件: {acc.fileName}
+                    </p>
+                    <div className="flex items-center space-x-3 mt-2 text-[11px] text-slate-500 font-mono">
+                      <span>入: <strong className="text-emerald-600 font-normal">¥{acc.totalIn.toLocaleString()}</strong></span>
+                      <span>出: <strong className="text-rose-600 font-normal">¥{acc.totalOut.toLocaleString()}</strong></span>
+                      <span>流水: {acc.transactionCount} 笔</span>
                     </div>
                   </div>
-
-                  <button
-                    onClick={() => handleRemoveAccount(acc.accountNumber)}
-                    className="opacity-0 group-hover:opacity-100 p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition"
-                    title="移除该账户"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
                 </div>
 
-                <div className="grid grid-cols-3 gap-2 pt-2 border-t border-slate-200/60 text-[11px]">
-                  <div>
-                    <span className="text-slate-400 block">交易笔数</span>
-                    <span className="font-semibold text-slate-700">{acc.transactionCount} 笔</span>
-                  </div>
-                  <div>
-                    <span className="text-slate-400 block">总流入</span>
-                    <span className="font-semibold text-emerald-600">¥{acc.totalIn.toLocaleString()}</span>
-                  </div>
-                  <div>
-                    <span className="text-slate-400 block">总流出</span>
-                    <span className="font-semibold text-rose-600">¥{acc.totalOut.toLocaleString()}</span>
-                  </div>
-                </div>
-
-                <div className="flex items-center justify-between text-[10px] text-slate-400 pt-1">
-                  <span className="truncate max-w-[200px]">文件: {acc.fileName}</span>
-                  <span className="flex items-center text-emerald-600 font-medium space-x-1">
-                    <CheckCircle2 className="w-3 h-3" />
-                    <span>解析就绪</span>
-                  </span>
-                </div>
+                <button
+                  onClick={() => handleRemoveAccount(acc.accountNumber)}
+                  className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition"
+                  title="删除该账户流水"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
               </div>
             ))}
           </div>
-        )}
 
-        {/* Navigation */}
-        <div className="flex justify-between pt-6 mt-6 border-t border-slate-100">
-          <button
-            onClick={onPrev}
-            className="flex items-center space-x-1.5 px-4 py-2 rounded-xl text-slate-600 hover:bg-slate-100 text-xs font-medium transition"
-          >
-            <ArrowLeft className="w-4 h-4" />
-            <span>返回建档</span>
-          </button>
-
-          <button
-            onClick={onNext}
-            disabled={accounts.length === 0}
-            className={`flex items-center space-x-2 px-6 py-2.5 rounded-xl font-medium text-sm transition ${
-              accounts.length > 0
-                ? 'bg-blue-600 hover:bg-blue-700 text-white shadow-md shadow-blue-500/20'
-                : 'bg-slate-200 text-slate-400 cursor-not-allowed'
-            }`}
-          >
-            <span>下一步：证据确认与平账</span>
-            <ArrowRight className="w-4 h-4" />
-          </button>
+          <div className="pt-2 flex justify-between items-center">
+            <label
+              htmlFor="file-upload"
+              className="inline-flex items-center space-x-1.5 text-xs text-blue-600 hover:text-blue-700 font-medium cursor-pointer"
+            >
+              <PlusCircle className="w-4 h-4" />
+              <span>继续添加其他银行流水</span>
+            </label>
+          </div>
         </div>
+      )}
+
+      {/* Navigation Footer */}
+      <div className="flex items-center justify-between pt-4">
+        <button
+          onClick={onPrev}
+          disabled
+          className="inline-flex items-center space-x-2 px-5 py-2.5 rounded-xl border border-slate-200 text-slate-400 bg-slate-50 cursor-not-allowed text-sm font-medium"
+        >
+          <ArrowLeft className="w-4 h-4" />
+          <span>上一步</span>
+        </button>
+
+        <button
+          onClick={onNext}
+          disabled={accounts.length === 0 || isProcessing}
+          className={`inline-flex items-center space-x-2 px-6 py-2.5 rounded-xl text-sm font-medium transition shadow-sm ${
+            accounts.length > 0 && !isProcessing
+              ? 'bg-blue-600 hover:bg-blue-700 text-white shadow-blue-500/20'
+              : 'bg-slate-200 text-slate-400 cursor-not-allowed'
+          }`}
+        >
+          <span>下一步：账户主体归属确认</span>
+          <ArrowRight className="w-4 h-4" />
+        </button>
       </div>
     </div>
   );
