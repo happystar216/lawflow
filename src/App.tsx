@@ -53,8 +53,26 @@ export const App: React.FC = () => {
 
   const isInitialMount = useRef(true);
 
-  // Load user's latest case when user is logged in
+  const LOCAL_STORAGE_ACTIVE_CASE = 'LAWFLOW_ACTIVE_CASE_DATA_v1';
+
+  // Load active case from localStorage / IndexedDB on startup
   useEffect(() => {
+    try {
+      const saved = localStorage.getItem(LOCAL_STORAGE_ACTIVE_CASE);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed.caseMeta) setCaseMeta(parsed.caseMeta);
+        if (parsed.accounts) setAccounts(parsed.accounts);
+        if (parsed.transactions) setTransactions(parsed.transactions);
+        if (parsed.currentStep !== undefined) setCurrentStep(parsed.currentStep);
+        if (parsed.completedSteps) setCompletedSteps(new Set(parsed.completedSteps));
+        if (parsed.evaluationReport) setEvaluationReport(parsed.evaluationReport);
+        return;
+      }
+    } catch (e) {
+      console.warn('Failed to restore active case from storage:', e);
+    }
+
     if (!currentUser) return;
 
     async function loadUserCases() {
@@ -75,22 +93,31 @@ export const App: React.FC = () => {
           setEvaluationReport(report);
           setTransactions(processedTransactions);
         }
-        if ((latest.transactions || []).length > 0) {
-          setCurrentStep(4);
-          setCompletedSteps(new Set([0, 1, 2, 3, 4, 5]));
-        }
-      } else {
-        handleNewCase();
       }
     }
     loadUserCases();
   }, [currentUser]);
 
-  // Auto-Save active case to IndexedDB CaseStore on modifications
+  // Auto-Save active case to localStorage & IndexedDB on every change
   useEffect(() => {
     if (isInitialMount.current) {
       isInitialMount.current = false;
       return;
+    }
+
+    try {
+      const payload = {
+        caseMeta,
+        accounts,
+        transactions,
+        currentStep,
+        completedSteps: Array.from(completedSteps),
+        evaluationReport,
+        updatedAt: new Date().toISOString()
+      };
+      localStorage.setItem(LOCAL_STORAGE_ACTIVE_CASE, JSON.stringify(payload));
+    } catch (e) {
+      console.warn('Failed to save to localStorage:', e);
     }
 
     if (currentUser && caseMeta && caseMeta.id && (caseMeta.caseNumber || caseMeta.respondentName || transactions.length > 0)) {
@@ -104,7 +131,7 @@ export const App: React.FC = () => {
       };
       saveCaseRecord(record).catch(err => console.warn('Auto-save error', err));
     }
-  }, [caseMeta, accounts, transactions, evaluationReport, currentUser]);
+  }, [caseMeta, accounts, transactions, currentStep, completedSteps, evaluationReport, currentUser]);
 
   const handleNewCase = () => {
     const blankCase = createBlankCase();
@@ -114,6 +141,7 @@ export const App: React.FC = () => {
     setEvaluationReport(null);
     setCurrentStep(0);
     setCompletedSteps(new Set());
+    localStorage.removeItem(LOCAL_STORAGE_ACTIVE_CASE);
   };
 
   const handleSelectCaseFromStore = (record: CaseRecord) => {

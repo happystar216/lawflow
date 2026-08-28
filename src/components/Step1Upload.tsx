@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { UploadCloud, FileSpreadsheet, FileText, FileImage, CheckCircle2, ArrowRight, ArrowLeft, Trash2, PlusCircle, AlertCircle, ShieldCheck, Sparkles } from 'lucide-react';
+import React, { useState, useRef } from 'react';
+import { UploadCloud, FileSpreadsheet, FileText, FileImage, CheckCircle2, ArrowRight, ArrowLeft, Trash2, PlusCircle, AlertCircle, ShieldCheck, Sparkles, StopCircle } from 'lucide-react';
 import { BankAccount, StandardTransaction } from '../types/transaction';
 import { parseExcelBankStatement } from '../parsers/excelParser';
 import { parsePdfWithAliyunEcs, DEFAULT_ECS_HOST, OcrProgressInfo } from '../parsers/aliyunEcsOcr';
@@ -25,6 +25,18 @@ export const Step1Upload: React.FC<Step1Props> = ({
   const [statusText, setStatusText] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
+  const abortControllerRef = useRef<AbortController | null>(null);
+
+  const handleCancelProcessing = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    setIsProcessing(false);
+    setProgressInfo(null);
+    setStatusText('已手动停止当前文件解析');
+  };
+
   const handleFiles = async (files: FileList | File[]) => {
     const fileList = Array.from(files);
     if (fileList.length === 0) return;
@@ -48,13 +60,17 @@ export const Step1Upload: React.FC<Step1Props> = ({
           newAccounts.push(account);
           newTransactions.push(...parsedTx);
         } else if (name.endsWith('.pdf') || name.endsWith('.png') || name.endsWith('.jpg') || name.endsWith('.jpeg') || name.endsWith('.webp') || name.endsWith('.bmp')) {
+          const controller = new AbortController();
+          abortControllerRef.current = controller;
+
           const { account, transactions: parsedTx } = await parsePdfWithAliyunEcs(
             file,
             DEFAULT_ECS_HOST,
             (info: OcrProgressInfo) => {
               setProgressInfo(info);
               if (info.statusText) setStatusText(info.statusText);
-            }
+            },
+            controller.signal
           );
           newAccounts.push(account);
           newTransactions.push(...parsedTx);
@@ -62,8 +78,15 @@ export const Step1Upload: React.FC<Step1Props> = ({
           setErrorMessage(`不支持的文件格式: ${file.name}，请上传 Excel、CSV、PDF 或扫描图片。`);
         }
       } catch (err: any) {
+        if (err.name === 'AbortError' || err.message?.includes('停止')) {
+          console.log('User cancelled parsing:', file.name);
+          setStatusText('已取消解析');
+          break;
+        }
         console.error('Error processing file:', file.name, err);
         setErrorMessage(`解析文件 ${file.name} 失败: ${err.message || '文件格式无法识别或内容损坏'}`);
+      } finally {
+        abortControllerRef.current = null;
       }
     }
 
@@ -163,11 +186,22 @@ export const Step1Upload: React.FC<Step1Props> = ({
                   <div className="w-4 h-4 border-2 border-blue-600 border-t-transparent rounded-full animate-spin flex-shrink-0" />
                   <span className="truncate">{statusText || '正在初始化智能识别引擎...'}</span>
                 </div>
-                {progressInfo && progressInfo.totalPages > 0 && (
-                  <span className="text-xs font-mono font-bold text-blue-700 bg-blue-100/80 px-2 py-0.5 rounded-full flex-shrink-0 ml-2">
-                    {progressInfo.percent}%
-                  </span>
-                )}
+                <div className="flex items-center space-x-2">
+                  {progressInfo && progressInfo.totalPages > 0 && (
+                    <span className="text-xs font-mono font-bold text-blue-700 bg-blue-100/80 px-2 py-0.5 rounded-full flex-shrink-0">
+                      {progressInfo.percent}%
+                    </span>
+                  )}
+                  <button
+                    type="button"
+                    onClick={handleCancelProcessing}
+                    className="inline-flex items-center space-x-1 px-2.5 py-1 rounded-lg border border-red-200 bg-white hover:bg-red-50 text-red-600 text-xs font-medium transition shadow-xs"
+                    title="中止当前识别任务"
+                  >
+                    <StopCircle className="w-3.5 h-3.5" />
+                    <span>停止</span>
+                  </button>
+                </div>
               </div>
 
               {/* Real-time Streaming Progress Bar */}
@@ -212,7 +246,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
               </h2>
             </div>
             <span className="text-xs text-slate-500">
-              共计 {transactions.length} 笔流水记录
+              共计 {transactions.length} 笔流水记录 · 浏览器已自动保存
             </span>
           </div>
 

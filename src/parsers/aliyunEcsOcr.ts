@@ -13,13 +13,13 @@ export type OcrProgressCallback = (info: OcrProgressInfo) => void;
 export const DEFAULT_ECS_HOST = '';
 
 /**
- * Robust Real-time SSE Stream Consumer:
- * Guarantees zero dropped bytes across stream boundaries and final buffer flushing.
+ * Robust Real-time SSE Stream Consumer with AbortSignal support.
  */
 export async function parsePdfWithAliyunEcs(
   file: File,
   ecsHost: string = DEFAULT_ECS_HOST,
-  onProgress?: OcrProgressCallback
+  onProgress?: OcrProgressCallback,
+  signal?: AbortSignal
 ): Promise<{
   account: BankAccount;
   transactions: StandardTransaction[];
@@ -42,7 +42,8 @@ export async function parsePdfWithAliyunEcs(
 
   const resp = await fetch(url, {
     method: 'POST',
-    body: formData
+    body: formData,
+    signal
   });
 
   if (!resp.ok) {
@@ -102,6 +103,11 @@ export async function parsePdfWithAliyunEcs(
   };
 
   while (true) {
+    if (signal?.aborted) {
+      reader.cancel();
+      throw new Error('用户已手动停止解析');
+    }
+
     const { done, value } = await reader.read();
     if (done) {
       buffer += decoder.decode();
