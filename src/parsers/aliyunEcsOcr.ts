@@ -2,7 +2,7 @@ import { BankAccount, StandardTransaction } from '../types/transaction';
 
 export type OcrProgressCallback = (status: string, progress: number) => void;
 
-export const DEFAULT_ECS_HOST = '';
+export const DEFAULT_ECS_HOST = 'https://dale-rosa-island-tattoo.trycloudflare.com';
 
 export async function parsePdfWithAliyunEcs(
   file: File,
@@ -17,7 +17,7 @@ export async function parsePdfWithAliyunEcs(
   const formData = new FormData();
   formData.append('file', file);
 
-  const cleanHost = ecsHost ? ecsHost.replace(/\/+$/, '') : '';
+  const cleanHost = ecsHost.replace(/\/+$/, '');
   const url = `${cleanHost}/api/parse-bank-statement`;
 
   if (onProgress) onProgress('阿里云服务器正在进行多进程并行切页与印章穿透识别...', 0.4);
