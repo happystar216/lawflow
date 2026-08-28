@@ -1,4 +1,4 @@
-import * as XLSX from 'xlsx';
+import ExcelJS from 'exceljs';
 import { BankAccount, StandardTransaction } from '../types/transaction';
 
 /**
@@ -11,11 +11,20 @@ export async function parseExcelBankStatement(
   account: BankAccount;
   transactions: StandardTransaction[];
 }> {
-  const data = await file.arrayBuffer();
-  const workbook = XLSX.read(data, { type: 'array' });
-  const firstSheetName = workbook.SheetNames[0];
-  const worksheet = workbook.Sheets[firstSheetName];
-  const rows: any[][] = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '' });
+  let rows: any[][];
+  if (file.name.toLowerCase().endsWith('.csv')) {
+    rows = parseCsvRows(await file.text());
+  } else {
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(await file.arrayBuffer());
+    const worksheet = workbook.worksheets[0];
+    if (!worksheet) throw new Error('工作簿中没有可读取的工作表');
+    rows = [];
+    worksheet.eachRow({ includeEmpty: true }, (row, rowNumber) => {
+      const values = Array.isArray(row.values) ? row.values.slice(1) : [];
+      rows[rowNumber - 1] = values.map(normalizeCellValue);
+    });
+  }
 
   if (!rows || rows.length < 2) {
     throw new Error('未在 Excel 中识别到有效的流水表格数据');
@@ -143,7 +152,9 @@ export async function parseExcelBankStatement(
     if (formattedDate < earliestDate) earliestDate = formattedDate;
     if (formattedDate > latestDate) latestDate = formattedDate;
 
-    if (transactions.length === 0) startBalance = balance;
+    if (transactions.length === 0) {
+      startBalance = direction === 'IN' ? balance - amount : balance + amount;
+    }
     endBalance = balance;
 
     transactions.push({
@@ -180,10 +191,58 @@ export async function parseExcelBankStatement(
     startBalance,
     endBalance,
     isBalanced: true,
-    balanceDiff: 0
+    balanceDiff: 0,
+    balanceAvailable: colMap['balance'] !== undefined
   };
 
   return { account, transactions };
+}
+
+function normalizeCellValue(value: ExcelJS.CellValue): string | number {
+  if (value === null || value === undefined) return '';
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  if (typeof value === 'object') {
+    if ('result' in value && value.result !== undefined) return normalizeCellValue(value.result as ExcelJS.CellValue);
+    if ('text' in value && typeof value.text === 'string') return value.text;
+    if ('richText' in value && Array.isArray(value.richText)) return value.richText.map(item => item.text).join('');
+    return String(value);
+  }
+  return typeof value === 'boolean' ? String(value) : value;
+}
+
+function parseCsvRows(text: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let cell = '';
+  let quoted = false;
+
+  for (let index = 0; index < text.length; index++) {
+    const char = text[index];
+    const next = text[index + 1];
+    if (char === '"' && quoted && next === '"') {
+      cell += '"';
+      index += 1;
+    } else if (char === '"') {
+      quoted = !quoted;
+    } else if (char === ',' && !quoted) {
+      row.push(cell);
+      cell = '';
+    } else if ((char === '\n' || char === '\r') && !quoted) {
+      if (char === '\r' && next === '\n') index += 1;
+      row.push(cell);
+      rows.push(row);
+      row = [];
+      cell = '';
+    } else {
+      cell += char;
+    }
+  }
+
+  if (cell.length > 0 || row.length > 0) {
+    row.push(cell);
+    rows.push(row);
+  }
+  return rows;
 }
 
 function cleanNumber(val: any): number {

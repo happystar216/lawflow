@@ -57,8 +57,8 @@ export const PasswordGate: React.FC<PasswordGateProps> = ({ children }) => {
           <div className="bg-slate-800/70 border border-slate-700/80 rounded-2xl p-4 flex items-start space-x-3">
             <ShieldCheck className="w-5 h-5 text-blue-400 flex-shrink-0 mt-0.5" />
             <div className="text-xs text-slate-300 leading-relaxed">
-              <span className="font-semibold text-white">内部专属访问保护：</span>
-              本系统已开启专属安全口令防护。请输入专属访问口令以继续使用。
+              <span className="font-semibold text-white">本机工作台锁定：</span>
+              此口令用于避免同一浏览器中的误操作，不替代服务器鉴权、设备加密或律所访问控制。
             </div>
           </div>
 

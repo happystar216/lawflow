@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { CaseEvaluationReport } from '../types/evidence';
 import { StandardTransaction } from '../types/transaction';
-import { AnomalyMatch } from '../types/rules';
+import { AnomalyMatch, VerificationStatus } from '../types/rules';
 import { ArrowRight, ArrowLeft, UserCheck, ShieldAlert, CheckSquare, Square, Edit3, Tag } from 'lucide-react';
 
 interface Step5Props {
@@ -21,11 +21,18 @@ export const Step5PostAnnotation: React.FC<Step5Props> = ({
   onNext,
   onPrev
 }) => {
-  const [activeTab, setActiveTab] = useState<'matches' | 'counterparties'>('matches');
+  const [activeTab, setActiveTab] = useState<'matches' | 'repayment' | 'counterparties'>('matches');
   const [editingMatchId, setEditingMatchId] = useState<string | null>(null);
   const [editText, setEditText] = useState('');
 
   const matches = evaluationReport.matches;
+  const repaymentMatches = matches.filter(m => m.ruleId === 'RULE_FABRICATED_REMARKS_BILATERAL');
+  const verificationLabels: Record<VerificationStatus, string> = {
+    PENDING: '待核验',
+    SUPPORTED: '有证据支持真实还款',
+    INCONCLUSIVE: '证据不足，暂无法判断',
+    SUSPICIOUS: '存在虚构债务或转移迹象'
+  };
 
   // Toggle Adopted status for an anomaly
   const handleToggleAdopted = (matchId: string) => {
@@ -48,6 +55,13 @@ export const Step5PostAnnotation: React.FC<Step5Props> = ({
     });
     onMatchesUpdated(updated);
     setEditingMatchId(null);
+  };
+
+  const handleVerificationUpdate = (
+    matchId: string,
+    patch: { verificationStatus?: VerificationStatus; verificationNotes?: string }
+  ) => {
+    onMatchesUpdated(matches.map(match => match.matchId === matchId ? { ...match, ...patch } : match));
   };
 
   // Update Counterparty Role Tag (Cascading update to all transactions)
@@ -82,9 +96,9 @@ export const Step5PostAnnotation: React.FC<Step5Props> = ({
           <span className="text-xs font-semibold uppercase tracking-wider text-blue-600 bg-blue-50 px-2.5 py-1 rounded-md">
             Step 5 / 6 后标注研判
           </span>
-          <h2 className="text-xl font-bold text-slate-900 mt-2">人物身份命名、穿透定性与呈庭证据复核</h2>
+          <h2 className="text-xl font-bold text-slate-900 mt-2">人物身份标注、异常解释与证据线索复核</h2>
           <p className="text-xs text-slate-500 mt-1">
-            律师根据案情对涉嫌对手方赋予真实人设（如“胞弟/空壳公司”），级联更新所有事实陈述；勾选采纳核心证据。
+            律师根据已有证据标注对手方身份，逐项核对规则解释、证据缺口和原件位置；完整报告保留全部线索，并区分重点项与核验状态。
           </p>
         </div>
 
@@ -100,6 +114,18 @@ export const Step5PostAnnotation: React.FC<Step5Props> = ({
           >
             <ShieldAlert className="w-3.5 h-3.5" />
             <span>可疑证据清单 ({matches.length})</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('repayment')}
+            className={`flex items-center space-x-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition ${
+              activeTab === 'repayment'
+                ? 'bg-white text-blue-600 shadow-sm'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <CheckSquare className="w-3.5 h-3.5" />
+            <span>还借款真实性核验 ({repaymentMatches.length})</span>
           </button>
 
           <button
@@ -120,8 +146,8 @@ export const Step5PostAnnotation: React.FC<Step5Props> = ({
       {activeTab === 'matches' && (
         <div className="space-y-4">
           <div className="flex items-center justify-between px-2 text-xs text-slate-500">
-            <span>已采纳 {matches.filter(m => m.lawyerAdopted).length} / {matches.length} 项呈庭证据</span>
-            <span>勾选将包含在最终 Word / Excel 文书附件中</span>
+            <span>已标记重点 {matches.filter(m => m.lawyerAdopted).length} / {matches.length} 项分析线索</span>
+            <span>完整分析报告会保留全部线索，并单独标识律师重点项</span>
           </div>
 
           <div className="space-y-3">
@@ -160,6 +186,17 @@ export const Step5PostAnnotation: React.FC<Step5Props> = ({
                           {m.severity}
                         </span>
                         <span className="text-xs text-slate-400 font-medium">{m.timePhase}</span>
+                        {m.verificationStatus && (
+                          <span className={`px-2 py-0.5 rounded text-[10px] font-semibold ${
+                            m.verificationStatus === 'SUSPICIOUS'
+                              ? 'bg-rose-100 text-rose-700'
+                              : m.verificationStatus === 'SUPPORTED'
+                              ? 'bg-emerald-100 text-emerald-700'
+                              : 'bg-slate-100 text-slate-600'
+                          }`}>
+                            {verificationLabels[m.verificationStatus]}
+                          </span>
+                        )}
                       </div>
 
                       <div className="text-xs text-slate-600">
@@ -230,7 +267,81 @@ export const Step5PostAnnotation: React.FC<Step5Props> = ({
         </div>
       )}
 
-      {/* Tab 2: Counterparties Manual Tagging */}
+      {/* Tab 2: Repayment remark verification */}
+      {activeTab === 'repayment' && (
+        <div className="space-y-4">
+          <div className="bg-amber-50 border border-amber-200 rounded-2xl p-5 text-xs text-amber-900 leading-relaxed">
+            银行备注“还借款”只能证明付款人填写了该文字，不能直接证明借款关系真实。请逐笔核对借款形成、实际交付、到期金额、对手方关系及资金回流，再记录核验结论。
+          </div>
+
+          {repaymentMatches.length === 0 ? (
+            <div className="bg-white border border-slate-200 rounded-2xl p-10 text-center text-sm text-slate-400">
+              当前流水中未识别到“还借款、还款、归还、偿还”等备注交易。
+            </div>
+          ) : repaymentMatches.map(match => {
+            const sourceTx = transactions.find(tx => tx.id === match.transactionIds[0]);
+            const status = match.verificationStatus || 'PENDING';
+            return (
+              <div key={match.matchId} className="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm space-y-4">
+                <div className="flex items-start justify-between gap-4 flex-wrap">
+                  <div>
+                    <div className="font-bold text-sm text-slate-900">
+                      {sourceTx?.transactionDate} 向 {match.counterpartyName || '未知对手方'} 转出 ¥{match.totalAmount.toLocaleString()}
+                    </div>
+                    <div className="text-xs text-slate-500 mt-1">
+                      流水备注：{sourceTx?.summary || '无'} · 来源：{sourceTx?.rawSourceFile || '未知'} {sourceTx?.rawPageNumber ? `第${sourceTx.rawPageNumber}页` : sourceTx?.rawRowIndex ? `第${sourceTx.rawRowIndex}行` : ''}
+                    </div>
+                  </div>
+                  <select
+                    value={status}
+                    onChange={event => handleVerificationUpdate(match.matchId, { verificationStatus: event.target.value as VerificationStatus })}
+                    className={`px-3 py-2 text-xs rounded-xl border font-semibold ${
+                      status === 'SUSPICIOUS'
+                        ? 'border-rose-300 bg-rose-50 text-rose-700'
+                        : status === 'SUPPORTED'
+                        ? 'border-emerald-300 bg-emerald-50 text-emerald-700'
+                        : 'border-slate-300 bg-white text-slate-700'
+                    }`}
+                  >
+                    {Object.entries(verificationLabels).map(([value, label]) => (
+                      <option key={value} value={value}>{label}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="text-xs text-slate-700 bg-slate-50 border border-slate-200 rounded-xl p-3 leading-relaxed">
+                  {match.aiReasoning}
+                </div>
+
+                <div>
+                  <div className="text-xs font-bold text-slate-700 mb-2">建议核验材料</div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                    {(match.verificationChecklist || []).map((item, index) => (
+                      <div key={index} className="flex items-start space-x-2 text-xs text-slate-600">
+                        <span className="w-4 h-4 rounded border border-slate-300 flex-shrink-0 mt-0.5" />
+                        <span>{item}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1.5">律师核验记录</label>
+                  <textarea
+                    defaultValue={match.verificationNotes || ''}
+                    onBlur={event => handleVerificationUpdate(match.matchId, { verificationNotes: event.target.value })}
+                    rows={3}
+                    placeholder="记录已查看的借款合同、交付流水、对手方说明、资金回流等情况，以及形成该核验结论的理由。"
+                    className="w-full p-3 text-xs rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+                  />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Tab 3: Counterparties Manual Tagging */}
       {activeTab === 'counterparties' && (
         <div className="bg-white rounded-2xl border border-slate-200/80 p-6 shadow-sm space-y-4">
           <h3 className="text-sm font-bold text-slate-800 flex items-center space-x-2">
@@ -238,7 +349,7 @@ export const Step5PostAnnotation: React.FC<Step5Props> = ({
             <span>对手方资金去向与身份角色级联标注</span>
           </h3>
           <p className="text-xs text-slate-500">
-            为对手方标注角色（如：被执行人胞妹、空壳贸易公司、保单代持人），系统将自动把该称谓级联填充至所有呈庭事实说明中。
+            为对手方标注已核实的身份角色（如：被执行人胞妹、关联企业、保单代持人），系统将把该称谓级联填充至证据分析说明中。
           </p>
 
           <div className="divide-y divide-slate-100">
@@ -297,7 +408,7 @@ export const Step5PostAnnotation: React.FC<Step5Props> = ({
           onClick={onNext}
           className="flex items-center space-x-2 px-6 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-medium text-sm shadow-md shadow-blue-500/20 transition"
         >
-          <span>进入步骤六：一键导出呈庭证据包</span>
+          <span>进入步骤六：导出证据分析报告</span>
           <ArrowRight className="w-4 h-4" />
         </button>
       </div>

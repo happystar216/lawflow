@@ -19,7 +19,9 @@ export class Rule10_UndisclosedReceivables extends BaseRule {
       if (tx.isInternalTransfer || tx.direction !== 'OUT') return;
       if (tx.amount < 20000) return;
 
-      const isLending = /借款|借出|借给|借支|出借|押金|保证金|代垫|暂借/.test(tx.summary || '');
+      const summary = tx.summary || '';
+      const isRepayment = /还借款|还款|归还|偿还/.test(summary);
+      const isLending = !isRepayment && /借出|借给|出借|押金|保证金|代垫|暂借/.test(summary);
       if (isLending) {
         matches.push({
           matchId: `${this.ruleId}_${tx.id}`,
@@ -32,9 +34,9 @@ export class Rule10_UndisclosedReceivables extends BaseRule {
           totalAmount: tx.amount,
           timePhase: tx.timePhaseTag || '执行关联期间',
           counterpartyName: tx.counterpartyName,
-          aiReasoning: `被执行人于 ${tx.transactionDate} 向【${tx.counterpartyName || '第三方'}】转出 ¥${tx.amount.toLocaleString()} 元（摘要标注：${tx.summary}）。该笔款项表明被执行人对该第三方享有确定性的到期借款债权/押金返还请求权，申请执行人有权申请执行法院向该次债务人发出《履行到期债务通知书》。`,
+          aiReasoning: `被执行人于 ${tx.transactionDate} 向【${tx.counterpartyName || '第三方'}】转出 ¥${tx.amount.toLocaleString()} 元（摘要：${tx.summary}）。该交易可能对应借出款、押金或代垫款，提示存在对外债权线索；债权是否成立、是否到期及是否已清偿，仍需结合合同、收据、聊天记录和后续回款核实。`,
           statutoryBasis: this.statutoryBasis,
-          lawyerAdopted: true
+          lawyerAdopted: false
         });
       }
     });

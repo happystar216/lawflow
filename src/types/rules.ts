@@ -1,5 +1,11 @@
 export type SeverityLevel = 'L0' | 'L1' | 'L2';
 
+export type VerificationStatus =
+  | 'PENDING'
+  | 'SUPPORTED'
+  | 'INCONCLUSIVE'
+  | 'SUSPICIOUS';
+
 export type RuleCategory = 
   | 'ASSET_TRANSFER'   // 转移/隐匿财产
   | 'ABILITY_PROOF'   // 有履行能力而拒不履行
@@ -22,6 +28,9 @@ export interface AnomalyMatch {
   statutoryBasis: string[]; // e.g. ["《民法典》第538条", "法释〔2024〕13号第3条"]
   lawyerAdopted: boolean;
   lawyerNotes?: string;
+  verificationStatus?: VerificationStatus;
+  verificationNotes?: string;
+  verificationChecklist?: string[];
 }
 
 export interface RuleConfig {

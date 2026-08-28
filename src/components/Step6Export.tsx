@@ -1,19 +1,10 @@
 import React, { useState } from 'react';
+import { ArrowLeft, CheckCircle2, Download, FileSpreadsheet, FileText, Scale } from 'lucide-react';
 import { CaseMetadata } from '../types/case';
-import { CaseEvaluationReport, DocumentPackageType } from '../types/evidence';
+import { CaseEvaluationReport } from '../types/evidence';
 import { StandardTransaction } from '../types/transaction';
-import { exportCourtEvidenceWord } from '../exporters/docxExporter';
-import { exportCourtEvidenceExcel } from '../exporters/excelExporter';
-import { 
-  FileCheck2, 
-  FileSpreadsheet, 
-  FileText, 
-  Download, 
-  ArrowLeft, 
-  Sparkles, 
-  CheckCircle2,
-  Scale
-} from 'lucide-react';
+import { exportEvidenceAnalysisWord } from '../exporters/docxExporter';
+import { exportEvidenceAnalysisExcel } from '../exporters/excelExporter';
 
 interface Step6Props {
   caseMeta: CaseMetadata;
@@ -22,74 +13,33 @@ interface Step6Props {
   onPrev: () => void;
 }
 
-export const Step6Export: React.FC<Step6Props> = ({
-  caseMeta,
-  evaluationReport,
-  transactions,
-  onPrev
-}) => {
-  const [packageType, setPackageType] = useState<DocumentPackageType>('PACKAGE_CRIMINAL_REFUSAL');
+export const Step6Export: React.FC<Step6Props> = ({ caseMeta, evaluationReport, transactions, onPrev }) => {
   const [isExportingWord, setIsExportingWord] = useState(false);
   const [isExportingExcel, setIsExportingExcel] = useState(false);
   const [downloadSuccess, setDownloadSuccess] = useState(false);
-
-  const packages = [
-    {
-      id: 'PACKAGE_CRIMINAL_REFUSAL' as DocumentPackageType,
-      title: '方案 A: 拒执罪刑事自诉 / 移送公安证据包',
-      badge: '刑民交叉·最硬证据',
-      desc: '严格依据法释〔2024〕13号第3条，重点输出执行立案/报告财产令后大额恶意转出、现金拆分取现与隐匿财产清单。',
-      primaryStatute: '《刑法》第313条、法释〔2024〕13号'
-    },
-    {
-      id: 'PACKAGE_RESUME_DETENTION' as DocumentPackageType,
-      title: '方案 B: 恢复执行 / 拘留罚款申请书附件',
-      badge: '对抗终本·迫使和解',
-      desc: '重点提取被执行人执行期间持续稳定收入、大额消费与理财，铁证其具备履行能力，申请法院采取拘留、罚款强制措施。',
-      primaryStatute: '《民诉法》第114条、第253条'
-    },
-    {
-      id: 'PACKAGE_CREDITOR_REVOCATION' as DocumentPackageType,
-      title: '方案 C: 债权人撤销权诉讼事实与交易清单',
-      badge: '民法典538/539条',
-      desc: '输出债务发生后向家庭成员或案外人的无偿转让、明显不合理低价处分交易明细，直接作为撤销权起诉状事实附件。',
-      primaryStatute: '《民法典》第538条、第539条'
-    },
-    {
-      id: 'PACKAGE_PIERCE_COMPANY' as DocumentPackageType,
-      title: '方案 D: 追加股东 / 公私财产混同证据册',
-      badge: '追加被执行人',
-      desc: '汇总一人有限责任公司公户与被执行人个人账户无业务背景频繁混转明细，证明财产混同，申请追加股东为被执行人。',
-      primaryStatute: '《公司法》第23条、《变更追加规定》第20条'
-    },
-    {
-      id: 'PACKAGE_FALSE_REPORT_PUNISH' as DocumentPackageType,
-      title: '方案 E: 虚假报告财产差异核验与处罚申请包',
-      badge: '法释〔2024〕13号第(三)项',
-      desc: '将被执行人《财产申报表》声称的“无收入/无存款”与流水实际进出碰撞比对，输出差异证据清单，申请拘留罚款。',
-      primaryStatute: '《民诉法》第248条'
-    }
-  ];
+  const repaymentChecks = evaluationReport.matches.filter(match => match.ruleId === 'RULE_FABRICATED_REMARKS_BILATERAL');
+  const pendingRepaymentChecks = repaymentChecks.filter(match => !match.verificationStatus || match.verificationStatus === 'PENDING');
+  const hiddenAssetClues = evaluationReport.matches.filter(match => match.category === 'ASSET_CLUE');
 
   const handleExportWord = async () => {
     setIsExportingWord(true);
     try {
-      await exportCourtEvidenceWord(caseMeta, evaluationReport, transactions, packageType);
+      await exportEvidenceAnalysisWord(caseMeta, evaluationReport, transactions);
       setDownloadSuccess(true);
-    } catch (err) {
-      console.error('Word export error:', err);
+    } catch (error) {
+      console.error('Word export error:', error);
     } finally {
       setIsExportingWord(false);
     }
   };
 
-  const handleExportExcel = () => {
+  const handleExportExcel = async () => {
     setIsExportingExcel(true);
     try {
-      exportCourtEvidenceExcel(caseMeta, evaluationReport, transactions);
+      await exportEvidenceAnalysisExcel(caseMeta, evaluationReport, transactions);
       setDownloadSuccess(true);
-    } catch (err) {
-      console.error('Excel export error:', err);
+    } catch (error) {
+      console.error('Excel export error:', error);
     } finally {
       setIsExportingExcel(false);
     }
@@ -97,132 +47,118 @@ export const Step6Export: React.FC<Step6Props> = ({
 
   return (
     <div className="max-w-5xl mx-auto py-8 px-4 sm:px-6 space-y-6">
-      {/* Step Header */}
       <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm p-6">
         <span className="text-xs font-semibold uppercase tracking-wider text-blue-600 bg-blue-50 px-2.5 py-1 rounded-md">
-          Step 6 / 6 成果一键导出
+          Step 6 / 6 证据分析导出
         </span>
-        <h2 className="text-xl font-bold text-slate-900 mt-2">选择诉讼/执行行动目标，一键生成法庭级文书包</h2>
+        <h2 className="text-xl font-bold text-slate-900 mt-2">导出银行流水证据分析报告</h2>
         <p className="text-xs text-slate-500 mt-1">
-          文书已内置司法排版规范、法条自动映射及原始流水页码索引，下载后可直接打印盖章递交法院。
+          最终交付只包含资金事实、异常线索、原件定位、核验状态和待补证事项，不生成申请书、起诉状、刑事移送书或其他法律文书。
         </p>
       </div>
 
-      {/* Package Selector */}
-      <div className="space-y-3">
-        <h3 className="text-sm font-bold text-slate-800">1. 选择本次行动目标与文书方案</h3>
-        <div className="grid grid-cols-1 gap-3">
-          {packages.map(pkg => (
-            <label
-              key={pkg.id}
-              className={`block rounded-2xl border p-5 cursor-pointer transition ${
-                packageType === pkg.id
-                  ? 'border-blue-600 bg-blue-50/40 ring-2 ring-blue-600/20 shadow-sm'
-                  : 'border-slate-200 bg-white hover:border-slate-300'
-              }`}
-            >
-              <div className="flex items-start justify-between">
-                <div className="flex items-start space-x-3">
-                  <input
-                    type="radio"
-                    name="packageType"
-                    checked={packageType === pkg.id}
-                    onChange={() => setPackageType(pkg.id)}
-                    className="w-4 h-4 text-blue-600 mt-0.5"
-                  />
-                  <div>
-                    <div className="flex items-center space-x-2">
-                      <span className="font-bold text-sm text-slate-900">{pkg.title}</span>
-                      <span className="px-2 py-0.5 rounded bg-blue-100/70 text-blue-700 text-[10px] font-semibold">
-                        {pkg.badge}
-                      </span>
-                    </div>
-                    <p className="text-xs text-slate-600 mt-1">{pkg.desc}</p>
-                  </div>
-                </div>
-                <div className="text-[10px] text-slate-400 font-mono hidden sm:block">
-                  {pkg.primaryStatute}
-                </div>
-              </div>
-            </label>
-          ))}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <div className="bg-white rounded-xl border border-slate-200 p-4">
+          <div className="text-xs text-slate-400">分析线索</div>
+          <div className="text-2xl font-bold text-slate-900 mt-1">{evaluationReport.matches.length}</div>
+          <div className="text-[11px] text-slate-500 mt-1">律师标记重点 {evaluationReport.matches.filter(match => match.lawyerAdopted).length} 项</div>
+        </div>
+        <div className="bg-white rounded-xl border border-slate-200 p-4">
+          <div className="text-xs text-slate-400">隐形财产线索</div>
+          <div className="text-2xl font-bold text-indigo-700 mt-1">{hiddenAssetClues.length}</div>
+          <div className="text-[11px] text-slate-500 mt-1">保险、证券、理财及对外债权</div>
+        </div>
+        <div className={`rounded-xl border p-4 ${pendingRepaymentChecks.length > 0 ? 'bg-amber-50 border-amber-200' : 'bg-white border-slate-200'}`}>
+          <div className="text-xs text-slate-400">“还借款”待核验</div>
+          <div className={`text-2xl font-bold mt-1 ${pendingRepaymentChecks.length > 0 ? 'text-amber-700' : 'text-emerald-700'}`}>{pendingRepaymentChecks.length}</div>
+          <div className="text-[11px] text-slate-500 mt-1">共识别 {repaymentChecks.length} 笔还款备注交易</div>
         </div>
       </div>
 
-      {/* Download Actions */}
+      {pendingRepaymentChecks.length > 0 && (
+        <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 text-xs text-amber-900 leading-relaxed">
+          仍有 {pendingRepaymentChecks.length} 笔“还借款/还款”交易未完成律师真实性核验。报告可以导出，但会明确标注为“待核验”，不会把备注内容当作真实借款事实。
+        </div>
+      )}
+
       <div className="bg-white rounded-2xl border border-slate-200/80 p-6 shadow-sm space-y-4">
         <h3 className="text-sm font-bold text-slate-800 flex items-center space-x-2">
           <Download className="w-4 h-4 text-blue-600" />
-          <span>2. 下载呈庭成果文书附件</span>
+          <span>下载分析成果</span>
         </h3>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
-          {/* Word Download */}
-          <div className="p-5 rounded-xl border border-slate-200 bg-slate-50/50 space-y-3">
-            <div className="flex items-center space-x-3">
-              <div className="w-10 h-10 rounded-lg bg-blue-100 text-blue-600 flex items-center justify-center">
-                <FileText className="w-5 h-5" />
-              </div>
-              <div>
-                <div className="font-bold text-xs text-slate-800">法律意见书与事实说明 (.docx)</div>
-                <div className="text-[11px] text-slate-400">标准法庭排版，带原件页码索引与法条依据</div>
-              </div>
-            </div>
-            <button
-              onClick={handleExportWord}
-              disabled={isExportingWord}
-              className="w-full flex items-center justify-center space-x-2 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-semibold shadow-md shadow-blue-500/20 transition"
-            >
-              <Download className="w-3.5 h-3.5" />
-              <span>{isExportingWord ? '正在生成 Word...' : '下载呈庭 Word 说明书'}</span>
-            </button>
-          </div>
-
-          {/* Excel Download */}
-          <div className="p-5 rounded-xl border border-slate-200 bg-slate-50/50 space-y-3">
-            <div className="flex items-center space-x-3">
-              <div className="w-10 h-10 rounded-lg bg-emerald-100 text-emerald-600 flex items-center justify-center">
-                <FileSpreadsheet className="w-5 h-5" />
-              </div>
-              <div>
-                <div className="font-bold text-xs text-slate-800">法庭质证交易明细表 (.xlsx)</div>
-                <div className="text-[11px] text-slate-400">包含可疑交易清单、标准化流水、对手方排行三张表</div>
-              </div>
-            </div>
-            <button
-              onClick={handleExportExcel}
-              disabled={isExportingExcel}
-              className="w-full flex items-center justify-center space-x-2 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-semibold shadow-md shadow-emerald-500/20 transition"
-            >
-              <Download className="w-3.5 h-3.5" />
-              <span>{isExportingExcel ? '正在生成 Excel...' : '下载多工作表 Excel 质证表'}</span>
-            </button>
-          </div>
+          <ExportCard
+            icon={<FileText className="w-5 h-5" />}
+            iconClass="bg-blue-100 text-blue-600"
+            title="银行流水证据分析报告 (.docx)"
+            description="资金概览、隐形财产、还款核验、异常交易及待补证事项"
+            buttonClass="bg-blue-600 hover:bg-blue-700 shadow-blue-500/20"
+            buttonText={isExportingWord ? '正在生成 Word...' : '下载 Word 分析报告'}
+            disabled={isExportingWord}
+            onClick={handleExportWord}
+          />
+          <ExportCard
+            icon={<FileSpreadsheet className="w-5 h-5" />}
+            iconClass="bg-emerald-100 text-emerald-600"
+            title="证据分析工作底表 (.xlsx)"
+            description="全部线索、还款核验、标准化流水、对手方汇总"
+            buttonClass="bg-emerald-600 hover:bg-emerald-700 shadow-emerald-500/20"
+            buttonText={isExportingExcel ? '正在生成 Excel...' : '下载 Excel 分析底表'}
+            disabled={isExportingExcel}
+            onClick={handleExportExcel}
+          />
         </div>
 
         {downloadSuccess && (
           <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-xs text-emerald-700 flex items-center space-x-2">
             <CheckCircle2 className="w-4 h-4 flex-shrink-0" />
-            <span>文书已成功生成并下载至您的电脑。祝执行办案顺利！</span>
+            <span>证据分析文件已生成。请在对外使用前再次核对原始流水和律师核验记录。</span>
           </div>
         )}
       </div>
 
-      {/* Navigation */}
       <div className="flex justify-between items-center pt-4">
-        <button
-          onClick={onPrev}
-          className="flex items-center space-x-1.5 px-4 py-2 rounded-xl text-slate-600 hover:bg-slate-100 text-xs font-medium transition"
-        >
+        <button onClick={onPrev} className="flex items-center space-x-1.5 px-4 py-2 rounded-xl text-slate-600 hover:bg-slate-100 text-xs font-medium transition">
           <ArrowLeft className="w-4 h-4" />
-          <span>返回后标注</span>
+          <span>返回线索复核</span>
         </button>
-
         <div className="text-xs text-slate-400 flex items-center space-x-1">
           <Scale className="w-3.5 h-3.5 text-blue-500" />
-          <span>执析宝 - 让执行银行流水转化为坚不可摧的法庭证据</span>
+          <span>只做证据分析，不自动生成法律文书</span>
         </div>
       </div>
     </div>
   );
 };
+
+interface ExportCardProps {
+  icon: React.ReactNode;
+  iconClass: string;
+  title: string;
+  description: string;
+  buttonClass: string;
+  buttonText: string;
+  disabled: boolean;
+  onClick: () => void;
+}
+
+const ExportCard: React.FC<ExportCardProps> = ({ icon, iconClass, title, description, buttonClass, buttonText, disabled, onClick }) => (
+  <div className="p-5 rounded-xl border border-slate-200 bg-slate-50/50 space-y-3">
+    <div className="flex items-center space-x-3">
+      <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${iconClass}`}>{icon}</div>
+      <div>
+        <div className="font-bold text-xs text-slate-800">{title}</div>
+        <div className="text-[11px] text-slate-400">{description}</div>
+      </div>
+    </div>
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      className={`w-full flex items-center justify-center space-x-2 py-2.5 disabled:bg-slate-300 text-white rounded-xl text-xs font-semibold shadow-md transition ${buttonClass}`}
+    >
+      <Download className="w-3.5 h-3.5" />
+      <span>{buttonText}</span>
+    </button>
+  </div>
+);

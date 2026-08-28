@@ -3,10 +3,10 @@ import { AnomalyMatch, RuleCategory, SeverityLevel } from '../../types/rules';
 
 export class Rule06_AffiliatedCompanyTransfer extends BaseRule {
   readonly ruleId = 'RULE_AFFILIATED_COMPANY_TRANSFER';
-  readonly name = '关联企业无贸易背景抽逃转移';
+  readonly name = '已标注关联企业资金往来';
   readonly category: RuleCategory = 'PIERCING_CLUE';
   readonly defaultSeverity: SeverityLevel = 'L1';
-  readonly description = '向关联企业转账并标注“货款/服务费”，但无真实业务发票与合同支撑，涉嫌公私财产混同或抽逃出资。';
+  readonly description = '对律师已确认或标注的关联企业资金往来进行汇总，提示核查合同、发票、账册及财产独立性。';
   readonly statutoryBasis = [
     '《公司法》第23条（一人有限责任公司财产混同举证责任倒置）',
     '《最高人民法院关于民事执行中变更、追加当事人若干问题的规定》第20条',
@@ -22,7 +22,7 @@ export class Rule06_AffiliatedCompanyTransfer extends BaseRule {
 
       const cpName = tx.counterpartyName?.trim() || '';
       const cpSummary = context.counterpartySummaries[cpName];
-      const isAffiliate = cpSummary?.isSuspectedAffiliate || cpSummary?.roleTag?.includes('关联') || cpSummary?.roleTag?.includes('独资');
+      const isAffiliate = cpSummary?.roleTag?.includes('关联') || cpSummary?.roleTag?.includes('独资');
 
       if (isAffiliate && /货款|服务费|借款|往来|工程款/.test(tx.summary || '')) {
         matches.push({
@@ -36,9 +36,9 @@ export class Rule06_AffiliatedCompanyTransfer extends BaseRule {
           totalAmount: tx.amount,
           timePhase: tx.timePhaseTag || '执行关联期间',
           counterpartyName: cpName,
-          aiReasoning: `被执行人于 ${tx.transactionDate} 向关联企业【${cpName}】转款 ¥${tx.amount.toLocaleString()} 元（附言：${tx.summary}）。该笔款项涉嫌在无实质贸易背景下通过关联交易转移责任财产，或构成股东与公司财产混同，可作为申请追加该企业/股东为被执行人的核心线索。`,
+          aiReasoning: `被执行人于 ${tx.transactionDate} 向律师已标注的关联企业【${cpName}】转款 ¥${tx.amount.toLocaleString()} 元（附言：${tx.summary}）。该笔往来需要结合合同、发票、公司账册、纳税资料及实际履行情况核实；单笔账户往来不足以证明无真实交易、抽逃出资或财产混同。`,
           statutoryBasis: this.statutoryBasis,
-          lawyerAdopted: true
+          lawyerAdopted: false
         });
       }
     });

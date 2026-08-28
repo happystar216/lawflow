@@ -35,7 +35,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
       const name = file.name.toLowerCase();
 
       try {
-        if (name.endsWith('.xlsx') || name.endsWith('.xls') || name.endsWith('.csv')) {
+        if (name.endsWith('.xlsx') || name.endsWith('.csv')) {
           const { account, transactions: parsedTx } = await parseExcelBankStatement(file);
           newAccounts.push(account);
           newTransactions.push(...parsedTx);
@@ -44,7 +44,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
           newAccounts.push(account);
           newTransactions.push(...parsedTx);
         } else {
-          setErrorMessage(`不支持的文件格式: ${file.name}，请上传 Excel 或 PDF 流水。`);
+          setErrorMessage(`不支持的文件格式: ${file.name}，请上传 .xlsx、.csv 或文本型 .pdf 流水。`);
         }
       } catch (err: any) {
         console.error('Error parsing file:', file.name, err);
@@ -79,7 +79,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
         </span>
         <h2 className="text-xl font-bold text-slate-900 mt-2">多源银行流水批量拖拽与智能入库</h2>
         <p className="text-xs text-slate-500 mt-1">
-          支持工行、农行、中行、建行、招行等多家银行标准/非标 Excel、CSV 与电子 PDF 对账单。支持多批次追加上传。
+          支持工行、农行、中行、建行、招行等多家银行的 .xlsx、CSV 与文本型 PDF 对账单。老式 .xls 请先另存为 .xlsx。
         </p>
 
         {/* Upload Zone */}
@@ -101,7 +101,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
             拖拽银行流水文件至此，或点击选择文件
           </h3>
           <p className="text-xs text-slate-400 mt-1">
-            支持 .xlsx / .xls / .csv / .pdf 格式（支持单次上传多份流水）
+            支持 .xlsx / .csv / .pdf 格式（支持单次上传多份流水）
           </p>
 
           <label className="mt-4 inline-block">
@@ -111,7 +111,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
             <input
               type="file"
               multiple
-              accept=".xlsx,.xls,.csv,.pdf"
+              accept=".xlsx,.csv,.pdf"
               onChange={e => e.target.files && handleFiles(e.target.files)}
               className="hidden"
             />
@@ -140,7 +140,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
             <input
               type="file"
               multiple
-              accept=".xlsx,.xls,.csv,.pdf"
+              accept=".xlsx,.csv,.pdf"
               onChange={e => e.target.files && handleFiles(e.target.files)}
               className="hidden"
             />
@@ -221,9 +221,9 @@ export const Step1Upload: React.FC<Step1Props> = ({
 
           <button
             onClick={onNext}
-            disabled={accounts.length === 0}
+            disabled={accounts.length === 0 || transactions.length === 0}
             className={`flex items-center space-x-2 px-6 py-2.5 rounded-xl font-medium text-sm transition ${
-              accounts.length > 0
+              accounts.length > 0 && transactions.length > 0
                 ? 'bg-blue-600 hover:bg-blue-700 text-white shadow-md shadow-blue-500/20'
                 : 'bg-slate-200 text-slate-400 cursor-not-allowed'
             }`}

@@ -1,9 +1,13 @@
 import * as pdfjsLib from 'pdfjs-dist';
 import { BankAccount, StandardTransaction } from '../types/transaction';
 
-// Configure worker for pdfjs in browser
+// Bundle the worker with the application so parsing does not depend on a
+// third-party CDN at matter-processing time.
 try {
-  pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.mjs`;
+  pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
+    'pdfjs-dist/build/pdf.worker.min.mjs',
+    import.meta.url
+  ).toString();
 } catch (e) {
   // Ignored if worker already configured
 }
@@ -74,6 +78,7 @@ export async function parsePdfBankStatement(
   let endBalance = 0;
   let earliestDate = '9999-12-31';
   let latestDate = '1900-01-01';
+  let balanceAvailable = false;
 
   // Parse transaction lines from pages
   pageTexts.forEach(({ pageNum, lines }) => {
@@ -94,6 +99,7 @@ export async function parsePdfBankStatement(
 
       let amount = Math.abs(amounts[0]);
       let balance = amounts.length > 1 ? Math.abs(amounts[amounts.length - 1]) : 0;
+      if (amounts.length > 1) balanceAvailable = true;
       let direction: 'IN' | 'OUT' = 'OUT';
 
       if (/存入|进|贷|收|\+/.test(line)) {
@@ -122,7 +128,9 @@ export async function parsePdfBankStatement(
       if (formattedDate < earliestDate) earliestDate = formattedDate;
       if (formattedDate > latestDate) latestDate = formattedDate;
 
-      if (transactions.length === 0) startBalance = balance;
+      if (transactions.length === 0) {
+        startBalance = direction === 'IN' ? balance - amount : balance + amount;
+      }
       endBalance = balance;
 
       transactions.push({
@@ -159,7 +167,8 @@ export async function parsePdfBankStatement(
     startBalance,
     endBalance,
     isBalanced: true,
-    balanceDiff: 0
+    balanceDiff: 0,
+    balanceAvailable
   };
 
   return { account, transactions };

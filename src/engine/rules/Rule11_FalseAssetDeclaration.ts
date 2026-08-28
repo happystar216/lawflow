@@ -8,7 +8,7 @@ export class Rule11_FalseAssetDeclaration extends BaseRule {
   readonly defaultSeverity: SeverityLevel = 'L0';
   readonly description = '将被执行人向法院申报的“无收入/无存款/零财产”与银行流水实际大额进出或隐秘卡号进行交叉核验。';
   readonly statutoryBasis = [
-    '《民事诉讼法》第248条（拒绝报告或虚假报告财产的罚款拘留）',
+    '《民事诉讼法》第252条（拒绝报告或虚假报告财产的罚款拘留）',
     '法释〔2024〕13号第3条第(三)项（虚假报告财产经拘留罚款后仍拒不执行）',
     '《刑法》第313条'
   ];
@@ -19,7 +19,8 @@ export class Rule11_FalseAssetDeclaration extends BaseRule {
 
     // Check income declaration discrepancy
     const declaredIncomeItem = declaredAssets.find(a => a.category === 'income');
-    const declaredIncomeValue = declaredIncomeItem ? declaredIncomeItem.declaredValue : 0;
+    if (!declaredIncomeItem) return matches;
+    const declaredIncomeValue = declaredIncomeItem.declaredValue;
 
     // Calculate actual incoming after report order date
     const t4 = context.caseMeta.timeline.reportOrderServedDate || context.caseMeta.timeline.executionFilingDate;
@@ -44,9 +45,9 @@ export class Rule11_FalseAssetDeclaration extends BaseRule {
           totalAmount: actualPostReportIncome,
           timePhase: '《报告财产令》送达后',
           counterpartyName: '【多方收入来源】',
-          aiReasoning: `被执行人在向执行法院提交的财产申报中声称收入为 ¥${declaredIncomeValue.toLocaleString()} 元（或隐瞒申报），但经银行流水穿透核验，其在《报告财产令》送达后实际收到各类进账款项共 ${postReportIncomeTx.length} 笔、累计金额高达 ¥${actualPostReportIncome.toLocaleString()} 元。该行为构成明确的“虚假报告财产”，符合《民诉法》第248条及法释〔2024〕13号拘留罚款与拒执追责条件。`,
+          aiReasoning: `已录入财产申报中的收入金额为 ¥${declaredIncomeValue.toLocaleString()} 元；当前流水显示《报告财产令》送达后入账 ${postReportIncomeTx.length} 笔、累计 ¥${actualPostReportIncome.toLocaleString()} 元，二者存在差异。是否构成拒绝或虚假报告，仍需核对申报期间、申报口径、款项性质及报告财产令和申报表原件。`,
           statutoryBasis: this.statutoryBasis,
-          lawyerAdopted: true
+          lawyerAdopted: false
         });
       }
     }

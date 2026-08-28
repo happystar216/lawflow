@@ -87,8 +87,14 @@ export const Step2Verify: React.FC<Step2Props> = ({
           <div className="bg-white rounded-xl border border-slate-200/80 p-4 shadow-sm">
             <div className="text-xs text-slate-400">平账审计状态</div>
             <div className="flex items-center space-x-2 mt-1">
-              <CheckCircle2 className="w-5 h-5 text-emerald-600" />
-              <span className="text-sm font-bold text-emerald-700">借贷完全平衡 (已平账)</span>
+              {auditReport.isBalanced ? (
+                <CheckCircle2 className="w-5 h-5 text-emerald-600" />
+              ) : (
+                <AlertTriangle className="w-5 h-5 text-rose-600" />
+              )}
+              <span className={`text-sm font-bold ${auditReport.isBalanced ? 'text-emerald-700' : 'text-rose-700'}`}>
+                {!auditReport.isAuditable ? '缺少余额字段（无法自动平账）' : auditReport.isBalanced ? '借贷完全平衡（已平账）' : '借贷不平衡（需复核）'}
+              </span>
             </div>
             <div className="text-[11px] text-slate-400 mt-1 font-mono">
               误差差额: ¥{auditReport.difference.toFixed(2)}
@@ -291,7 +297,15 @@ export const Step2Verify: React.FC<Step2Props> = ({
 
           <button
             onClick={onNext}
-            className="flex items-center space-x-2 px-6 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-medium text-sm shadow-md shadow-blue-500/20 transition"
+            disabled={accounts.some(account => {
+              const report = auditAccountBalance(account, transactions);
+              return report.isAuditable && !report.isBalanced;
+            })}
+            title={accounts.some(account => {
+              const report = auditAccountBalance(account, transactions);
+              return report.isAuditable && !report.isBalanced;
+            }) ? '仍有账户未平账，请修正后继续' : undefined}
+            className="flex items-center space-x-2 px-6 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white font-medium text-sm shadow-md shadow-blue-500/20 transition"
           >
             <Check className="w-4 h-4" />
             <span>确认无误，进入前置标注</span>

@@ -25,8 +25,6 @@ export function aggregateCounterparties(
         rawName !== debtorName
       ) || /生活费|赡养|学费|零用钱|配偶|亲属|儿子|女儿|父母/.test(tx.summary || '');
 
-      const isSuspectedAff = /公司|企业|商贸|科技|合伙|商行|中心/.test(rawName);
-
       map[rawName] = {
         name: rawName,
         account: tx.counterpartyAccount,
@@ -39,7 +37,9 @@ export function aggregateCounterparties(
         frequentSummaries: [],
         roleTag: tx.counterpartyRoleTag,
         isSuspectedRelative: isSuspectedRel,
-        isSuspectedAffiliate: isSuspectedAffiliate(rawName)
+        // A company suffix only identifies an enterprise counterparty; it is
+        // not evidence of an affiliation with the debtor.
+        isSuspectedAffiliate: false
       };
     }
 
@@ -61,8 +61,4 @@ export function aggregateCounterparties(
   });
 
   return map;
-}
-
-function isSuspectedAffiliate(name: string): boolean {
-  return /有限|公司|商行|科技|建材|商贸|劳务|投资|贸易|厂|合伙/.test(name);
 }

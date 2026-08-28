@@ -5,7 +5,7 @@ import react from '@vitejs/plugin-react';
 export default defineConfig({
   plugins: [react()],
   optimizeDeps: {
-    include: ['pdfjs-dist', 'xlsx', 'docx', 'file-saver'],
+    include: ['pdfjs-dist', 'exceljs', 'docx', 'file-saver'],
   },
   build: {
     outDir: 'dist',

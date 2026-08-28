@@ -12,11 +12,13 @@ export function calculateInternalNetting(
   internalCount: number;
   internalTotalAmount: number;
 } {
-  // Collect all owned account numbers and names
+  // Only the debtor's own accounts are eligible for automatic netting.
+  // Spouse, company and suspected proxy accounts are legally distinct and
+  // should remain visible unless a lawyer confirms otherwise.
   const ownedAccountNumbers = new Set<string>();
   const ownedAccountNames = new Set<string>();
 
-  accounts.forEach(acc => {
+  accounts.filter(acc => acc.ownerType === 'DEBTOR_MAIN').forEach(acc => {
     if (acc.accountNumber) ownedAccountNumbers.add(acc.accountNumber.trim());
     if (acc.accountName) ownedAccountNames.add(acc.accountName.trim());
   });
@@ -58,11 +60,6 @@ export function calculateInternalNetting(
         matchPair.isInternalTransfer = true;
         matchPair.internalTransferPairId = tx.id;
         internalCount += 2;
-        internalTotalAmount += tx.amount;
-      } else if (isMatchAccount || isMatchName) {
-        // Even without an exact opposite record imported (e.g. only 1 card imported so far), mark as internal
-        tx.isInternalTransfer = true;
-        internalCount += 1;
         internalTotalAmount += tx.amount;
       }
     }

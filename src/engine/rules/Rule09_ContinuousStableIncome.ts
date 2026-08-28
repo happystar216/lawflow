@@ -8,7 +8,7 @@ export class Rule09_ContinuousStableIncome extends BaseRule {
   readonly defaultSeverity: SeverityLevel = 'L2';
   readonly description = '每月固定工资、经营回款或租金入账，证明被执行人具备履行能力，可申请法院扣留提取劳动收入并对抗“终本”。';
   readonly statutoryBasis = [
-    '《民事诉讼法》第250条（扣留、提取被执行人的收入）',
+    '《民事诉讼法》第254条（扣留、提取被执行人的收入）',
     '《最高人民法院关于严格规范终结本次执行程序的规定》',
     '法释〔2024〕13号第3条'
   ];
@@ -16,10 +16,23 @@ export class Rule09_ContinuousStableIncome extends BaseRule {
   evaluate(context: RuleContext): AnomalyMatch[] {
     const matches: AnomalyMatch[] = [];
 
-    // Filter income transactions
-    const incomeTx = context.allTransactions.filter(tx => {
+    const executionDate = context.caseMeta.timeline.executionFilingDate;
+    const candidates = context.allTransactions.filter(tx => {
       if (tx.isInternalTransfer || tx.direction !== 'IN') return false;
+      if (executionDate && tx.transactionDate < executionDate) return false;
       return /工资|薪酬|代发|奖金|劳务费|租金|分红|结息|货款/.test(tx.summary || '') || tx.amount >= 5000;
+    });
+
+    const byPayer = new Map<string, typeof candidates>();
+    candidates.forEach(tx => {
+      const payer = tx.counterpartyName?.trim();
+      if (!payer) return;
+      byPayer.set(payer, [...(byPayer.get(payer) || []), tx]);
+    });
+
+    const incomeTx = Array.from(byPayer.values()).flatMap(group => {
+      const months = new Set(group.map(tx => tx.transactionDate.slice(0, 7)));
+      return months.size >= 2 ? group : [];
     });
 
     if (incomeTx.length >= 2) {
@@ -35,9 +48,9 @@ export class Rule09_ContinuousStableIncome extends BaseRule {
         totalAmount: totalIncome,
         timePhase: '全执行周期',
         counterpartyName: '【持续性收入来源方】',
-        aiReasoning: `被执行人在执行关联期间存在持续稳定收入入账记录共 ${incomeTx.length} 笔，累计收入金额达 ¥${totalIncome.toLocaleString()} 元。该客观事实铁证被执行人具备履行能力，可直接用于反对法院“终结本次执行程序（终本）”，并可申请法院向付款单位送达《协助执行通知书》依法扣留提取其劳动收入。`,
+        aiReasoning: `被执行人在已导入流水期间存在疑似收入入账记录共 ${incomeTx.length} 笔，累计 ¥${totalIncome.toLocaleString()} 元。该结果可作为核查收入来源和阶段性履行能力的线索；是否属于稳定、可持续且可供执行的收入，仍需核对付款主体、入账周期、款项性质及必要生活费用。`,
         statutoryBasis: this.statutoryBasis,
-        lawyerAdopted: true
+        lawyerAdopted: false
       });
     }
 

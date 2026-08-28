@@ -3,6 +3,7 @@ import { BankAccount, StandardTransaction } from '../types/transaction';
 export interface AuditReport {
   accountNumber: string;
   isBalanced: boolean;
+  isAuditable: boolean;
   calculatedEndBalance: number;
   statedEndBalance: number;
   difference: number;
@@ -42,15 +43,19 @@ export function auditAccountBalance(
     }
   });
 
+  const isAuditable = account.balanceAvailable !== false;
   const calculatedEndBalance = account.startBalance + totalIncome - totalExpense;
   const diff = Math.abs(calculatedEndBalance - account.endBalance);
 
-  // If difference is negligible (< 1 RMB) or no stated end balance
-  const isBalanced = account.endBalance === 0 || diff < 1.0;
+  // A zero ending balance can be a real statement value and must not bypass
+  // reconciliation. Unknown balances should be represented separately by the
+  // parser rather than silently treated as balanced.
+  const isBalanced = isAuditable && diff < 1.0;
 
   return {
     accountNumber: account.accountNumber,
     isBalanced,
+    isAuditable,
     calculatedEndBalance,
     statedEndBalance: account.endBalance,
     difference: diff,

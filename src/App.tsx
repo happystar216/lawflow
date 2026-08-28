@@ -18,25 +18,28 @@ import { SAMPLE_CASE, SAMPLE_ACCOUNTS, SAMPLE_TRANSACTIONS } from './demo/sample
 export const App: React.FC = () => {
   const engine = useMemo(() => new LawFlowEngine(), []);
 
-  // Initialize with sample demo case by default so user can immediately test
-  const [caseMeta, setCaseMeta] = useState<CaseMetadata>(SAMPLE_CASE);
-  const [accounts, setAccounts] = useState<BankAccount[]>(SAMPLE_ACCOUNTS);
-  const [transactions, setTransactions] = useState<StandardTransaction[]>(SAMPLE_TRANSACTIONS);
+  const createBlankCase = (): CaseMetadata => ({
+    id: `CASE_${Date.now()}`,
+    caseNumber: '',
+    courtName: '',
+    applicantName: '',
+    respondentName: '',
+    targetAmount: 0,
+    createdAt: new Date().toISOString().slice(0, 10),
+    updatedAt: new Date().toISOString().slice(0, 10),
+    timeline: { customNodes: [] },
+    declaredAssets: []
+  });
+
+  // Real matters start blank. The sample matter is loaded only through the
+  // explicit demo action so it cannot be mistaken for user data.
+  const [caseMeta, setCaseMeta] = useState<CaseMetadata>(() => createBlankCase());
+  const [accounts, setAccounts] = useState<BankAccount[]>([]);
+  const [transactions, setTransactions] = useState<StandardTransaction[]>([]);
   const [evaluationReport, setEvaluationReport] = useState<CaseEvaluationReport | null>(null);
 
   const [currentStep, setCurrentStep] = useState<WorkflowStep>(0);
-  const [completedSteps, setCompletedSteps] = useState<Set<WorkflowStep>>(new Set([0, 1, 2, 3, 4, 5]));
-
-  // Auto evaluate initial sample on mount
-  React.useEffect(() => {
-    const { report, processedTransactions } = engine.evaluateCase(
-      SAMPLE_CASE,
-      SAMPLE_TRANSACTIONS,
-      SAMPLE_ACCOUNTS
-    );
-    setEvaluationReport(report);
-    setTransactions(processedTransactions);
-  }, []);
+  const [completedSteps, setCompletedSteps] = useState<Set<WorkflowStep>>(new Set());
 
   const handleResetToDemo = () => {
     setCaseMeta(SAMPLE_CASE);
@@ -54,21 +57,7 @@ export const App: React.FC = () => {
   };
 
   const handleNewCase = () => {
-    const blankCase: CaseMetadata = {
-      id: `CASE_${Date.now()}`,
-      caseNumber: '',
-      courtName: '',
-      applicantName: '',
-      respondentName: '',
-      targetAmount: 0,
-      createdAt: new Date().toISOString().slice(0, 10),
-      updatedAt: new Date().toISOString().slice(0, 10),
-      timeline: {
-        customNodes: []
-      },
-      declaredAssets: []
-    };
-    setCaseMeta(blankCase);
+    setCaseMeta(createBlankCase());
     setAccounts([]);
     setTransactions([]);
     setEvaluationReport(null);

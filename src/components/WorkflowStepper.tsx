@@ -29,7 +29,7 @@ export const WorkflowStepper: React.FC<WorkflowStepperProps> = ({
     { id: 3 as WorkflowStep, name: '前置标注', icon: CalendarClock, desc: '时间轴与账户矩阵' },
     { id: 4 as WorkflowStep, name: '数据计算', icon: Cpu, desc: '11大算法引擎DAG' },
     { id: 5 as WorkflowStep, name: '后标注研判', icon: UserCheck, desc: '人物命名与证据勾选' },
-    { id: 6 as WorkflowStep, name: '成果导出', icon: FileCheck2, desc: '法庭文书一键交付' },
+    { id: 6 as WorkflowStep, name: '成果导出', icon: FileCheck2, desc: '证据分析报告' },
   ];
 
   return (
@@ -40,17 +40,20 @@ export const WorkflowStepper: React.FC<WorkflowStepperProps> = ({
             const Icon = step.icon;
             const isCurrent = currentStep === step.id;
             const isCompleted = completedSteps.has(step.id);
+            const isAccessible = isCurrent || isCompleted;
 
             return (
               <button
                 key={step.id}
                 onClick={() => onSelectStep(step.id)}
+                disabled={!isAccessible}
+                title={!isAccessible ? '请先完成前一步骤' : undefined}
                 className={`flex items-center space-x-2.5 px-3.5 py-2 rounded-xl text-left transition-all flex-shrink-0 ${
                   isCurrent
                     ? 'bg-blue-50 text-blue-700 font-semibold ring-1 ring-blue-500/30 shadow-sm'
                     : isCompleted
                     ? 'text-slate-700 hover:bg-slate-100/80 font-medium'
-                    : 'text-slate-400 hover:text-slate-600 hover:bg-slate-50'
+                    : 'text-slate-300 cursor-not-allowed'
                 }`}
               >
                 <div

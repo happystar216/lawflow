@@ -76,7 +76,7 @@ export const Step3PreAnnotation: React.FC<Step3Props> = ({
         </span>
         <h2 className="text-xl font-bold text-slate-900 mt-2">账户归属认领、时间轴对齐与财产申报录入</h2>
         <p className="text-xs text-slate-500 mt-1">
-          向算法注入案件上下文：标记哪些账户属于被执行人以执行内部对冲刚销；精准校准案件关键时间节点；录入财产申报表以比对虚假报告。
+          向算法注入案件上下文：标记哪些账户属于被执行人以执行内部对冲核销；精准校准案件关键时间节点；录入财产申报表以比对申报差异。
         </p>
       </div>
 
@@ -84,10 +84,10 @@ export const Step3PreAnnotation: React.FC<Step3Props> = ({
       <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm p-6 space-y-4">
         <h3 className="text-sm font-bold text-slate-800 flex items-center space-x-2">
           <UserCheck className="w-4 h-4 text-blue-600" />
-          <span>1. 银行账户归属矩阵认领 (用于多账户内部自转刚销)</span>
+          <span>1. 银行账户归属矩阵认领（用于本人账户内部自转核销）</span>
         </h3>
         <p className="text-xs text-slate-500">
-          勾选哪些账户属于被执行人本人或其配偶、独资企业。算法将自动匹配并剔除这些账户之间的“左手倒右手”自转虚增金额。
+          仅被执行人本人账户之间金额一致、方向相反且时间接近的双边记录会自动核销。配偶、公司及疑似代持人账户仍作为外部流向保留，交由律师判断。
         </p>
 
         <div className="divide-y divide-slate-100">
@@ -125,7 +125,7 @@ export const Step3PreAnnotation: React.FC<Step3Props> = ({
           <span>2. 案件法律时间轴 (赋予流水法律证据效力)</span>
         </h3>
         <p className="text-xs text-slate-500">
-          每一笔交易将根据下列时点被打上法律阶段标签。发生于《报告财产令》送达或执行立案后的流出将自动被提升为 L0 红线级转移嫌疑。
+          每一笔交易将根据下列时点被打上法律阶段标签。节点后的流出会被优先提示，但仅作为复核线索，不自动认定为转移财产。
         </p>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4 pt-2">

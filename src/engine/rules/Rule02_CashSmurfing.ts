@@ -3,10 +3,10 @@ import { AnomalyMatch, RuleCategory, SeverityLevel } from '../../types/rules';
 
 export class Rule02_CashSmurfing extends BaseRule {
   readonly ruleId = 'RULE_CASH_SMURFING';
-  readonly name = '拆分取现/临界规避监管';
+  readonly name = '连续临界金额现金支取';
   readonly category: RuleCategory = 'ASSET_TRANSFER';
   readonly defaultSeverity: SeverityLevel = 'L0';
-  readonly description = '连续多日或单日多笔 4.5万~5万元临界现金取现，或频繁ATM/柜台取现让资金去向无法追查。';
+  readonly description = '识别连续多笔特定金额区间的现金支取，提示补充核查现金用途和最终去向。';
   readonly statutoryBasis = [
     '《刑法》第313条',
     '法释〔2024〕13号第3条第(一)项（隐匿、转移财产）',
@@ -48,9 +48,9 @@ export class Rule02_CashSmurfing extends BaseRule {
         totalAmount: total,
         timePhase: cashWithdrawals[0].timePhaseTag || '执行关联期间',
         counterpartyName: '【现金取现/ATM】',
-        aiReasoning: `被执行人存在 ${cashWithdrawals.length} 笔临界大额现金拆分取现行为（每笔金额介于 ¥${min} ~ ¥${max} 元之间），累计提取现金 ¥${total.toLocaleString()} 元。该手法具有典型的规避金融监管、切断资金流向追踪的转移隐匿特征。`,
+        aiReasoning: `已识别 ${cashWithdrawals.length} 笔金额介于 ¥${min} 至 ¥${max} 元的现金支取，累计 ¥${total.toLocaleString()} 元。现金支取降低了银行流水对最终去向的可追溯性，但不能仅凭金额区间推定规避监管或转移财产；建议核对取现时间、用途凭证和相关人员。`,
         statutoryBasis: this.statutoryBasis,
-        lawyerAdopted: true
+        lawyerAdopted: false
       });
     }
 

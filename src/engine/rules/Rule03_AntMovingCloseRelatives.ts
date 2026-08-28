@@ -3,10 +3,10 @@ import { AnomalyMatch, RuleCategory, SeverityLevel } from '../../types/rules';
 
 export class Rule03_AntMovingCloseRelatives extends BaseRule {
   readonly ruleId = 'RULE_ANT_MOVING_CLOSE_RELATIVES';
-  readonly name = '近亲属“蚂蚁搬家”式高频转移';
+  readonly name = '疑似近亲属高频转账';
   readonly category: RuleCategory = 'ASSET_TRANSFER';
   readonly defaultSeverity: SeverityLevel = 'L1';
-  readonly description = '向同姓氏亲属或特定个人多笔、高频、小额转款，表面合理但累计数额巨大。';
+  readonly description = '向疑似亲属或特定个人发生多笔转账，提示核实真实关系、用途及是否存在合理对价。';
   readonly statutoryBasis = [
     '《民法典》第538条（无偿处分财产权益的撤销权）',
     '《民法典》第539条（明显不合理低价/高价交易）',
@@ -48,9 +48,9 @@ export class Rule03_AntMovingCloseRelatives extends BaseRule {
           totalAmount: cp.netOut,
           timePhase: '多阶段累计',
           counterpartyName: cp.name,
-          aiReasoning: `被执行人向疑似近亲属/关联人【${cp.name}】（已标注/推断：${cp.roleTag || '同姓近亲属'}）持续高频转出款项共 ${cp.transactionCount} 笔，累计净流出金额高达 ¥${cp.netOut.toLocaleString()} 元（平均每笔约 ¥${Math.round(cp.netOut / cp.transactionCount).toLocaleString()} 元）。该“蚂蚁搬家”行为涉嫌通过无偿或生活费名义向家庭成员稀释责任财产。`,
+          aiReasoning: `被执行人向【${cp.name}】发生 ${cp.transactionCount} 笔转账，累计净流出 ¥${cp.netOut.toLocaleString()} 元（平均每笔约 ¥${Math.round(cp.netOut / cp.transactionCount).toLocaleString()} 元）。系统仅依据${cp.roleTag ? `律师标注“${cp.roleTag}”` : '同姓或摘要关键词'}提示可能存在亲属关系；应先核实身份，再结合款项用途、家庭生活需要和对价判断法律意义。`,
           statutoryBasis: this.statutoryBasis,
-          lawyerAdopted: true
+          lawyerAdopted: false
         });
       }
     });

@@ -21,19 +21,19 @@ export function applyTimelineTags(
     const d = tx.transactionDate;
     let tag = '常规期间';
 
-    // Prioritized legal hierarchy (most critical legal violations first)
-    if (t4 && d >= t4) {
-      tag = '【报告财产令后】';
-    } else if (t6 && d >= t6) {
-      tag = '【和解协议后】';
-    } else if (t5 && d >= t5) {
-      tag = '【查封冻结后】';
-    } else if (t3 && d >= t3) {
-      tag = '【执行立案后】';
-    } else if (t2 && d >= t2) {
-      tag = '【判决生效后至立案前】';
-    } else if (t1 && d >= t1) {
-      tag = '【诉讼保全期间】';
+    const reachedNodes = [
+      t1 && { date: t1, tag: '【诉讼保全期间】' },
+      t2 && { date: t2, tag: '【判决生效后至立案前】' },
+      t3 && { date: t3, tag: '【执行立案后】' },
+      t4 && { date: t4, tag: '【报告财产令后】' },
+      t5 && { date: t5, tag: '【查封冻结后】' },
+      t6 && { date: t6, tag: '【和解协议后】' }
+    ]
+      .filter((node): node is { date: string; tag: string } => Boolean(node && d >= node.date))
+      .sort((a, b) => b.date.localeCompare(a.date));
+
+    if (reachedNodes.length > 0) {
+      tag = reachedNodes[0].tag;
     } else if (t0 && d < t0) {
       tag = '【债务形成前】';
     } else if (t0 && d >= t0) {

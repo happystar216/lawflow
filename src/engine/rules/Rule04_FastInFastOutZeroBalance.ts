@@ -43,9 +43,9 @@ export class Rule04_FastInFastOutZeroBalance extends BaseRule {
           totalAmount: inTx.amount,
           timePhase: inTx.timePhaseTag || '执行关联期间',
           counterpartyName: `${inTx.counterpartyName || '未知来源'} -> ${outTx.counterpartyName || '未知去向'}`,
-          aiReasoning: `被执行人账户于 ${inTx.transactionDate} 收到大额进账 ¥${inTx.amount.toLocaleString()} 元，在 48 小时内即刻于 ${outTx.transactionDate} 全额转出 ¥${outTx.amount.toLocaleString()} 元至【${outTx.counterpartyName || '案外人'}】。此“快进快出、过账归零”特征证明被执行人具备大额资金调度支配能力，系规避法院网络查控的典型行为。`,
+          aiReasoning: `被执行人账户于 ${inTx.transactionDate} 收到大额进账 ¥${inTx.amount.toLocaleString()} 元，并在 48 小时内于 ${outTx.transactionDate} 转出 ¥${outTx.amount.toLocaleString()} 元至【${outTx.counterpartyName || '案外人'}】。该“快进快出”特征提示其具有相应资金调度能力，但资金用途及是否存在规避执行目的仍需结合合同、对手方关系和完整流水核实。`,
           statutoryBasis: this.statutoryBasis,
-          lawyerAdopted: true
+          lawyerAdopted: false
         });
       }
     }

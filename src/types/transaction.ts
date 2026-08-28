@@ -23,6 +23,7 @@ export interface BankAccount {
   endBalance: number;
   isBalanced: boolean;
   balanceDiff: number;
+  balanceAvailable?: boolean;
 }
 
 export interface StandardTransaction {

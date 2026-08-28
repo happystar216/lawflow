@@ -6,7 +6,7 @@ export class Rule07_AccountCancellationNewCard extends BaseRule {
   readonly name = '突发注销与换卡承接资金';
   readonly category: RuleCategory = 'ASSET_TRANSFER';
   readonly defaultSeverity: SeverityLevel = 'L1';
-  readonly description = '原被执行账户突发停止使用或销户，资金转移并在新银行账户中承接。';
+  readonly description = '流水摘要出现销户、结清或换卡关键词，提示核实账户状态及是否存在后续承接账户。';
   readonly statutoryBasis = [
     '《民事诉讼法》第253条',
     '法释〔2024〕13号第3条（隐匿财产逃避执行）'
@@ -28,9 +28,9 @@ export class Rule07_AccountCancellationNewCard extends BaseRule {
           totalAmount: tx.amount,
           timePhase: tx.timePhaseTag || '执行关联期间',
           counterpartyName: tx.counterpartyName,
-          aiReasoning: `被执行人账户于 ${tx.transactionDate} 发生疑似销户/结清/换卡操作，涉及金额 ¥${tx.amount.toLocaleString()} 元（摘要：${tx.summary}）。涉嫌通过注销旧账户逃避法院网络查控，需申请法院向对应银行调取新开账户交易明细。`,
+          aiReasoning: `该账户于 ${tx.transactionDate} 出现“${tx.summary}”相关摘要，涉及金额 ¥${tx.amount.toLocaleString()} 元，提示可能发生销户、结清或换卡。建议向银行核实账户状态、余额处理方式及同期新开账户；摘要关键词本身不能证明存在逃避执行目的。`,
           statutoryBasis: this.statutoryBasis,
-          lawyerAdopted: true
+          lawyerAdopted: false
         });
       }
     });
