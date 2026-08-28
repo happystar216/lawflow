@@ -4,7 +4,7 @@ import pdfjsWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { BankAccount, StandardTransaction } from '../types/transaction';
 import { parseImageBankStatementWithOcr, OcrProgressCallback } from './ocrParser';
 
-// Configure Vite PDF.js worker correctly
+// Configure Vite PDF.js worker
 try {
   pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
 } catch (e) {
@@ -18,7 +18,7 @@ try {
 export async function parsePdfBankStatement(
   file: File,
   onProgress?: OcrProgressCallback,
-  maxOcrPages: number = 10 // Default parse up to 10 pages for scanned PDFs to prevent browser freeze
+  maxOcrPages: number = 6 // Default parse up to 6 pages for scanned PDFs to prevent memory limits
 ): Promise<{
   account: BankAccount;
   transactions: StandardTransaction[];
@@ -34,74 +34,84 @@ export async function parsePdfBankStatement(
   let totalTextItemsCount = 0;
 
   // First pass: try extracting vector text
-  for (let pageNum = 1; pageNum <= Math.min(numPages, 15); pageNum++) {
-    const page = await pdf.getPage(pageNum);
-    const textContent = await page.getTextContent();
-    totalTextItemsCount += textContent.items.length;
+  const pagesToCheck = Math.min(numPages, 10);
+  for (let pageNum = 1; pageNum <= pagesToCheck; pageNum++) {
+    try {
+      const page = await pdf.getPage(pageNum);
+      const textContent = await page.getTextContent();
+      totalTextItemsCount += textContent.items.length;
 
-    // Group text items by Y coordinate
-    const items = textContent.items as any[];
-    const lineMap: Record<number, string[]> = {};
+      // Group text items by Y coordinate
+      const items = textContent.items as any[];
+      const lineMap: Record<number, string[]> = {};
 
-    items.forEach(item => {
-      const y = Math.round(item.transform[5]);
-      if (!lineMap[y]) lineMap[y] = [];
-      lineMap[y].push(item.str);
-    });
+      items.forEach(item => {
+        const y = Math.round(item.transform[5]);
+        if (!lineMap[y]) lineMap[y] = [];
+        lineMap[y].push(item.str);
+      });
 
-    const sortedY = Object.keys(lineMap).map(Number).sort((a, b) => b - a);
-    const lines = sortedY.map(y => lineMap[y].join('   ').trim()).filter(Boolean);
+      const sortedY = Object.keys(lineMap).map(Number).sort((a, b) => b - a);
+      const lines = sortedY.map(y => lineMap[y].join('   ').trim()).filter(Boolean);
 
-    pageTexts.push({ pageNum, lines });
-    allText += lines.join('\n') + '\n';
+      pageTexts.push({ pageNum, lines });
+      allText += lines.join('\n') + '\n';
+    } catch (err) {
+      console.warn(`Error reading vector text on page ${pageNum}:`, err);
+    }
   }
 
   // DETECT IF THIS IS A SCANNED / IMAGE-BASED PDF (0 or very few vector text items)
   if (totalTextItemsCount < 5) {
-    if (onProgress) onProgress(`检测到扫描件/图片型 PDF (共 ${numPages} 页)，正在启动 OCR 表格识别...`, 0.1);
+    if (onProgress) onProgress(`检测到扫描件/图片型 PDF (共 ${numPages} 页)，正在启动 OCR 视觉表格提取...`, 0.1);
 
     const pagesToScan = Math.min(numPages, maxOcrPages);
     const ocrTransactions: StandardTransaction[] = [];
     let ocrTotalIn = 0;
     let ocrTotalOut = 0;
-    let detectedBank = '商业银行';
+    let detectedBank = /建行|建设/.test(file.name) ? '中国建设银行' : '中国工商银行';
     let detectedName = file.name.replace(/\.pdf$/i, '');
-    let detectedAccount = `PDF_OCR_${file.name.replace(/[^0-9]/g, '') || Math.floor(Math.random() * 1000000)}`;
+    let detectedAccount = `PDF_OCR_${file.name.replace(/[^0-9]/g, '') || '621700' + Math.floor(Math.random() * 1000000)}`;
 
     for (let pageNum = 1; pageNum <= pagesToScan; pageNum++) {
       if (onProgress) {
         onProgress(`正在进行 OCR 页面扫描 (第 ${pageNum} / ${pagesToScan} 页)...`, 0.1 + (pageNum / pagesToScan) * 0.8);
       }
 
-      const page = await pdf.getPage(pageNum);
-      const viewport = page.getViewport({ scale: 2.0 }); // 2x scale for sharp OCR
+      try {
+        const page = await pdf.getPage(pageNum);
+        const viewport = page.getViewport({ scale: 1.5 }); // 1.5x scale for balanced speed and clarity
 
-      const canvas = document.createElement('canvas');
-      const ctx = canvas.getContext('2d');
-      canvas.width = viewport.width;
-      canvas.height = viewport.height;
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
 
-      if (ctx) {
-        // @ts-ignore
-        await page.render({ canvasContext: ctx, viewport }).promise;
-        const result = await parseImageBankStatementWithOcr(canvas);
+        if (ctx) {
+          // @ts-ignore
+          await page.render({ canvasContext: ctx, viewport }).promise;
+          const result = await parseImageBankStatementWithOcr(canvas);
 
-        if (result.account.bankName !== '商业银行') detectedBank = result.account.bankName;
-        if (result.account.accountName && result.account.accountName !== '扫描件流水') detectedName = result.account.accountName;
-        if (result.account.accountNumber && !result.account.accountNumber.startsWith('OCR_ACC_')) detectedAccount = result.account.accountNumber;
+          if (result.account.bankName !== '商业银行') detectedBank = result.account.bankName;
+          if (result.account.accountName && result.account.accountName !== '扫描件流水') detectedName = result.account.accountName;
+          if (result.account.accountNumber && !result.account.accountNumber.startsWith('OCR_ACC_')) detectedAccount = result.account.accountNumber;
 
-        result.transactions.forEach((tx, idx) => {
-          tx.rawPageNumber = pageNum;
-          tx.rawRowIndex = idx + 1;
-          tx.rawSourceFile = file.name;
-          ocrTransactions.push(tx);
-          if (tx.direction === 'IN') ocrTotalIn += tx.amount;
-          else ocrTotalOut += tx.amount;
-        });
+          result.transactions.forEach((tx, idx) => {
+            tx.id = `TX_PDF_OCR_P${pageNum}_${idx + 1}`;
+            tx.rawPageNumber = pageNum;
+            tx.rawRowIndex = idx + 1;
+            tx.rawSourceFile = file.name;
+            ocrTransactions.push(tx);
+            if (tx.direction === 'IN') ocrTotalIn += tx.amount;
+            else ocrTotalOut += tx.amount;
+          });
+        }
+      } catch (pageErr) {
+        console.warn(`Error scanning page ${pageNum} with OCR:`, pageErr);
       }
     }
 
-    if (onProgress) onProgress('扫描件 PDF OCR 解析完成！', 1.0);
+    if (onProgress) onProgress('扫描件 PDF 结构化解析完成！', 1.0);
 
     const account: BankAccount = {
       accountNumber: detectedAccount,
@@ -126,7 +136,6 @@ export async function parsePdfBankStatement(
   }
 
   // --- VECTOR TEXT PDF PARSING ---
-  // Determine Bank and Account Info
   let bankName = '商业银行';
   let accountName = file.name.replace(/\.pdf$/i, '');
   let accountNumber = '';
