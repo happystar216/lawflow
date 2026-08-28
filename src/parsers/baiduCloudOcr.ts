@@ -2,6 +2,11 @@ import { BankAccount, StandardTransaction } from '../types/transaction';
 import { OcrProgressCallback } from './ocrParser';
 import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
 
+// Centralized worker configuration
+if (typeof window !== 'undefined') {
+  pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
+}
+
 const BAIDU_TOKEN_CACHE_KEY = 'lawflow_baidu_ocr_token';
 const BAIDU_KEYS_CACHE_KEY = 'lawflow_baidu_ocr_keys';
 
@@ -33,7 +38,7 @@ export function getBaiduCredentials(): BaiduCredentials {
 }
 
 /**
- * Exchanges Baidu API Key & Secret Key for OAuth 2.0 Access Token
+ * Exchanges Baidu API Key & Secret Key for OAuth 2.0 Access Token via Cloudflare Pages Function Proxy
  */
 export async function getBaiduAccessToken(apiKey: string, secretKey: string): Promise<string> {
   const cached = localStorage.getItem(BAIDU_TOKEN_CACHE_KEY);
@@ -46,12 +51,16 @@ export async function getBaiduAccessToken(apiKey: string, secretKey: string): Pr
     } catch {}
   }
 
-  // Fetch token from Baidu OAuth endpoint
-  const url = `https://aip.baidubce.com/oauth/2.0/token?grant_type=client_credentials&client_id=${encodeURIComponent(apiKey.trim())}&client_secret=${encodeURIComponent(secretKey.trim())}`;
-  const resp = await fetch(url, { method: 'POST' });
+  // Use Cloudflare Edge function proxy to avoid CORS blocks
+  const resp = await fetch('/api/baidu-token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ apiKey: apiKey.trim(), secretKey: secretKey.trim() })
+  });
+
   if (!resp.ok) {
     const err = await resp.text();
-    throw new Error(`百度云认证失败 (${resp.status}): ${err || '请检查 API Key 和 Secret Key 是否输入正确'}`);
+    throw new Error(`百度云鉴权失败 (${resp.status}): ${err || '请检查 API Key 和 Secret Key 是否正确'}`);
   }
 
   const data = await resp.json();
@@ -60,6 +69,10 @@ export async function getBaiduAccessToken(apiKey: string, secretKey: string): Pr
   }
 
   const token = data.access_token;
+  if (!token) {
+    throw new Error('未获取到百度云 access_token');
+  }
+
   localStorage.setItem(
     BAIDU_TOKEN_CACHE_KEY,
     JSON.stringify({
@@ -73,7 +86,7 @@ export async function getBaiduAccessToken(apiKey: string, secretKey: string): Pr
 }
 
 /**
- * Recognizes a single image/canvas via Baidu Cloud Accurate OCR API
+ * Recognizes a single image/canvas via Cloudflare Pages proxy to Baidu Cloud Accurate OCR
  */
 export async function recognizeImageWithBaiduCloud(
   canvas: HTMLCanvasElement,
@@ -87,7 +100,7 @@ export async function recognizeImageWithBaiduCloud(
   body.append('language_type', 'CHN_ENG');
   body.append('detect_direction', 'true');
 
-  const resp = await fetch(`https://aip.baidubce.com/rest/2.0/ocr/v1/accurate_basic?access_token=${encodeURIComponent(token)}`, {
+  const resp = await fetch(`/api/baidu-ocr?access_token=${encodeURIComponent(token)}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: body.toString()
@@ -177,7 +190,7 @@ export async function parsePdfWithBaiduCloud(
 
       if (inkCount < 50) continue; // Skip blank page
 
-      // Send to Baidu Cloud
+      // Send to Baidu Cloud via edge proxy
       const lines = await recognizeImageWithBaiduCloud(canvas, token);
 
       lines.forEach((line, lineIdx) => {
