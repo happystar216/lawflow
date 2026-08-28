@@ -1,6 +1,6 @@
 import React from 'react';
 import { CaseMetadata } from '../types/case';
-import { Scale, ArrowRight, ShieldCheck } from 'lucide-react';
+import { Scale, ArrowRight, Calendar, Coins, Building2, User, FileSpreadsheet } from 'lucide-react';
 
 interface Step0Props {
   caseMeta: CaseMetadata;
@@ -13,13 +13,9 @@ export const Step0CaseSetup: React.FC<Step0Props> = ({
   onChange,
   onNext
 }) => {
+  // Allow proceeding as long as user provides a case identifier or respondent name
   const canProceed = Boolean(
-    caseMeta.caseNumber.trim() &&
-    caseMeta.courtName.trim() &&
-    caseMeta.applicantName.trim() &&
-    caseMeta.respondentName.trim() &&
-    caseMeta.targetAmount > 0 &&
-    caseMeta.timeline.executionFilingDate
+    caseMeta.respondentName?.trim() || caseMeta.caseNumber?.trim()
   );
 
   const handleChange = (field: keyof CaseMetadata, value: any) => {
@@ -60,60 +56,67 @@ export const Step0CaseSetup: React.FC<Step0Props> = ({
         {/* Form Fields */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
           <div>
-            <label className="block text-xs font-medium text-slate-700 mb-1">
-              执行案号 <span className="text-red-500">*</span>
+            <label className="block text-xs font-medium text-slate-700 mb-1 flex items-center space-x-1.5">
+              <FileSpreadsheet className="w-3.5 h-3.5 text-slate-400" />
+              <span>执行案号</span>
             </label>
             <input
               type="text"
-              value={caseMeta.caseNumber}
+              value={caseMeta.caseNumber || ''}
               onChange={e => handleChange('caseNumber', e.target.value)}
-              placeholder="例如：(2024)京0105执8890号"
+              placeholder="如：(2024)京01执1234号"
               className="w-full px-3.5 py-2.5 text-sm rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500"
             />
           </div>
 
           <div>
-            <label className="block text-xs font-medium text-slate-700 mb-1">
-              执行法院 <span className="text-red-500">*</span>
+            <label className="block text-xs font-medium text-slate-700 mb-1 flex items-center space-x-1.5">
+              <Building2 className="w-3.5 h-3.5 text-slate-400" />
+              <span>执行法院</span>
             </label>
             <input
               type="text"
-              value={caseMeta.courtName}
+              value={caseMeta.courtName || ''}
               onChange={e => handleChange('courtName', e.target.value)}
-              placeholder="例如：北京市朝阳区人民法院"
+              placeholder="如：北京市第一中级人民法院"
               className="w-full px-3.5 py-2.5 text-sm rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500"
             />
           </div>
 
           <div>
-            <label className="block text-xs font-medium text-slate-700 mb-1">
-              申请执行人 (债权人) <span className="text-red-500">*</span>
+            <label className="block text-xs font-medium text-slate-700 mb-1 flex items-center space-x-1.5">
+              <User className="w-3.5 h-3.5 text-slate-400" />
+              <span>申请执行人 (债权人)</span>
             </label>
             <input
               type="text"
-              value={caseMeta.applicantName}
+              value={caseMeta.applicantName || ''}
               onChange={e => handleChange('applicantName', e.target.value)}
-              placeholder="个人姓名或企业名称"
+              placeholder="申请人姓名或企业全称"
               className="w-full px-3.5 py-2.5 text-sm rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500"
             />
           </div>
 
           <div>
-            <label className="block text-xs font-medium text-slate-700 mb-1">
-              被执行人 (目标债务人) <span className="text-red-500">*</span>
+            <label className="block text-xs font-medium text-slate-700 mb-1 flex items-center space-x-1.5">
+              <User className="w-3.5 h-3.5 text-rose-500" />
+              <span>被执行人 (目标债务人) <span className="text-rose-500">*</span></span>
             </label>
             <input
               type="text"
-              value={caseMeta.respondentName}
+              required
+              value={caseMeta.respondentName || ''}
               onChange={e => handleChange('respondentName', e.target.value)}
-              placeholder="例如：胡艳红"
-              className="w-full px-3.5 py-2.5 text-sm rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500"
+              placeholder="请输入被执行人姓名或企业全称"
+              className="w-full px-3.5 py-2.5 text-sm rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 font-medium"
             />
+            <p className="text-[11px] text-slate-400 mt-1">系统将自动以该名称进行同姓近亲属推断与核心账户匹配</p>
           </div>
 
           <div>
-            <label className="block text-xs font-medium text-slate-700 mb-1">
-              执行标的本息总额 (元) <span className="text-red-500">*</span>
+            <label className="block text-xs font-medium text-slate-700 mb-1 flex items-center space-x-1.5">
+              <Coins className="w-3.5 h-3.5 text-slate-400" />
+              <span>执行标的本息总额 (元)</span>
             </label>
             <div className="relative">
               <span className="absolute left-3.5 top-2.5 text-slate-400 text-sm">¥</span>
@@ -121,11 +124,11 @@ export const Step0CaseSetup: React.FC<Step0Props> = ({
                 type="number"
                 value={caseMeta.targetAmount || ''}
                 onChange={e => handleChange('targetAmount', parseFloat(e.target.value) || 0)}
-                placeholder="1200000"
-                className="w-full pl-8 pr-3.5 py-2.5 text-sm rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500"
+                placeholder="请输入申请执行标的金额，如 500000"
+                className="w-full pl-8 pr-3.5 py-2.5 text-sm rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 font-mono"
               />
             </div>
-            <p className="text-[11px] text-slate-400 mt-1">用于计算被执行人进账收入对债务的覆盖率</p>
+            <p className="text-[11px] text-slate-400 mt-1">用于自动计算执行期间进账对债务的履行覆盖率</p>
           </div>
 
           <div>
@@ -137,73 +140,77 @@ export const Step0CaseSetup: React.FC<Step0Props> = ({
               value={caseMeta.respondentIdCard || ''}
               onChange={e => handleChange('respondentIdCard', e.target.value)}
               placeholder="用于工商穿透与多卡归集"
-              className="w-full px-3.5 py-2.5 text-sm rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500"
+              className="w-full px-3.5 py-2.5 text-sm rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 font-mono"
             />
           </div>
         </div>
 
-        {/* Timeline Quick Settings */}
-        <div className="border-t border-slate-100 pt-5">
-          <h3 className="text-sm font-semibold text-slate-800 mb-3 flex items-center space-x-2">
-            <span>关键法律时间锚点</span>
-            <span className="text-xs text-slate-400 font-normal">（可在此快速录入，亦可在后续步骤调整）</span>
-          </h3>
+        {/* Section: Timeline Setup */}
+        <div className="pt-4 border-t border-slate-100 space-y-4">
+          <div className="flex items-center space-x-2">
+            <Calendar className="w-4 h-4 text-blue-600" />
+            <h3 className="text-sm font-bold text-slate-800">
+              法律时间轴关键节点配置（用于时间切片打标）
+            </h3>
+          </div>
+          <p className="text-xs text-slate-500">
+            算法引擎将根据上述时间锚点，自动将流水划分为：立案前、立案后、财产令后及冻结后阶段，精准识别不同司法阶段的转移行为。
+          </p>
 
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <div>
-              <label className="block text-xs text-slate-600 mb-1">T2 判决生效日</label>
-              <input
-                type="date"
-                value={caseMeta.timeline.judgmentEffectiveDate || ''}
-                onChange={e => handleTimelineChange('judgmentEffectiveDate', e.target.value)}
-                className="w-full px-3 py-2 text-xs rounded-lg border border-slate-300 focus:border-blue-500"
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs text-slate-600 mb-1 font-semibold text-blue-700">
-                T3 执行立案日 ⭐
+              <label className="block text-xs font-medium text-slate-700 mb-1">
+                执行立案日期
               </label>
               <input
                 type="date"
                 value={caseMeta.timeline.executionFilingDate || ''}
                 onChange={e => handleTimelineChange('executionFilingDate', e.target.value)}
-                className="w-full px-3 py-2 text-xs rounded-lg border border-blue-300 bg-blue-50/30 focus:border-blue-500 font-medium"
+                className="w-full px-3.5 py-2.5 text-xs rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500"
               />
+              <p className="text-[10px] text-slate-400 mt-1">立案后转出即构成转移嫌疑</p>
             </div>
 
             <div>
-              <label className="block text-xs text-slate-600 mb-1 font-semibold text-rose-700">
-                T4 《报告财产令》送达日 ⭐⭐
+              <label className="block text-xs font-medium text-slate-700 mb-1">
+                《报告财产令》送达日
               </label>
               <input
                 type="date"
                 value={caseMeta.timeline.reportOrderServedDate || ''}
                 onChange={e => handleTimelineChange('reportOrderServedDate', e.target.value)}
-                className="w-full px-3 py-2 text-xs rounded-lg border border-rose-300 bg-rose-50/30 focus:border-rose-500 font-medium"
+                className="w-full px-3.5 py-2.5 text-xs rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500"
               />
+              <p className="text-[10px] text-rose-500 mt-1">送达后转出直接构成拒执线索</p>
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-slate-700 mb-1">
+                账户冻结 / 终本裁定日 (选填)
+              </label>
+              <input
+                type="date"
+                value={caseMeta.timeline.freezeDate || ''}
+                onChange={e => handleTimelineChange('freezeDate', e.target.value)}
+                className="w-full px-3.5 py-2.5 text-xs rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500"
+              />
+              <p className="text-[10px] text-slate-400 mt-1">用于锁定突发大额转出节点</p>
             </div>
           </div>
         </div>
 
-        {/* Privacy Note */}
-        <div className="bg-slate-50 rounded-xl p-4 flex items-start space-x-3 border border-slate-200/60">
-          <ShieldCheck className="w-5 h-5 text-emerald-600 flex-shrink-0 mt-0.5" />
-          <div className="text-xs text-slate-600 leading-relaxed">
-            <span className="font-semibold text-slate-800">数据处理说明：</span>
-            当前版本在浏览器内解析和计算流水，页面刷新后案件数据不会自动保存。正式案件使用前仍应结合律所的数据分级、终端安全和保密制度评估部署方式，并对导出材料进行人工复核。
-          </div>
-        </div>
-
-        {/* Bottom Bar */}
+        {/* Submit Actions */}
         <div className="flex justify-end pt-4 border-t border-slate-100">
           <button
             onClick={onNext}
             disabled={!canProceed}
-            title={!canProceed ? '请填写全部必填信息及执行立案日' : undefined}
-            className="flex items-center space-x-2 px-6 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white font-medium text-sm shadow-md shadow-blue-500/20 transition"
+            className={`flex items-center space-x-2 px-6 py-2.5 rounded-xl font-medium text-sm transition ${
+              canProceed
+                ? 'bg-blue-600 hover:bg-blue-700 text-white shadow-md shadow-blue-500/20'
+                : 'bg-slate-200 text-slate-400 cursor-not-allowed'
+            }`}
           >
-            <span>保存并进入步骤一：上传流水</span>
+            <span>保存建档，进入下一步上传流水</span>
             <ArrowRight className="w-4 h-4" />
           </button>
         </div>
