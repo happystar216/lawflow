@@ -44,8 +44,13 @@ export const Step1Upload: React.FC<Step1Props> = ({
           newAccounts.push(account);
           newTransactions.push(...parsedTx);
         } else if (name.endsWith('.pdf')) {
-          setOcrStatus(`正在解析 PDF 对账单: ${file.name}...`);
-          const { account, transactions: parsedTx } = await parsePdfBankStatement(file);
+          setOcrStatus(`正在加载 PDF: ${file.name}...`);
+          const { account, transactions: parsedTx } = await parsePdfBankStatement(
+            file,
+            (status, prog) => {
+              setOcrStatus(`${status} (${Math.round(prog * 100)}%)`);
+            }
+          );
           newAccounts.push(account);
           newTransactions.push(...parsedTx);
         } else if (name.endsWith('.png') || name.endsWith('.jpg') || name.endsWith('.jpeg') || name.endsWith('.webp') || name.endsWith('.bmp')) {
@@ -93,9 +98,9 @@ export const Step1Upload: React.FC<Step1Props> = ({
         <span className="text-xs font-semibold uppercase tracking-wider text-blue-600 bg-blue-50 px-2.5 py-1 rounded-md">
           Step 1 / 6 证据上传
         </span>
-        <h2 className="text-xl font-bold text-slate-900 mt-2">多源异构银行流水批量拖拽与 OCR 智能入库</h2>
+        <h2 className="text-xl font-bold text-slate-900 mt-2">多源异构银行流水批量拖拽与智能解析</h2>
         <p className="text-xs text-slate-500 mt-1">
-          支持工行、农行、中行、建行、招行等多家银行标准/非标 Excel、CSV、电子 PDF 对账单及<strong>扫描件/手机翻拍图片 OCR 解析</strong>。
+          支持工行、农行、中行、建行、招行等多家银行标准/非标 Excel、CSV、电子版 PDF 对账单，以及<strong>多页扫描件 PDF / 手机拍照图片 OCR 自动识别</strong>。
         </p>
 
         {/* Upload Zone */}
@@ -117,7 +122,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
             拖拽银行流水文件至此，或点击选择文件
           </h3>
           <p className="text-xs text-slate-400 mt-1">
-            支持 .xlsx / .xls / .csv / .pdf / 扫描图片 (.png, .jpg)
+            支持 .xlsx / .xls / .csv / .pdf (电子版及扫描件) / 扫描图片 (.png, .jpg)
           </p>
 
           <label className="mt-4 inline-block">
@@ -134,7 +139,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
           </label>
 
           {ocrStatus && (
-            <div className="mt-4 inline-flex items-center space-x-2 px-3 py-1.5 rounded-full bg-blue-50 border border-blue-200 text-xs text-blue-700 animate-pulse">
+            <div className="mt-4 inline-flex items-center space-x-2 px-3.5 py-1.5 rounded-full bg-blue-50 border border-blue-200 text-xs text-blue-700 animate-pulse">
               <Scan className="w-3.5 h-3.5" />
               <span>{ocrStatus}</span>
             </div>

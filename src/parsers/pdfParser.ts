@@ -1,39 +1,45 @@
 import * as pdfjsLib from 'pdfjs-dist';
+// @ts-ignore
+import pdfjsWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { BankAccount, StandardTransaction } from '../types/transaction';
+import { parseImageBankStatementWithOcr, OcrProgressCallback } from './ocrParser';
 
-// Bundle the worker with the application so parsing does not depend on a
-// third-party CDN at matter-processing time.
+// Configure Vite PDF.js worker correctly
 try {
-  pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
-    'pdfjs-dist/build/pdf.worker.min.mjs',
-    import.meta.url
-  ).toString();
+  pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
 } catch (e) {
-  // Ignored if worker already configured
+  // Ignore fallback
 }
 
 /**
- * Parses native text-based bank statement PDFs.
- * Extracts page numbers, account numbers, amounts, and dates.
+ * Parses native text-based bank statement PDFs or automatically falls back
+ * to OCR for scanned image-based PDFs (e.g. 128-page court scanned bank records).
  */
 export async function parsePdfBankStatement(
-  file: File
+  file: File,
+  onProgress?: OcrProgressCallback,
+  maxOcrPages: number = 10 // Default parse up to 10 pages for scanned PDFs to prevent browser freeze
 ): Promise<{
   account: BankAccount;
   transactions: StandardTransaction[];
 }> {
+  if (onProgress) onProgress('正在加载并解析 PDF 文件...', 0.05);
+
   const arrayBuffer = await file.arrayBuffer();
   const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
   const numPages = pdf.numPages;
 
   let allText = '';
   const pageTexts: { pageNum: number; lines: string[] }[] = [];
+  let totalTextItemsCount = 0;
 
-  for (let pageNum = 1; pageNum <= numPages; pageNum++) {
+  // First pass: try extracting vector text
+  for (let pageNum = 1; pageNum <= Math.min(numPages, 15); pageNum++) {
     const page = await pdf.getPage(pageNum);
     const textContent = await page.getTextContent();
-    
-    // Group text items by roughly the same Y coordinate (same line)
+    totalTextItemsCount += textContent.items.length;
+
+    // Group text items by Y coordinate
     const items = textContent.items as any[];
     const lineMap: Record<number, string[]> = {};
 
@@ -43,7 +49,6 @@ export async function parsePdfBankStatement(
       lineMap[y].push(item.str);
     });
 
-    // Sort lines descending by Y
     const sortedY = Object.keys(lineMap).map(Number).sort((a, b) => b - a);
     const lines = sortedY.map(y => lineMap[y].join('   ').trim()).filter(Boolean);
 
@@ -51,9 +56,79 @@ export async function parsePdfBankStatement(
     allText += lines.join('\n') + '\n';
   }
 
+  // DETECT IF THIS IS A SCANNED / IMAGE-BASED PDF (0 or very few vector text items)
+  if (totalTextItemsCount < 5) {
+    if (onProgress) onProgress(`检测到扫描件/图片型 PDF (共 ${numPages} 页)，正在启动 OCR 表格识别...`, 0.1);
+
+    const pagesToScan = Math.min(numPages, maxOcrPages);
+    const ocrTransactions: StandardTransaction[] = [];
+    let ocrTotalIn = 0;
+    let ocrTotalOut = 0;
+    let detectedBank = '商业银行';
+    let detectedName = file.name.replace(/\.pdf$/i, '');
+    let detectedAccount = `PDF_OCR_${file.name.replace(/[^0-9]/g, '') || Math.floor(Math.random() * 1000000)}`;
+
+    for (let pageNum = 1; pageNum <= pagesToScan; pageNum++) {
+      if (onProgress) {
+        onProgress(`正在进行 OCR 页面扫描 (第 ${pageNum} / ${pagesToScan} 页)...`, 0.1 + (pageNum / pagesToScan) * 0.8);
+      }
+
+      const page = await pdf.getPage(pageNum);
+      const viewport = page.getViewport({ scale: 2.0 }); // 2x scale for sharp OCR
+
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+
+      if (ctx) {
+        // @ts-ignore
+        await page.render({ canvasContext: ctx, viewport }).promise;
+        const result = await parseImageBankStatementWithOcr(canvas);
+
+        if (result.account.bankName !== '商业银行') detectedBank = result.account.bankName;
+        if (result.account.accountName && result.account.accountName !== '扫描件流水') detectedName = result.account.accountName;
+        if (result.account.accountNumber && !result.account.accountNumber.startsWith('OCR_ACC_')) detectedAccount = result.account.accountNumber;
+
+        result.transactions.forEach((tx, idx) => {
+          tx.rawPageNumber = pageNum;
+          tx.rawRowIndex = idx + 1;
+          tx.rawSourceFile = file.name;
+          ocrTransactions.push(tx);
+          if (tx.direction === 'IN') ocrTotalIn += tx.amount;
+          else ocrTotalOut += tx.amount;
+        });
+      }
+    }
+
+    if (onProgress) onProgress('扫描件 PDF OCR 解析完成！', 1.0);
+
+    const account: BankAccount = {
+      accountNumber: detectedAccount,
+      accountName: detectedName,
+      bankName: detectedBank,
+      ownerType: 'DEBTOR_MAIN',
+      fileName: file.name,
+      fileType: 'pdf',
+      totalIn: ocrTotalIn,
+      totalOut: ocrTotalOut,
+      transactionCount: ocrTransactions.length,
+      startDate: ocrTransactions.length > 0 ? ocrTransactions[0].transactionDate : '2023-01-01',
+      endDate: ocrTransactions.length > 0 ? ocrTransactions[ocrTransactions.length - 1].transactionDate : '2024-12-31',
+      startBalance: 0,
+      endBalance: 0,
+      isBalanced: true,
+      balanceDiff: 0,
+      balanceAvailable: false
+    };
+
+    return { account, transactions: ocrTransactions };
+  }
+
+  // --- VECTOR TEXT PDF PARSING ---
   // Determine Bank and Account Info
   let bankName = '商业银行';
-  let accountName = file.name.split('.')[0];
+  let accountName = file.name.replace(/\.pdf$/i, '');
   let accountNumber = '';
 
   if (/建设银行|建行/.test(allText)) bankName = '中国建设银行';
@@ -66,7 +141,7 @@ export async function parsePdfBankStatement(
 
   const accMatch = allText.match(/账号|卡号[：:\s]+([0-9]{12,25})/);
   if (accMatch) accountNumber = accMatch[1];
-  else accountNumber = `PDF_ACC_${file.name.replace(/[^0-9]/g, '') || '622202' + Math.floor(Math.random() * 1000000)}`;
+  else accountNumber = `PDF_ACC_${file.name.replace(/[^0-9]/g, '') || Math.floor(Math.random() * 1000000)}`;
 
   const nameMatch = allText.match(/户名|客户姓名[：:\s]+([\u4e00-\u9fa5a-zA-Z0-9]+)/);
   if (nameMatch) accountName = nameMatch[1];
@@ -84,7 +159,7 @@ export async function parsePdfBankStatement(
   pageTexts.forEach(({ pageNum, lines }) => {
     lines.forEach((line, lineIdx) => {
       // Look for date pattern YYYY-MM-DD or YYYYMMDD
-      const dateMatch = line.match(/(20[12][0-9][-/.年]?[01][0-9][-/.月]?[0-3][0-9])/);
+      const dateMatch = line.match(/(20[12][0-9][-/.年]?[01]?[0-9][-/.月]?[0-3]?[0-9])/);
       if (!dateMatch) return;
 
       const rawDate = dateMatch[1];
@@ -98,26 +173,32 @@ export async function parsePdfBankStatement(
       if (amounts.length === 0) return;
 
       let amount = Math.abs(amounts[0]);
-      let balance = amounts.length > 1 ? Math.abs(amounts[amounts.length - 1]) : 0;
-      if (amounts.length > 1) balanceAvailable = true;
+      let balance = amounts.length > 1 ? amounts[amounts.length - 1] : 0;
       let direction: 'IN' | 'OUT' = 'OUT';
 
-      if (/存入|进|贷|收|\+/.test(line)) {
+      if (/存入|进|贷|收|\+|汇入|转入/.test(line)) {
         direction = 'IN';
-      } else if (/支|出|借|-/.test(line)) {
+      } else if (/支|出|借|-|扣|转出|取现/.test(line)) {
         direction = 'OUT';
+      } else if (amounts.length >= 2) {
+        const diff = amounts[amounts.length - 1] - amounts[0];
+        if (diff > 0) direction = 'IN';
       }
 
-      // Extract counterparty and remarks
-      const tokens = line.split(/\s{2,}/).map(t => t.trim()).filter(Boolean);
+      if (amounts.length >= 2) {
+        balanceAvailable = true;
+      }
+
+      // Extract Counterparty and Remarks
+      const tokens = line.split(/[\s,，|]+/).map(t => t.trim()).filter(Boolean);
       let cpName = '';
       let summary = '';
 
       tokens.forEach(tok => {
-        if (/^[\u4e00-\u9fa5]{2,6}$/.test(tok) && tok !== accountName && tok !== bankName) {
+        if (/^[\u4e00-\u9fa5]{2,8}$/.test(tok) && tok !== accountName && tok !== bankName && !/日期|金额|余额|借方|贷方|存入|支出|摘要/.test(tok)) {
           if (!cpName) cpName = tok;
         }
-        if (/工资|还款|转账|消费|生活费|理财|分红|提现|ATM|现金|货款/.test(tok)) {
+        if (/工资|还款|转账|消费|生活费|理财|分红|提现|ATM|现金|货款|借款|服务费|往来/.test(tok)) {
           if (!summary) summary = tok;
         }
       });
@@ -128,13 +209,11 @@ export async function parsePdfBankStatement(
       if (formattedDate < earliestDate) earliestDate = formattedDate;
       if (formattedDate > latestDate) latestDate = formattedDate;
 
-      if (transactions.length === 0) {
-        startBalance = direction === 'IN' ? balance - amount : balance + amount;
-      }
+      if (transactions.length === 0) startBalance = balance;
       endBalance = balance;
 
       transactions.push({
-        id: `TX_PDF_${accountNumber}_P${pageNum}_${lineIdx}`,
+        id: `TX_PDF_${accountNumber}_P${pageNum}_L${lineIdx}`,
         accountNumber,
         accountName,
         bankName,
@@ -143,8 +222,8 @@ export async function parsePdfBankStatement(
         direction,
         amount,
         balance,
-        counterpartyName: cpName || '对手方明细',
-        summary: summary || '银行业务流转',
+        counterpartyName: cpName || '电子流水对手方',
+        summary: summary || '银行交易流转',
         rawSourceFile: file.name,
         rawPageNumber: pageNum,
         rawRowIndex: lineIdx + 1
@@ -166,8 +245,8 @@ export async function parsePdfBankStatement(
     endDate: latestDate === '1900-01-01' ? '2024-12-31' : latestDate,
     startBalance,
     endBalance,
-    isBalanced: true,
-    balanceDiff: 0,
+    isBalanced: balanceAvailable ? Math.abs((startBalance + totalIn - totalOut) - endBalance) < 0.01 : false,
+    balanceDiff: balanceAvailable ? Math.round(((startBalance + totalIn - totalOut) - endBalance) * 100) / 100 : 0,
     balanceAvailable
   };
 
@@ -178,10 +257,10 @@ function formatPdfDate(s: string): string {
   s = s.replace(/[\/\.年月]/g, '-').replace(/日/, '').replace(/-+/g, '-').trim();
   const parts = s.split('-');
   if (parts.length >= 3) {
-    return `${parts[0]}-${parts[1].padStart(2, '0')}-${parts[2].padStart(2, '0')}`;
-  }
-  if (s.length === 8 && /^[0-9]+$/.test(s)) {
-    return `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}`;
+    const y = parts[0].length === 4 ? parts[0] : `20${parts[0]}`;
+    const m = parts[1].padStart(2, '0');
+    const d = parts[2].padStart(2, '0');
+    return `${y}-${m}-${d}`;
   }
   return s;
 }
