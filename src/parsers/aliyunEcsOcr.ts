@@ -2,7 +2,7 @@ import { BankAccount, StandardTransaction } from '../types/transaction';
 
 export type OcrProgressCallback = (status: string, progress: number) => void;
 
-export const DEFAULT_ECS_HOST = 'https://dale-rosa-island-tattoo.trycloudflare.com';
+export const DEFAULT_ECS_HOST = 'https://registered-armor-lbs-married.trycloudflare.com';
 
 export async function parsePdfWithAliyunEcs(
   file: File,
