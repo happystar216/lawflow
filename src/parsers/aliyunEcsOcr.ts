@@ -13,8 +13,8 @@ export type OcrProgressCallback = (info: OcrProgressInfo) => void;
 export const DEFAULT_ECS_HOST = '';
 
 /**
- * Real-time SSE Stream Consumer:
- * Streams genuine page-by-page progress events from backend C++ engine directly into UI.
+ * Robust Real-time SSE Stream Consumer:
+ * Guarantees zero dropped bytes across stream boundaries and final buffer flushing.
  */
 export async function parsePdfWithAliyunEcs(
   file: File,
@@ -59,15 +59,8 @@ export async function parsePdfWithAliyunEcs(
   let buffer = '';
   let resultData: { account?: BankAccount; transactions?: StandardTransaction[] } = {};
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n');
-    buffer = lines.pop() || '';
-
-    for (const line of lines) {
+  const processChunkLines = (linesToProcess: string[]) => {
+    for (const line of linesToProcess) {
       const trimmed = line.trim();
       if (!trimmed.startsWith('data:')) continue;
 
@@ -103,13 +96,29 @@ export async function parsePdfWithAliyunEcs(
           };
         }
       } catch (parseErr) {
-        console.warn('Error parsing SSE event:', parseErr);
+        console.warn('Error parsing SSE event payload:', parseErr, jsonStr.slice(0, 80));
       }
     }
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      buffer += decoder.decode();
+      if (buffer.trim()) {
+        processChunkLines(buffer.split('\n'));
+      }
+      break;
+    }
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+    processChunkLines(lines);
   }
 
   if (!resultData.account || !resultData.transactions) {
-    throw new Error('未能完整获取流水结构化解析数据');
+    throw new Error('未能完整获取流水结构化解析数据，请重试');
   }
 
   return {
