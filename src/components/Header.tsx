@@ -1,21 +1,23 @@
 import React from 'react';
-import { Scale, Cloud, Sparkles, RefreshCw, GitBranch, Lock, FolderOpen } from 'lucide-react';
+import { Scale, Cloud, RefreshCw, GitBranch, FolderOpen } from 'lucide-react';
 import { CaseMetadata } from '../types/case';
+import { User } from '../types/user';
+import { UserMenu } from './UserMenu';
 
 interface HeaderProps {
   currentCase: CaseMetadata;
-  onResetToDemo: () => void;
+  currentUser: User | null;
   onNewCase: () => void;
   onOpenCaseManager: () => void;
-  onLock?: () => void;
+  onLogout: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
   currentCase,
-  onResetToDemo,
+  currentUser,
   onNewCase,
   onOpenCaseManager,
-  onLock
+  onLogout
 }) => {
   return (
     <header className="bg-slate-900 border-b border-slate-800 text-white sticky top-0 z-50">
@@ -45,7 +47,7 @@ export const Header: React.FC<HeaderProps> = ({
           title="点击打开案件管理列表"
         >
           <FolderOpen className="w-4 h-4 text-blue-400 group-hover:scale-110 transition-transform" />
-          <span className="text-slate-400">案件:</span>
+          <span className="text-slate-400">当前案件:</span>
           <span className="font-medium text-slate-200">{currentCase.caseNumber || '未命名案件'}</span>
           <span className="text-slate-600">|</span>
           <span className="text-slate-400">被执行人:</span>
@@ -63,31 +65,12 @@ export const Header: React.FC<HeaderProps> = ({
           </button>
 
           <button
-            onClick={onResetToDemo}
-            className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/30 transition"
-            title="一键载入胡艳红典型执行流水示范案"
-          >
-            <Sparkles className="w-3.5 h-3.5" />
-            <span>示范案</span>
-          </button>
-
-          <button
             onClick={onNewCase}
             className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition"
           >
             <RefreshCw className="w-3.5 h-3.5" />
-            <span>新建</span>
+            <span>新建案件</span>
           </button>
-
-          {onLock && (
-            <button
-              onClick={onLock}
-              className="p-2 rounded-lg text-slate-400 hover:text-amber-400 hover:bg-slate-800 transition"
-              title="锁定并退出登录"
-            >
-              <Lock className="w-4 h-4" />
-            </button>
-          )}
 
           <a
             href="https://github.com/happystar216/lawflow"
@@ -99,10 +82,12 @@ export const Header: React.FC<HeaderProps> = ({
             <GitBranch className="w-4 h-4" />
           </a>
 
-          <div className="flex items-center space-x-1 pl-2 border-l border-slate-800 text-xs text-emerald-400">
-            <Cloud className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">CF Edge Ready</span>
-          </div>
+          {/* User Account Menu */}
+          {currentUser && (
+            <div className="pl-2 border-l border-slate-800">
+              <UserMenu user={currentUser} onLogout={onLogout} />
+            </div>
+          )}
         </div>
       </div>
     </header>

@@ -1,7 +1,7 @@
 import { CaseMetadata } from '../types/case';
 import { BankAccount, StandardTransaction } from '../types/transaction';
 import { CaseEvaluationReport } from '../types/evidence';
-import { SAMPLE_CASE, SAMPLE_ACCOUNTS, SAMPLE_TRANSACTIONS } from '../demo/sampleData';
+import { getCurrentSessionUser } from './authStore';
 
 export interface CaseRecord {
   metadata: CaseMetadata;
@@ -9,9 +9,10 @@ export interface CaseRecord {
   transactions: StandardTransaction[];
   evaluationReport?: CaseEvaluationReport | null;
   updatedAt: string;
+  userId?: string;
 }
 
-const DB_NAME = 'LawFlow_Cases_DB';
+const DB_NAME = 'LawFlow_Cases_DB_v2';
 const DB_VERSION = 1;
 const STORE_NAME = 'cases';
 
@@ -34,9 +35,12 @@ function openDB(): Promise<IDBDatabase> {
 }
 
 /**
- * Lists all saved cases from IndexedDB with fallback to localStorage.
+ * Lists cases belonging to the currently logged in user.
  */
-export async function listSavedCases(): Promise<CaseRecord[]> {
+export async function listSavedCases(targetUserId?: string): Promise<CaseRecord[]> {
+  const currentUser = getCurrentSessionUser();
+  const userId = targetUserId || currentUser?.id || 'DEFAULT_USER';
+
   try {
     const db = await openDB();
     return new Promise((resolve, reject) => {
@@ -45,24 +49,15 @@ export async function listSavedCases(): Promise<CaseRecord[]> {
       const req = store.getAll();
       req.onsuccess = () => {
         const records = req.result as CaseRecord[];
-        if (records.length === 0) {
-          // If totally empty, auto-seed with the sample demo case
-          const demoRecord: CaseRecord = {
-            metadata: SAMPLE_CASE,
-            accounts: SAMPLE_ACCOUNTS,
-            transactions: SAMPLE_TRANSACTIONS,
-            updatedAt: new Date().toISOString()
-          };
-          saveCaseRecord(demoRecord).then(() => resolve([demoRecord]));
-        } else {
-          resolve(records.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()));
-        }
+        // Filter by user if userId matches
+        const userCases = records.filter(r => !r.userId || r.userId === userId || r.userId === currentUser?.email);
+        resolve(userCases.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()));
       };
       req.onerror = () => reject(req.error);
     });
   } catch (err) {
     console.warn('Falling back to localStorage for case store', err);
-    const local = localStorage.getItem('LAWFLOW_LOCAL_CASES');
+    const local = localStorage.getItem(`LAWFLOW_LOCAL_CASES_${userId}`);
     if (local) {
       try {
         return JSON.parse(local);
@@ -75,11 +70,15 @@ export async function listSavedCases(): Promise<CaseRecord[]> {
 }
 
 /**
- * Saves or updates a case record in persistent storage.
+ * Saves or updates a case record for the current user.
  */
 export async function saveCaseRecord(record: CaseRecord): Promise<void> {
+  const currentUser = getCurrentSessionUser();
+  const userId = currentUser?.id || 'DEFAULT_USER';
+
   const updatedRecord = {
     ...record,
+    userId,
     updatedAt: new Date().toISOString()
   };
 
@@ -93,14 +92,14 @@ export async function saveCaseRecord(record: CaseRecord): Promise<void> {
       tx.onerror = () => reject(tx.error);
     });
   } catch (err) {
-    const cases = await listSavedCases();
+    const cases = await listSavedCases(userId);
     const idx = cases.findIndex(c => c.metadata.id === record.metadata.id);
     if (idx >= 0) {
       cases[idx] = updatedRecord;
     } else {
       cases.push(updatedRecord);
     }
-    localStorage.setItem('LAWFLOW_LOCAL_CASES', JSON.stringify(cases));
+    localStorage.setItem(`LAWFLOW_LOCAL_CASES_${userId}`, JSON.stringify(cases));
   }
 }
 
@@ -118,9 +117,11 @@ export async function deleteCaseRecord(caseId: string): Promise<void> {
       tx.onerror = () => reject(tx.error);
     });
   } catch (err) {
-    const cases = await listSavedCases();
+    const currentUser = getCurrentSessionUser();
+    const userId = currentUser?.id || 'DEFAULT_USER';
+    const cases = await listSavedCases(userId);
     const filtered = cases.filter(c => c.metadata.id !== caseId);
-    localStorage.setItem('LAWFLOW_LOCAL_CASES', JSON.stringify(filtered));
+    localStorage.setItem(`LAWFLOW_LOCAL_CASES_${userId}`, JSON.stringify(filtered));
   }
 }
 
@@ -146,11 +147,13 @@ export function importCaseBackupJson(jsonString: string): CaseRecord {
   if (!parsed.metadata || !parsed.metadata.id) {
     throw new Error('无效的案件备份文件格式');
   }
+  const currentUser = getCurrentSessionUser();
   return {
     metadata: parsed.metadata,
     accounts: parsed.accounts || [],
     transactions: parsed.transactions || [],
     evaluationReport: parsed.evaluationReport || null,
+    userId: currentUser?.id || 'DEFAULT_USER',
     updatedAt: new Date().toISOString()
   };
 }
