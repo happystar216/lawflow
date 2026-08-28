@@ -1,5 +1,6 @@
 import { BankAccount, StandardTransaction } from '../types/transaction';
-import { OcrProgressCallback } from './ocrParser';
+
+export type OcrProgressCallback = (status: string, progress: number) => void;
 
 const BAIDU_TOKEN_CACHE_KEY = 'lawflow_baidu_ocr_token';
 const BAIDU_KEYS_CACHE_KEY = 'lawflow_baidu_ocr_keys';

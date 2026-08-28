@@ -76,7 +76,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
           const { account, transactions: parsedTx } = await parsePdfWithBaiduCloud(
             file,
             creds,
-            (status, prog) => {
+            (status: string, prog: number) => {
               setOcrStatus(`${status} (${Math.round(prog * 100)}%)`);
             }
           );
