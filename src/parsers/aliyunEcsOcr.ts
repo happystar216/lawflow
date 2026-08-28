@@ -2,7 +2,7 @@ import { BankAccount, StandardTransaction } from '../types/transaction';
 
 export type OcrProgressCallback = (status: string, progress: number) => void;
 
-export const DEFAULT_ECS_HOST = 'http://114.55.73.208';
+export const DEFAULT_ECS_HOST = '';
 
 export async function parsePdfWithAliyunEcs(
   file: File,
@@ -12,12 +12,12 @@ export async function parsePdfWithAliyunEcs(
   account: BankAccount;
   transactions: StandardTransaction[];
 }> {
-  if (onProgress) onProgress('正在将文件上传至阿里云高并发 PaddleOCR 引擎...', 0.15);
+  if (onProgress) onProgress('正在将流水文件上传至阿里云高并发 PaddleOCR 引擎...', 0.15);
 
   const formData = new FormData();
   formData.append('file', file);
 
-  const cleanHost = ecsHost.replace(/\/+$/, '');
+  const cleanHost = ecsHost ? ecsHost.replace(/\/+$/, '') : '';
   const url = `${cleanHost}/api/parse-bank-statement`;
 
   if (onProgress) onProgress('阿里云服务器正在进行多进程并行切页与印章穿透识别...', 0.4);
@@ -36,7 +36,7 @@ export async function parsePdfWithAliyunEcs(
 
   const data = await resp.json();
   if (data.status !== 'success' || !data.account) {
-    throw new Error(data.detail || '识别结果异常');
+    throw new Error(data.detail || data.error || '识别结果异常');
   }
 
   if (onProgress) onProgress(`阿里云极速识别完成！共提取 ${data.transactions.length} 笔证据流水`, 1.0);
