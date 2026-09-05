@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { ArrowLeft, CheckCircle2, Download, FileSpreadsheet, FileText, FileCode2, Scale } from 'lucide-react';
 import { CaseMetadata } from '../types/case';
 import { CaseEvaluationReport } from '../types/evidence';
-import { StandardTransaction } from '../types/transaction';
+import { BankAccount, StandardTransaction } from '../types/transaction';
 import { exportEvidenceAnalysisWord } from '../exporters/docxExporter';
 import { exportEvidenceAnalysisExcel } from '../exporters/excelExporter';
 import { exportEvidencePdfBooklet } from '../exporters/pdfEvidenceExporter';
@@ -11,10 +11,11 @@ interface Step6Props {
   caseMeta: CaseMetadata;
   evaluationReport: CaseEvaluationReport;
   transactions: StandardTransaction[];
+  accounts: BankAccount[];
   onPrev: () => void;
 }
 
-export const Step6Export: React.FC<Step6Props> = ({ caseMeta, evaluationReport, transactions, onPrev }) => {
+export const Step6Export: React.FC<Step6Props> = ({ caseMeta, evaluationReport, transactions, accounts, onPrev }) => {
   const [isExportingWord, setIsExportingWord] = useState(false);
   const [isExportingExcel, setIsExportingExcel] = useState(false);
   const [isExportingPdf, setIsExportingPdf] = useState(false);
@@ -23,11 +24,12 @@ export const Step6Export: React.FC<Step6Props> = ({ caseMeta, evaluationReport, 
   const repaymentChecks = evaluationReport.matches.filter(match => match.ruleId === 'RULE_FABRICATED_REMARKS_BILATERAL');
   const pendingRepaymentChecks = repaymentChecks.filter(match => !match.verificationStatus || match.verificationStatus === 'PENDING');
   const hiddenAssetClues = evaluationReport.matches.filter(match => match.category === 'ASSET_CLUE');
+  const unresolvedDataChecks = accounts.flatMap(account => account.reviewIssues || []).filter(issue => issue.status === 'PENDING' || issue.status === 'UNRESOLVED');
 
   const handleExportWord = async () => {
     setIsExportingWord(true);
     try {
-      await exportEvidenceAnalysisWord(caseMeta, evaluationReport, transactions);
+      await exportEvidenceAnalysisWord(caseMeta, evaluationReport, transactions, accounts);
       setDownloadSuccess(true);
     } catch (error) {
       console.error('Word export error:', error);
@@ -39,7 +41,7 @@ export const Step6Export: React.FC<Step6Props> = ({ caseMeta, evaluationReport, 
   const handleExportExcel = async () => {
     setIsExportingExcel(true);
     try {
-      await exportEvidenceAnalysisExcel(caseMeta, evaluationReport, transactions);
+      await exportEvidenceAnalysisExcel(caseMeta, evaluationReport, transactions, accounts);
       setDownloadSuccess(true);
     } catch (error) {
       console.error('Excel export error:', error);
@@ -95,6 +97,7 @@ export const Step6Export: React.FC<Step6Props> = ({ caseMeta, evaluationReport, 
           仍有 {pendingRepaymentChecks.length} 笔“还借款/还款”交易未完成律师真实性核验。报告可以导出，但会明确标注为“待核验”，不会把备注内容当作真实借款事实。
         </div>
       )}
+      {unresolvedDataChecks.length > 0 && <div className="bg-rose-50 border border-rose-200 rounded-2xl p-4 text-xs text-rose-900 leading-relaxed">仍有 {unresolvedDataChecks.length} 项原始数据核对事项未完成。导出的分析报告会逐项列明页码、问题和律师处理状态，不会将其隐藏。</div>}
 
       {/* Download Action Cards */}
       <div className="bg-white rounded-2xl border border-slate-200/80 p-6 shadow-sm space-y-4">

@@ -17,7 +17,7 @@ import { saveAs } from 'file-saver';
 import { CaseMetadata } from '../types/case';
 import { CaseEvaluationReport } from '../types/evidence';
 import { AnomalyMatch, RuleCategory, VerificationStatus } from '../types/rules';
-import { StandardTransaction } from '../types/transaction';
+import { BankAccount, StandardTransaction } from '../types/transaction';
 
 const CATEGORY_LABELS: Record<RuleCategory, string> = {
   ASSET_TRANSFER: '异常资金流出',
@@ -37,7 +37,8 @@ const VERIFICATION_LABELS: Record<VerificationStatus, string> = {
 export async function exportEvidenceAnalysisWord(
   caseMeta: CaseMetadata,
   report: CaseEvaluationReport,
-  transactions: StandardTransaction[]
+  transactions: StandardTransaction[],
+  accounts: BankAccount[] = []
 ): Promise<void> {
   const txMap = new Map(transactions.map(transaction => [transaction.id, transaction]));
   const hiddenAssets = report.matches.filter(match => match.category === 'ASSET_CLUE');
@@ -66,7 +67,9 @@ export async function exportEvidenceAnalysisWord(
       ['执行立案日', caseMeta.timeline.executionFilingDate || '未设置', '账户冻结日', caseMeta.timeline.freezeDate || '未设置'],
       ['报告财产令送达日', caseMeta.timeline.reportOrderServedDate || '未设置', '律师重点标记', `${report.matches.filter(match => match.lawyerAdopted).length} 项`]
     ]),
-    heading('二、资金概览'),
+    heading('二、原始数据核对状态与证据限制'),
+    reviewIssuesTable(accounts),
+    heading('三、资金概览'),
     simpleTable(
       ['分析指标', '金额/数量', '说明'],
       [
@@ -80,24 +83,24 @@ export async function exportEvidenceAnalysisWord(
       ],
       [32, 24, 44]
     ),
-    heading('三、隐形财产线索：保险、证券、理财及对外债权'),
+    heading('四、隐形财产线索：保险、证券、理财及对外债权'),
     new Paragraph({
       text: '本节同时保留账户冻结前发生的购买或缴费记录。冻结前购买不意味着当前财产线索消失，应继续核验保单现金价值、退保金、证券持仓、赎回款及对外债权是否仍然存在。',
       spacing: { after: 120 },
       style: 'Normal'
     }),
     matchesTable(hiddenAssets, txMap, true),
-    heading('四、“还借款/还款”备注真实性核验'),
+    heading('五、“还借款/还款”备注真实性核验'),
     new Paragraph({
       text: '银行备注仅为交易附言，不能单独证明借款合同、借款交付或还款事实。以下逐笔列示律师核验状态及待核材料。',
       spacing: { after: 120 }
     }),
     repaymentTable(repaymentChecks, txMap),
-    heading('五、其他异常交易与财产申报差异'),
+    heading('六、其他异常交易与财产申报差异'),
     matchesTable(otherMatches, txMap, false),
-    heading('六、对手方资金汇总'),
+    heading('七、对手方资金汇总'),
     counterpartyTable(report),
-    heading('七、待补证与核查事项'),
+    heading('八、待补证与核查事项'),
     ...buildEvidenceGapParagraphs(report.matches),
     noticeParagraph('使用提示', '本报告中的金额、页码、身份关系和核验结论应由承办律师与银行流水原件逐项复核。对外提交时，可从本报告中选取经核实的事实另行制作符合法院、公安机关或其他机构要求的具体法律文书。')
   ];
@@ -123,6 +126,21 @@ export async function exportEvidenceAnalysisWord(
 
 function heading(text: string): Paragraph {
   return new Paragraph({ text, heading: HeadingLevel.HEADING_1, style: 'AnalysisHeading' });
+}
+
+function reviewIssuesTable(accounts: BankAccount[]): Table {
+  const rows = accounts.flatMap(account => (account.reviewIssues || []).map(issue => [
+    `${account.bankName}（${account.accountNumber.slice(-4)}）`,
+    issue.pageNumber ? `第${issue.pageNumber}页` : '未定位',
+    issue.title,
+    issue.status === 'CONFIRMED' ? '已确认' : issue.status === 'CORRECTED' ? '已修正' : issue.status === 'UNRESOLVED' ? '无法确认' : '待核对',
+    issue.resolutionNote || issue.instructions.join('；')
+  ]));
+  return simpleTable(
+    ['账户', '原件位置', '核对事项', '处理状态', '律师说明／核对要求'],
+    rows.length ? rows : [['—', '—', '未发现需要人工复核的原始数据问题', '自动通过', '仍应按需抽查原件']],
+    [16, 12, 24, 14, 34]
+  );
 }
 
 function noticeParagraph(title: string, content: string): Paragraph {

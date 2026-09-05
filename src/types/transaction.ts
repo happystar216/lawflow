@@ -1,4 +1,4 @@
-export type FlowDirection = 'IN' | 'OUT'; // 资金方向: 转入 / 转出
+export type FlowDirection = 'IN' | 'OUT' | 'UNKNOWN'; // 资金方向: 转入 / 转出 / 待核对
 
 export type AccountOwnerType = 
   | 'DEBTOR_MAIN'    // 被执行人本人
@@ -24,6 +24,29 @@ export interface BankAccount {
   isBalanced: boolean;
   balanceDiff: number;
   balanceAvailable?: boolean;
+  parseStatus?: 'COMPLETE' | 'NEEDS_REVIEW' | 'INCOMPLETE';
+  parseWarnings?: string[];
+  coveredPages?: number[];
+  totalPages?: number;
+  balanceContinuityIssueCount?: number;
+  reviewIssues?: EvidenceReviewIssue[];
+}
+
+export type ReviewIssueStatus = 'PENDING' | 'CONFIRMED' | 'CORRECTED' | 'UNRESOLVED';
+export type ReviewIssueCategory = 'PAGE_INTEGRITY' | 'BLANK_PAGE' | 'LOW_CONFIDENCE' | 'BALANCE_BREAK' | 'INVALID_AMOUNT' | 'INVALID_DATE' | 'INVALID_DIRECTION' | 'DATA_WARNING';
+
+export interface EvidenceReviewIssue {
+  id: string;
+  category: ReviewIssueCategory;
+  severity: 'REQUIRED' | 'ADVISORY';
+  title: string;
+  description: string;
+  instructions: string[];
+  pageNumber?: number;
+  transactionIds: string[];
+  status: ReviewIssueStatus;
+  resolutionNote?: string;
+  reviewedAt?: string;
 }
 
 export interface StandardTransaction {
@@ -43,6 +66,15 @@ export interface StandardTransaction {
   rawSourceFile: string;
   rawPageNumber?: number; // 对应原始 PDF 或 Excel 行数
   rawRowIndex?: number;
+  rawText?: string;
+  balanceAvailable?: boolean;
+  extractionMethod?: 'DOCUMENT_PDF' | 'DOCUMENT_IMAGE' | 'MANUAL';
+  extractionConfidence?: number;
+  extractionChunkId?: string;
+  reviewStatus?: 'AUTO_PASSED' | 'PENDING' | 'VERIFIED' | 'CORRECTED';
+  dataQualityIssues?: Array<'INVALID_DATE' | 'INVALID_AMOUNT' | 'UNKNOWN_DIRECTION'>;
+  reviewedBy?: string;
+  reviewedAt?: string;
 
   // Computed & Annotated attributes
   isInternalTransfer?: boolean; // 是否属于内部自有账户互转

@@ -17,6 +17,7 @@ import { Step5PostAnnotation } from './components/Step5PostAnnotation';
 import { Step6Export } from './components/Step6Export';
 import { getCurrentSessionUser, logoutUser } from './store/authStore';
 import { CaseRecord, saveCaseRecord, listSavedCases } from './store/caseStore';
+import { normalizeRecognizedData } from './utils/recognizedDataNormalizer';
 
 function createBlankCase(): CaseMetadata {
   return {
@@ -55,44 +56,52 @@ export const App: React.FC = () => {
 
   const LOCAL_STORAGE_ACTIVE_CASE = 'LAWFLOW_ACTIVE_CASE_DATA_v1';
 
-  // Load active case from localStorage / IndexedDB on startup
+  // IndexedDB is authoritative for large evidence sets. localStorage keeps only small UI/session metadata.
   useEffect(() => {
+    let session: any = null;
     try {
       const saved = localStorage.getItem(LOCAL_STORAGE_ACTIVE_CASE);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (parsed.caseMeta) setCaseMeta(parsed.caseMeta);
-        if (parsed.accounts) setAccounts(parsed.accounts);
-        if (parsed.transactions) setTransactions(parsed.transactions);
-        if (parsed.currentStep !== undefined) setCurrentStep(parsed.currentStep);
-        if (parsed.completedSteps) setCompletedSteps(new Set(parsed.completedSteps));
-        if (parsed.evaluationReport) setEvaluationReport(parsed.evaluationReport);
-        return;
-      }
+      if (saved) session = JSON.parse(saved);
     } catch (e) {
       console.warn('Failed to restore active case from storage:', e);
     }
 
-    if (!currentUser) return;
+    if (!currentUser) {
+      // Backward compatibility for a legacy full localStorage record.
+      if (session?.caseMeta) {
+        const normalized = normalizeRecognizedData(session.accounts || [], session.transactions || []);
+        setCaseMeta(session.caseMeta); setAccounts(normalized.accounts); setTransactions(normalized.transactions);
+        setEvaluationReport(session.evaluationReport || null);
+      }
+      return;
+    }
 
     async function loadUserCases() {
       const savedList = await listSavedCases(currentUser?.id);
-      if (savedList.length > 0) {
-        const latest = savedList[0];
-        setCaseMeta(latest.metadata);
-        setAccounts(latest.accounts || []);
-        setTransactions(latest.transactions || []);
-        if (latest.evaluationReport) {
-          setEvaluationReport(latest.evaluationReport);
-        } else if ((latest.transactions || []).length > 0) {
+      const requestedCaseId = session?.caseId || session?.caseMeta?.id;
+      const active = savedList.find(record => record.metadata.id === requestedCaseId) || savedList[0];
+      if (active) {
+        const normalized = normalizeRecognizedData(active.accounts || [], active.transactions || []);
+        setCaseMeta(active.metadata);
+        setAccounts(normalized.accounts);
+        setTransactions(normalized.transactions);
+        if (session?.currentStep !== undefined) setCurrentStep(session.currentStep);
+        if (session?.completedSteps) setCompletedSteps(new Set(session.completedSteps));
+        if (normalized.transactions.length > 0) {
           const { report, processedTransactions } = engine.evaluateCase(
-            latest.metadata,
-            latest.transactions,
-            latest.accounts
+            active.metadata,
+            normalized.transactions,
+            normalized.accounts
           );
           setEvaluationReport(report);
           setTransactions(processedTransactions);
+        } else {
+          setEvaluationReport(active.evaluationReport || null);
         }
+      } else if (session?.caseMeta) {
+        const normalized = normalizeRecognizedData(session.accounts || [], session.transactions || []);
+        setCaseMeta(session.caseMeta); setAccounts(normalized.accounts); setTransactions(normalized.transactions);
+        setEvaluationReport(session.evaluationReport || null);
       }
     }
     loadUserCases();
@@ -107,12 +116,9 @@ export const App: React.FC = () => {
 
     try {
       const payload = {
-        caseMeta,
-        accounts,
-        transactions,
+        caseId: caseMeta.id,
         currentStep,
         completedSteps: Array.from(completedSteps),
-        evaluationReport,
         updatedAt: new Date().toISOString()
       };
       localStorage.setItem(LOCAL_STORAGE_ACTIVE_CASE, JSON.stringify(payload));
@@ -145,10 +151,17 @@ export const App: React.FC = () => {
   };
 
   const handleSelectCaseFromStore = (record: CaseRecord) => {
+    const normalized = normalizeRecognizedData(record.accounts || [], record.transactions || []);
     setCaseMeta(record.metadata);
-    setAccounts(record.accounts || []);
-    setTransactions(record.transactions || []);
-    setEvaluationReport(record.evaluationReport || null);
+    setAccounts(normalized.accounts);
+    setTransactions(normalized.transactions);
+    if (normalized.transactions.length) {
+      const { report, processedTransactions } = engine.evaluateCase(record.metadata, normalized.transactions, normalized.accounts);
+      setEvaluationReport(report);
+      setTransactions(processedTransactions);
+    } else {
+      setEvaluationReport(record.evaluationReport || null);
+    }
     setCurrentStep(record.transactions?.length > 0 ? 4 : 0);
     setCompletedSteps(new Set([0, 1, 2, 3, 4, 5]));
   };
@@ -200,6 +213,7 @@ export const App: React.FC = () => {
 
         {currentStep === 1 && (
           <Step1Upload
+            caseId={caseMeta.id}
             accounts={accounts}
             transactions={transactions}
             onDataUpdated={(accs, txs) => {
@@ -216,8 +230,10 @@ export const App: React.FC = () => {
 
         {currentStep === 2 && (
           <Step2Verify
+            caseId={caseMeta.id}
             accounts={accounts}
             transactions={transactions}
+            onAccountsUpdated={setAccounts}
             onTransactionsUpdated={setTransactions}
             onPrev={() => goToStep(1)}
             onNext={() => {
@@ -285,6 +301,7 @@ export const App: React.FC = () => {
             caseMeta={caseMeta}
             evaluationReport={evaluationReport}
             transactions={transactions}
+            accounts={accounts}
             onPrev={() => goToStep(5)}
           />
         )}

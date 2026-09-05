@@ -20,3 +20,7 @@ yarn-error.log*
 
 # OS Files
 .DS_Store
+
+# Real-case regression datasets contain sensitive legal and banking data.
+test-data/private/
+tmp/

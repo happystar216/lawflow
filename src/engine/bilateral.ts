@@ -47,7 +47,7 @@ export function aggregateCounterparties(
     item.transactionCount += 1;
     if (tx.direction === 'IN') {
       item.totalIn += tx.amount;
-    } else {
+    } else if (tx.direction === 'OUT') {
       item.totalOut += tx.amount;
     }
     item.netOut = item.totalOut - item.totalIn;

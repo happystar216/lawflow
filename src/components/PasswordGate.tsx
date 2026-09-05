@@ -99,7 +99,7 @@ export const PasswordGate: React.FC<PasswordGateProps> = ({ children }) => {
 
           {/* Footer Note */}
           <div className="text-center pt-2 text-[11px] text-slate-500">
-            基于 Cloudflare 边缘隔离与本地内存加密
+            采用隔离处理与本地安全存储
           </div>
         </div>
       </div>

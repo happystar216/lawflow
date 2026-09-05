@@ -2,6 +2,7 @@ import { CaseMetadata } from '../types/case';
 import { BankAccount, StandardTransaction } from '../types/transaction';
 import { CaseEvaluationReport } from '../types/evidence';
 import { getCurrentSessionUser } from './authStore';
+import { normalizeRecognizedData } from '../utils/recognizedDataNormalizer';
 
 export interface CaseRecord {
   metadata: CaseMetadata;
@@ -148,10 +149,11 @@ export function importCaseBackupJson(jsonString: string): CaseRecord {
     throw new Error('无效的案件备份文件格式');
   }
   const currentUser = getCurrentSessionUser();
+  const normalized = normalizeRecognizedData(parsed.accounts || [], parsed.transactions || []);
   return {
     metadata: parsed.metadata,
-    accounts: parsed.accounts || [],
-    transactions: parsed.transactions || [],
+    accounts: normalized.accounts,
+    transactions: normalized.transactions,
     evaluationReport: parsed.evaluationReport || null,
     userId: currentUser?.id || 'DEFAULT_USER',
     updatedAt: new Date().toISOString()

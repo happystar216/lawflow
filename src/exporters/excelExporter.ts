@@ -3,7 +3,7 @@ import { saveAs } from 'file-saver';
 import { CaseMetadata } from '../types/case';
 import { CaseEvaluationReport } from '../types/evidence';
 import { RuleCategory, VerificationStatus } from '../types/rules';
-import { StandardTransaction } from '../types/transaction';
+import { BankAccount, StandardTransaction } from '../types/transaction';
 
 const CATEGORY_LABELS: Record<RuleCategory, string> = {
   ASSET_TRANSFER: '异常资金流出',
@@ -23,7 +23,8 @@ const VERIFICATION_LABELS: Record<VerificationStatus, string> = {
 export async function exportEvidenceAnalysisExcel(
   caseMeta: CaseMetadata,
   report: CaseEvaluationReport,
-  transactions: StandardTransaction[]
+  transactions: StandardTransaction[],
+  accounts: BankAccount[] = []
 ): Promise<void> {
   const workbook = new ExcelJS.Workbook();
   workbook.creator = '执析宝 LawFlow';
@@ -42,6 +43,17 @@ export async function exportEvidenceAnalysisExcel(
     { '项目': '分析线索数', '内容': report.matches.length, '说明': '规则命中不等同于违法事实成立' },
     { '项目': '报告性质', '内容': '证据分析', '说明': '不属于申请书、起诉状、法律意见书或刑事移送材料' }
   ]);
+
+  appendObjectSheet(workbook, '原始数据核对事项', accounts.flatMap(account => (account.reviewIssues || []).map((issue, index) => ({
+    '账户': `${account.bankName} ${account.accountNumber}`,
+    '序号': index + 1,
+    '重要程度': issue.severity === 'REQUIRED' ? '必须核对' : '建议核对',
+    '问题': issue.title,
+    '原始页码': issue.pageNumber ? `第${issue.pageNumber}页` : '',
+    '核对要求': issue.instructions.join('；'),
+    '处理状态': reviewStatusLabel(issue.status),
+    '律师说明': issue.resolutionNote || ''
+  }))));
 
   const allClues = report.matches.map((match, index) => {
     const firstTx = txMap.get(match.transactionIds[0]);
@@ -73,7 +85,7 @@ export async function exportEvidenceAnalysisExcel(
     '账号': transaction.accountNumber,
     '银行': transaction.bankName,
     '交易时间': transaction.transactionTime,
-    '收支方向': transaction.direction === 'IN' ? '收入/贷方' : '支出/借方',
+    '收支方向': transaction.direction === 'IN' ? '收入/贷方' : transaction.direction === 'OUT' ? '支出/借方' : '待核对',
     '交易金额': transaction.amount,
     '交易后余额': transaction.balance,
     '对手方名称': transaction.counterpartyName,
@@ -132,6 +144,10 @@ function appendObjectSheet(workbook: ExcelJS.Workbook, name: string, rows: Recor
       row.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF8FAFC' } };
     }
   });
+}
+
+function reviewStatusLabel(status: 'PENDING' | 'CONFIRMED' | 'CORRECTED' | 'UNRESOLVED'): string {
+  return status === 'CONFIRMED' ? '已确认' : status === 'CORRECTED' ? '已修正' : status === 'UNRESOLVED' ? '无法确认' : '待核对';
 }
 
 function sourceLocations(transactionIds: string[], txMap: Map<string, StandardTransaction>): string {

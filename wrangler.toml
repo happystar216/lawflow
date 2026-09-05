@@ -2,6 +2,11 @@ name = "lawflow"
 compatibility_date = "2024-09-23"
 pages_build_output_dir = "dist"
 
+# Required production secrets / variables (configure in Cloudflare; never commit values):
+# DASHSCOPE_API_KEY  = 百炼 API Key（Secret）
+# DASHSCOPE_BASE_URL = https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+# QWEN_MODEL         = qwen3.8-flash（optional; this is the code default）
+
 # Cloudflare D1 Database Binding (Optional for cloud sync)
 # [[d1_databases]]
 # binding = "DB"

@@ -84,7 +84,7 @@ export class LawFlowEngine {
         if (t3 && tx.transactionDate >= t3 && !tx.isInternalTransfer) {
           totalIncomeDuringExecution += tx.amount;
         }
-      } else {
+      } else if (tx.direction === 'OUT') {
         totalRawOut += tx.amount;
         if (!tx.isInternalTransfer) {
           if (t3 && tx.transactionDate >= t3) {

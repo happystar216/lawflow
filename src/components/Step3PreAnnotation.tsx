@@ -1,7 +1,9 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { BankAccount, AccountOwnerType } from '../types/transaction';
 import { CaseMetadata, AssetDeclarationItem } from '../types/case';
 import { ArrowRight, ArrowLeft, Calendar, UserCheck, FileText, Plus, Trash2 } from 'lucide-react';
+import { accountIdentityKey } from '../utils/accountIdentity';
+import { cleanAccountHolderName } from '../utils/recognizedDataNormalizer';
 
 interface Step3Props {
   caseMeta: CaseMetadata;
@@ -24,14 +26,31 @@ export const Step3PreAnnotation: React.FC<Step3Props> = ({
   const [declaredContent, setDeclaredContent] = useState('');
   const [declaredValue, setDeclaredValue] = useState<number>(0);
 
-  const handleAccountOwnerChange = (accNum: string, ownerType: AccountOwnerType) => {
+  const ownershipGroups = useMemo(() => {
+    const groups = new Map<string, BankAccount[]>();
+    for (const account of accounts.filter(item => item.ownerType !== 'UNKNOWN' && item.transactionCount > 0)) {
+      const holder = cleanAccountHolderName(account.accountName);
+      groups.set(holder, [...(groups.get(holder) || []), account]);
+    }
+    return [...groups.entries()].map(([holder, holderAccounts]) => ({ holder, accounts: holderAccounts }));
+  }, [accounts]);
+
+  const handleAccountOwnerChange = (accountKey: string, ownerType: AccountOwnerType) => {
     const updated = accounts.map(a => {
-      if (a.accountNumber === accNum) {
+      if (accountIdentityKey(a) === accountKey) {
         return { ...a, ownerType };
       }
       return a;
     });
     onAccountsUpdated(updated);
+  };
+
+  const handleHolderOwnerChange = (holder: string, ownerType: AccountOwnerType) => {
+    onAccountsUpdated(accounts.map(account => (
+      cleanAccountHolderName(account.accountName) === holder && account.ownerType !== 'UNKNOWN'
+        ? { ...account, ownerType }
+        : account
+    )));
   };
 
   const handleTimelineChange = (field: keyof CaseMetadata['timeline'], value: string) => {
@@ -91,30 +110,57 @@ export const Step3PreAnnotation: React.FC<Step3Props> = ({
         </p>
 
         <div className="divide-y divide-slate-100">
-          {accounts.map(acc => (
-            <div key={acc.accountNumber} className="py-3 flex items-center justify-between flex-wrap gap-3">
-              <div>
-                <div className="text-xs font-bold text-slate-800">
-                  {acc.bankName} - {acc.accountName || '未知户名'}
+          {ownershipGroups.map(group => {
+            const ownerTypes = [...new Set(group.accounts.map(account => account.ownerType))];
+            const groupOwnerType = ownerTypes.length === 1 ? ownerTypes[0] : 'UNKNOWN';
+            return (
+              <div key={group.holder} className="py-4">
+                <div className="flex items-center justify-between flex-wrap gap-3">
+                  <div>
+                    <div className="text-sm font-bold text-slate-800">{group.holder}</div>
+                    <div className="text-[11px] text-slate-500">名下共 {group.accounts.length} 个识别账户，一次确认即可应用到全部账户</div>
+                  </div>
+                  <div className="flex items-center space-x-2">
+                    <span className="text-xs text-slate-500">账户归属:</span>
+                    <select
+                      value={groupOwnerType}
+                      onChange={event => handleHolderOwnerChange(group.holder, event.target.value as AccountOwnerType)}
+                      className="px-3 py-1.5 text-xs rounded-lg border border-slate-300 bg-white font-medium text-slate-700 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    >
+                      {groupOwnerType === 'UNKNOWN' && <option value="UNKNOWN">各账户归属不一致</option>}
+                      <option value="DEBTOR_MAIN">被执行人本人账户</option>
+                      <option value="SPOUSE">配偶名下账户</option>
+                      <option value="SOLE_CORP">名下一人独资企业公户</option>
+                      <option value="SUSPECT_PROXY">疑似代持人/关联人账户</option>
+                    </select>
+                  </div>
                 </div>
-                <div className="text-[11px] text-slate-400 font-mono">{acc.accountNumber}</div>
+                <details className="mt-3 rounded-lg bg-slate-50 border border-slate-100">
+                  <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-slate-600">查看并单独调整账户</summary>
+                  <div className="divide-y divide-slate-200 border-t border-slate-200">
+                    {group.accounts.map(account => (
+                      <div key={accountIdentityKey(account)} className="px-3 py-2 flex items-center justify-between gap-3 flex-wrap">
+                        <div>
+                          <div className="text-xs font-medium text-slate-700">{account.bankName}</div>
+                          <div className="text-[11px] text-slate-400 font-mono">{account.accountNumber}</div>
+                        </div>
+                        <select
+                          value={account.ownerType}
+                          onChange={event => handleAccountOwnerChange(accountIdentityKey(account), event.target.value as AccountOwnerType)}
+                          className="px-2 py-1 text-[11px] rounded-md border border-slate-300 bg-white"
+                        >
+                          <option value="DEBTOR_MAIN">被执行人本人账户</option>
+                          <option value="SPOUSE">配偶名下账户</option>
+                          <option value="SOLE_CORP">名下一人独资企业公户</option>
+                          <option value="SUSPECT_PROXY">疑似代持人/关联人账户</option>
+                        </select>
+                      </div>
+                    ))}
+                  </div>
+                </details>
               </div>
-
-              <div className="flex items-center space-x-2">
-                <span className="text-xs text-slate-500">账户归属:</span>
-                <select
-                  value={acc.ownerType}
-                  onChange={e => handleAccountOwnerChange(acc.accountNumber, e.target.value as AccountOwnerType)}
-                  className="px-3 py-1.5 text-xs rounded-lg border border-slate-300 bg-white font-medium text-slate-700 focus:outline-none focus:ring-1 focus:ring-blue-500"
-                >
-                  <option value="DEBTOR_MAIN">被执行人本人账户</option>
-                  <option value="SPOUSE">配偶名下账户</option>
-                  <option value="SOLE_CORP">名下一人独资企业公户</option>
-                  <option value="SUSPECT_PROXY">疑似代持人/关联人账户</option>
-                </select>
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </div>
 

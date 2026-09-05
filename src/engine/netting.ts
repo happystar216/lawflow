@@ -30,7 +30,7 @@ export function calculateInternalNetting(
   // Step 1: Match by direct account number / exact name
   for (let i = 0; i < txList.length; i++) {
     const tx = txList[i];
-    if (tx.isInternalTransfer) continue;
+    if (tx.isInternalTransfer || tx.direction === 'UNKNOWN') continue;
 
     // Check if counterparty is explicitly in owned accounts list
     const counterpartyAcc = tx.counterpartyAccount?.trim() || '';

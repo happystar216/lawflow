@@ -1,4 +1,4 @@
-import { PDFDocument, rgb, StandardFonts } from 'pdf-lib';
+import { PDFDocument, rgb, StandardFonts } from 'pdf-lib/dist/pdf-lib.esm.min.js';
 import { saveAs } from 'file-saver';
 import { CaseMetadata } from '../types/case';
 import { CaseEvaluationReport } from '../types/evidence';

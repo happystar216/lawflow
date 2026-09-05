@@ -2,9 +2,12 @@ import React, { useState, useRef } from 'react';
 import { UploadCloud, FileSpreadsheet, FileText, FileImage, CheckCircle2, ArrowRight, ArrowLeft, Trash2, PlusCircle, AlertCircle, ShieldCheck, Sparkles, StopCircle } from 'lucide-react';
 import { BankAccount, StandardTransaction } from '../types/transaction';
 import { parseExcelBankStatement } from '../parsers/excelParser';
-import { parsePdfWithAliyunEcs, DEFAULT_ECS_HOST, OcrProgressInfo } from '../parsers/aliyunEcsOcr';
+import { clearPdfRecoveryCacheForFile, parsePdfWithQwen, QwenProgressInfo } from '../parsers/qwenPdfParser';
+import { deleteSourceDocument, saveSourceDocument } from '../store/sourceDocumentStore';
+import { accountIdentityKey, transactionBelongsToAccount } from '../utils/accountIdentity';
 
 interface Step1Props {
+  caseId: string;
   accounts: BankAccount[];
   transactions: StandardTransaction[];
   onDataUpdated: (accounts: BankAccount[], transactions: StandardTransaction[]) => void;
@@ -13,6 +16,7 @@ interface Step1Props {
 }
 
 export const Step1Upload: React.FC<Step1Props> = ({
+  caseId,
   accounts,
   transactions,
   onDataUpdated,
@@ -21,7 +25,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
 }) => {
   const [isDragging, setIsDragging] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
-  const [progressInfo, setProgressInfo] = useState<OcrProgressInfo | null>(null);
+  const [progressInfo, setProgressInfo] = useState<QwenProgressInfo | null>(null);
   const [statusText, setStatusText] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
@@ -57,25 +61,49 @@ export const Step1Upload: React.FC<Step1Props> = ({
         if (name.endsWith('.xlsx') || name.endsWith('.xls') || name.endsWith('.csv')) {
           setStatusText(`正在解析结构化电子流水: ${file.name}...`);
           const { account, transactions: parsedTx } = await parseExcelBankStatement(file);
+          for (let index = newAccounts.length - 1; index >= 0; index -= 1) {
+            if (newAccounts[index].fileName === file.name) newAccounts.splice(index, 1);
+          }
+          for (let index = newTransactions.length - 1; index >= 0; index -= 1) {
+            if (newTransactions[index].rawSourceFile === file.name) newTransactions.splice(index, 1);
+          }
           newAccounts.push(account);
           newTransactions.push(...parsedTx);
-        } else if (name.endsWith('.pdf') || name.endsWith('.png') || name.endsWith('.jpg') || name.endsWith('.jpeg') || name.endsWith('.webp') || name.endsWith('.bmp')) {
+        } else if (name.endsWith('.pdf')) {
           const controller = new AbortController();
           abortControllerRef.current = controller;
+          let sourceStored = true;
+          try {
+            await saveSourceDocument(caseId, file);
+          } catch (storageError) {
+            sourceStored = false;
+            console.warn('Source document storage unavailable; continuing recognition', storageError);
+          }
 
-          const { account, transactions: parsedTx } = await parsePdfWithAliyunEcs(
+          const { accounts: parsedAccounts, transactions: parsedTx } = await parsePdfWithQwen(
             file,
-            DEFAULT_ECS_HOST,
-            (info: OcrProgressInfo) => {
+            (info: QwenProgressInfo) => {
               setProgressInfo(info);
               if (info.statusText) setStatusText(info.statusText);
             },
             controller.signal
           );
-          newAccounts.push(account);
+          const oldAccountIndexes = newAccounts
+            .map((account, index) => account.fileName === file.name ? index : -1)
+            .filter(index => index >= 0)
+            .reverse();
+          for (const index of oldAccountIndexes) newAccounts.splice(index, 1);
+          for (let index = newTransactions.length - 1; index >= 0; index -= 1) {
+            if (newTransactions[index].rawSourceFile === file.name) newTransactions.splice(index, 1);
+          }
+          newAccounts.push(...parsedAccounts.map(account => sourceStored ? account : {
+            ...account,
+            parseStatus: 'NEEDS_REVIEW' as const,
+            parseWarnings: [...new Set([...(account.parseWarnings || []), '原始文件未能持久保存，请在本次会话中完成原件核对或重新上传'])]
+          }));
           newTransactions.push(...parsedTx);
         } else {
-          setErrorMessage(`不支持的文件格式: ${file.name}，请上传 Excel、CSV、PDF 或扫描图片。`);
+          setErrorMessage(`不支持的文件格式: ${file.name}，请上传 Excel、CSV 或 PDF。图片请先合并或转换为 PDF。`);
         }
       } catch (err: any) {
         if (err.name === 'AbortError' || err.message?.includes('停止')) {
@@ -104,10 +132,22 @@ export const Step1Upload: React.FC<Step1Props> = ({
     }
   };
 
-  const handleRemoveAccount = (accNum: string) => {
-    const updatedAccounts = accounts.filter(a => a.accountNumber !== accNum);
-    const updatedTransactions = transactions.filter(t => t.accountNumber !== accNum);
+  const handleRemoveAccount = async (accountKey: string) => {
+    const removed = accounts.find(account => accountIdentityKey(account) === accountKey);
+    if (!removed) return;
+    const sourceAccounts = accounts.filter(account => account.fileName === removed.fileName);
+    const sourceAccountCount = sourceAccounts.length;
+    if (!window.confirm(`确定删除来源文件“${removed.fileName}”及其识别出的 ${sourceAccountCount} 个账户吗？重新上传时将从头识别。`)) return;
+    const updatedAccounts = accounts.filter(account => account.fileName !== removed.fileName);
+    const updatedTransactions = transactions.filter(transaction => transaction.rawSourceFile
+      ? transaction.rawSourceFile !== removed.fileName
+      : !sourceAccounts.some(account => transactionBelongsToAccount(transaction, account)));
+    await Promise.all([
+      deleteSourceDocument(caseId, removed.fileName),
+      clearPdfRecoveryCacheForFile(removed.fileName)
+    ]);
     onDataUpdated(updatedAccounts, updatedTransactions);
+    setStatusText(`已删除 ${removed.fileName} 的旧识别结果；重新上传时将从头识别`);
   };
 
   return (
@@ -122,7 +162,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
           <div className="flex items-center space-x-2">
             <span className="inline-flex items-center space-x-1.5 px-3 py-1 rounded-full bg-blue-50 text-blue-700 border border-blue-200 text-xs font-medium">
               <Sparkles className="w-3.5 h-3.5 text-blue-600" />
-              <span>AI 银行流水智能穿透引擎已就绪</span>
+              <span>银行流水智能解析引擎已就绪</span>
             </span>
 
             <span className="inline-flex items-center space-x-1 px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 text-[11px] font-medium">
@@ -155,7 +195,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
           type="file"
           id="file-upload"
           multiple
-          accept=".xlsx,.xls,.csv,.pdf,.png,.jpg,.jpeg,.webp,.bmp"
+          accept=".xlsx,.xls,.csv,.pdf"
           onChange={(e) => e.target.files && handleFiles(e.target.files)}
           className="hidden"
           disabled={isProcessing}
@@ -175,7 +215,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
             </label>
             <span className="text-slate-600 text-base"> 或直接拖拽文件到这里</span>
             <p className="text-xs text-slate-400 mt-1">
-              支持格式：.xlsx, .xls, .csv, .pdf, .jpg, .png, .jpeg（单文件支持 100+ 页扫描件）
+              支持格式：.xlsx, .xls, .csv, .pdf（支持长篇 PDF 分页解析与失败页自动复核）
             </p>
           </div>
 
@@ -253,7 +293,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {accounts.map((acc) => (
               <div
-                key={acc.accountNumber}
+                key={accountIdentityKey(acc)}
                 className="flex items-start justify-between p-4 rounded-xl border border-slate-200 hover:border-slate-300 bg-slate-50/50 hover:bg-slate-50 transition"
               >
                 <div className="flex items-start space-x-3">
@@ -285,9 +325,9 @@ export const Step1Upload: React.FC<Step1Props> = ({
                 </div>
 
                 <button
-                  onClick={() => handleRemoveAccount(acc.accountNumber)}
+                  onClick={() => handleRemoveAccount(accountIdentityKey(acc))}
                   className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition"
-                  title="删除该账户流水"
+                  title="删除该来源文件及全部识别结果"
                 >
                   <Trash2 className="w-4 h-4" />
                 </button>

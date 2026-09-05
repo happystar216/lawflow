@@ -1,4 +1,5 @@
 import { BankAccount, StandardTransaction } from '../types/transaction';
+import { transactionBelongsToAccount } from '../utils/accountIdentity';
 
 export interface AuditReport {
   accountNumber: string;
@@ -26,13 +27,15 @@ export function auditAccountBalance(
   let totalExpense = 0;
   const suspiciousRows: { transactionId: string; reason: string }[] = [];
 
-  const accountTx = transactions.filter(t => t.accountNumber === account.accountNumber);
+  const accountTx = transactions.filter(t => transactionBelongsToAccount(t, account));
 
   accountTx.forEach(tx => {
     if (tx.direction === 'IN') {
       totalIncome += tx.amount;
-    } else {
+    } else if (tx.direction === 'OUT') {
       totalExpense += tx.amount;
+    } else {
+      suspiciousRows.push({ transactionId: tx.id, reason: '收支方向待核对' });
     }
 
     if (tx.amount <= 0) {
