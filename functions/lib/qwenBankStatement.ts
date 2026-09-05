@@ -95,7 +95,7 @@ const extractionPrompt = (expectedPages: number, inputKind: 'pdf' | 'image', isP
   "warnings":[]
 }`;
 
-const countVerificationPrompt = `你只负责判断页面类型并独立清点这一页中的有效银行交易明细。开户信息、账户清单、余额查询、法院文书、调查令回执都不是交易明细，必须计为0。跨行显示的同一笔只计1笔，页眉、页脚、合计、小计、期初和期末余额不计。严格输出 JSON：{"pageType":"TRANSACTIONS、ACCOUNT_INFO、DOCUMENT、BLANK 或 UNKNOWN","transactionCount":0,"readability":"CLEAR、UNCERTAIN 或 BLANK"}`;
+const countVerificationPrompt = `你只负责判断页面类型并独立清点这一页中的有效银行交易明细。开户信息、账户清单、余额查询、法院文书、调查令回执都不是交易明细，必须计为0。若表格内明确印有“无明细”、“当前查询条件下无明细内容”，或表格行内无具体交易日期和发生额（仅为空白表格线或留白网格），必须判定 transactionCount 为 0，绝对不得清点空白行。跨行显示的同一笔只计1笔，页眉、页脚、合计、小计、期初和期末余额不计。严格输出 JSON：{"pageType":"TRANSACTIONS、ACCOUNT_INFO、DOCUMENT、BLANK 或 UNKNOWN","transactionCount":0,"readability":"CLEAR、UNCERTAIN 或 BLANK"}`;
 
 const contextualAuditPrompt = (hint: string) => `这是一次异常页复核。输入图片依次标注为上一页、目标页、下一页；只输出目标页的结构化结果，上一页和下一页仅用于拼接跨页交易、确认列含义和本方账户。禁止把相邻页独立交易重复输出。
 

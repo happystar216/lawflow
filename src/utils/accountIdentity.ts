@@ -25,7 +25,9 @@ export function normalizeAccountIdentityPart(value: string): string {
 
 export function isReliableAccountNumber(value: string): boolean {
   const normalized = normalizeAccountIdentityPart(value || '');
+  const isChineseIdCard = /^[1-6]\d{5}(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[\dxX]$/i.test(normalized);
   return normalized.length >= 8
+    && !isChineseIdCard
     && !/待核验|待归属|未知|未识别|unknown/.test(normalized);
 }
 

@@ -255,8 +255,12 @@ export const Step4Compute: React.FC<Step4Props> = ({
                 </div>
               </div>
 
-              <div className="p-3 bg-blue-50/60 rounded-xl border border-blue-100 text-xs text-blue-800">
-                💡 <strong>穿透结论</strong>：被执行人虽在法庭声称“无财产可供执行”，但流水经内部对冲后，其在执行立案后依然发生了高达 <strong>¥{evaluationReport.postExecutionTransferAmount.toLocaleString()} 元</strong> 的对外转移支付，且执行期间总收入覆盖标的额的 <strong>{(evaluationReport.solvencyCoverageRate * 100).toFixed(0)}%</strong>，完全具备履行能力。
+              <div className="p-3 bg-blue-50/60 rounded-xl border border-blue-100 text-xs text-blue-800 leading-relaxed">
+                {evaluationReport.postExecutionTransferAmount > 0 ? (
+                  <>💡 <strong>穿透结论</strong>：被执行人虽在法庭声称“无财产可供执行”，但流水经内部对冲后，其在执行立案后依然发生了高达 <strong>¥{evaluationReport.postExecutionTransferAmount.toLocaleString()} 元</strong> 的对外转移支付，且执行期间总收入覆盖标的额的 <strong>{(evaluationReport.solvencyCoverageRate * 100).toFixed(0)}%</strong>，完全具备履行能力。</>
+                ) : (
+                  <>💡 <strong>穿透结论</strong>：被执行人名下流水经内部对冲后，真实外部净流出达 <strong>¥{(evaluationReport.totalExternalNetOut || evaluationReport.totalRawOut).toLocaleString()} 元</strong>；{evaluationReport.postExecutionTransferAmount === 0 ? '若尚未在前置标注中设定【执行立案日】，系统无法锁定立案后突击转移节点，建议返回设定时间坐标；若已设定，则表明立案后无新增大额流出。' : ''}</>
+                )}
               </div>
             </div>
 

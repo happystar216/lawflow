@@ -3,9 +3,9 @@ import { createPdfPageImageRenderer, PdfPageImage } from './pdfPageImageRenderer
 import { mergeQwenChunkResults as mergeVerifiedChunks } from './qwenResultMerger';
 export { mergeQwenChunkResults } from './qwenResultMerger';
 
-const MAX_CONCURRENCY = 48;
-const INITIAL_CONCURRENCY = 16;
-const MIN_CONCURRENCY = 4;
+const MAX_CONCURRENCY = 10;
+const INITIAL_CONCURRENCY = 5;
+const MIN_CONCURRENCY = 2;
 const SINGLE_PAGE_ATTEMPTS = 5;
 const REQUEST_TIMEOUT_MS = 150_000;
 const CACHE_VERSION = 'page-image-v4-dense-page-slices';
@@ -145,8 +145,10 @@ async function parsePageWithFallback(
       permit?.failure(isTransientWorkerError(error));
       permit = undefined;
       assertNotAborted(signal);
-      lastError = error;
-      if (attempt < variants.length - 1) await abortableDelay(Math.min(4000, (attempt + 1) * 1000), signal);
+      if (attempt < variants.length - 1) {
+        const delay = isTransientWorkerError(error) ? Math.min(10000, (attempt + 1) * 2500) : Math.min(4000, (attempt + 1) * 1000);
+        await abortableDelay(delay, signal);
+      }
     }
   }
 
