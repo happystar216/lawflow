@@ -10,6 +10,24 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     sourcemap: false,
-    chunkSizeWarningLimit: 1500,
+    chunkSizeWarningLimit: 2000,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes('node_modules/pdfjs-dist')) {
+            return 'pdfjs-vendor';
+          }
+          if (id.includes('node_modules/echarts')) {
+            return 'echarts-vendor';
+          }
+          if (id.includes('node_modules/exceljs') || id.includes('node_modules/docx')) {
+            return 'office-vendor';
+          }
+          if (id.includes('node_modules/react') || id.includes('node_modules/react-dom')) {
+            return 'react-vendor';
+          }
+        }
+      }
+    }
   }
 });

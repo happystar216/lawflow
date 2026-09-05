@@ -195,13 +195,14 @@ function buildAccountSummaries(
       balanceContinuityIssueCount: continuityIssues.length
     };
   });
-  if (orphanWarnings.length) {
-    const orphanPages = orphanWarnings.map(warningPage).filter((page): page is number => Boolean(page));
+  const actionableOrphanWarnings = orphanWarnings.filter(w => !/空白|留白/.test(w) || /缺少|漏|失败|错误/.test(w));
+  if (actionableOrphanWarnings.length) {
+    const orphanPages = actionableOrphanWarnings.map(warningPage).filter((page): page is number => Boolean(page));
     accountSummaries.push({
       accountNumber: `待归属页面-${sourceFileName}`, accountName: '待归属页面', bankName: '待核对',
       ownerType: 'UNKNOWN', fileName: sourceFileName, fileType: 'pdf', totalIn: 0, totalOut: 0, transactionCount: 0,
       startDate: '', endDate: '', startBalance: 0, endBalance: 0, isBalanced: false, balanceDiff: 0,
-      balanceAvailable: false, parseStatus: 'NEEDS_REVIEW', parseWarnings: [...new Set(orphanWarnings)],
+      balanceAvailable: false, parseStatus: 'NEEDS_REVIEW', parseWarnings: [...new Set(actionableOrphanWarnings)],
       coveredPages: [...new Set(orphanPages)].sort((a, b) => a - b), totalPages, balanceContinuityIssueCount: 0
     });
   }
@@ -217,7 +218,19 @@ function inheritMissingAccountIdentity(transactions: StandardTransaction[]): Sta
     const next = transactions.slice(index + 1).find(isKnown);
     const previousKey = previous ? ownerAccountKey(previous) : '';
     const nextKey = next ? ownerAccountKey(next) : '';
-    const inherited = previous && next ? (previousKey === nextKey ? previous : undefined) : previous || next;
+    const cleanBank = (name: string) => name.replace(/中国|银行|个人|活期|结算|账户/g, '').trim();
+    const matchesPreviousBank = Boolean(
+      previous && (
+        !transaction.bankName ||
+        transaction.bankName.includes('待核验') ||
+        transaction.bankName.includes(previous.bankName) ||
+        previous.bankName.includes(transaction.bankName) ||
+        (cleanBank(transaction.bankName) && cleanBank(transaction.bankName) === cleanBank(previous.bankName))
+      )
+    );
+    const inherited = previous && next
+      ? (previousKey === nextKey || matchesPreviousBank ? previous : undefined)
+      : previous || next;
     return inherited ? {
       ...transaction,
       accountNumber: inherited.accountNumber,
