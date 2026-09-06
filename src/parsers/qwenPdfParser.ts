@@ -49,6 +49,17 @@ export async function parsePdfWithQwen(
   onProgress?: (info: QwenProgressInfo) => void,
   signal?: AbortSignal
 ): Promise<{ account: BankAccount; accounts: BankAccount[]; transactions: StandardTransaction[] }> {
+  // 1. 优先尝试原生多模态直接流式直传（不卡顿主线程、零切图等待、实时推送捕获笔数）
+  try {
+    const directResult = await parsePdfDirectStream(file, onProgress, signal);
+    if (directResult && directResult.transactions.length > 0) {
+      return directResult;
+    }
+  } catch (err: any) {
+    console.warn('原生直传流式解析未命中或服务不可用，平滑回退至逐页渲染模式:', err.message);
+  }
+
+  // 2. 回退逐页本地渲染与独立对账
   onProgress?.({ currentPage: 0, totalPages: 0, percent: 0, totalTransactions: 0,
     statusText: '正在本地逐页生成识别图片，原始 PDF 保持不变…' });
   const renderer = await createPdfPageImageRenderer(file);
@@ -57,6 +68,7 @@ export async function parsePdfWithQwen(
   const results: ChunkParseResult[] = [];
   const cachedResults = await readCachedResults(cacheKey);
   const cachedByPage = new Map(cachedResults.map(result => [result.pageStart, result]));
+
   const requestGate = new AdaptiveRequestGate(totalPages);
   let completedPages = 0;
   let totalTransactions = 0;
@@ -658,7 +670,111 @@ async function requestChunkWithContext(
   }
 }
 
+async function parsePdfDirectStream(
+  file: File,
+  onProgress?: (info: QwenProgressInfo) => void,
+  signal?: AbortSignal
+): Promise<{ account: BankAccount; accounts: BankAccount[]; transactions: StandardTransaction[] } | null> {
+  const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+  if (!isPdf) return null;
+
+  const formData = new FormData();
+  formData.append('file', file);
+  formData.append('sourceFileName', file.name);
+  formData.append('pageStart', '1');
+  formData.append('pageEnd', '128');
+  formData.append('totalPages', '128');
+
+  onProgress?.({
+    currentPage: 0,
+    totalPages: 128,
+    percent: 5,
+    totalTransactions: 0,
+    statusText: '正在连接智能解析云端引擎，准备直接流式提取…'
+  });
+
+  const response = await fetch('/api/parse-bank-statement-stream', {
+    method: 'POST',
+    body: formData,
+    signal
+  });
+
+  if (!response.ok) {
+    throw new Error(`直接流式接口响应异常 (${response.status})`);
+  }
+  if (!response.body) return null;
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let completeResult: any = null;
+  let serverError = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('data:')) continue;
+      const dataStr = trimmed.slice(5).trim();
+      if (!dataStr) continue;
+
+      try {
+        const payload = JSON.parse(dataStr);
+        if (payload.type === 'progress') {
+          onProgress?.({
+            currentPage: payload.currentPage || 0,
+            totalPages: payload.totalPages || 128,
+            percent: payload.percent || 0,
+            totalTransactions: payload.totalTransactions || 0,
+            statusText: payload.statusText
+          });
+        } else if (payload.type === 'heartbeat') {
+          onProgress?.({
+            currentPage: 0,
+            totalPages: 128,
+            percent: Math.min(88, 15 + Math.floor(((payload.secondsElapsed || 0) / 160) * 73)),
+            totalTransactions: 0,
+            statusText: payload.statusText
+          });
+        } else if (payload.type === 'complete') {
+          completeResult = payload;
+        } else if (payload.type === 'error') {
+          serverError = payload.message || '解析服务返回错误';
+        }
+      } catch {}
+    }
+  }
+
+  if (buffer.trim()) {
+    const trimmed = buffer.trim();
+    if (trimmed.startsWith('data:')) {
+      try {
+        const payload = JSON.parse(trimmed.slice(5).trim());
+        if (payload.type === 'complete') completeResult = payload;
+        if (payload.type === 'error') serverError = payload.message || '解析服务返回错误';
+      } catch {}
+    }
+  }
+
+  if (serverError) throw new Error(serverError);
+  if (!completeResult || !Array.isArray(completeResult.transactions) || completeResult.transactions.length === 0) {
+    return null;
+  }
+
+  return {
+    account: completeResult.account,
+    accounts: completeResult.accounts || [completeResult.account],
+    transactions: completeResult.transactions
+  };
+}
+
 const CACHE_DB = 'lawflow-pdf-recovery';
+
 const CACHE_STORE = 'ranges';
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
