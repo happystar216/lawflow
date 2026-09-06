@@ -1,7 +1,17 @@
-import { getDocument, GlobalWorkerOptions, PDFDocumentProxy } from 'pdfjs-dist';
-import workerUrl from 'pdfjs-dist/build/pdf.worker.min.js?url';
+import type { PDFDocumentProxy } from 'pdfjs-dist';
 
-GlobalWorkerOptions.workerSrc = workerUrl;
+let pdfjsPromise: Promise<any> | null = null;
+async function getPdfjs() {
+  if (!pdfjsPromise) {
+    pdfjsPromise = (async () => {
+      const pdfjs = await import('pdfjs-dist');
+      const workerUrl = (await import('pdfjs-dist/build/pdf.worker.min.js?url')).default;
+      pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
+      return pdfjs;
+    })();
+  }
+  return pdfjsPromise;
+}
 
 const MAX_IMAGE_PIXELS = 12_000_000;
 const MAX_IMAGE_EDGE = 5_000;
@@ -24,7 +34,8 @@ export interface PdfPageImageRenderer {
 }
 
 export async function createPdfPageImageRenderer(file: File): Promise<PdfPageImageRenderer> {
-  const loadingTask = getDocument({ data: new Uint8Array(await file.arrayBuffer()) });
+  const pdfjs = await getPdfjs();
+  const loadingTask = pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()) });
   const document = await loadingTask.promise;
   if (!document.numPages) throw new Error('PDF 中没有可读取的页面');
 
