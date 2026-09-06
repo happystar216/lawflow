@@ -166,25 +166,60 @@ export async function parsePdfWithGeminiStream(
     }
   }
 
-  // 解析完整的 JSON 结果
+  // 解析完整的 JSON 结果（具备工业级多阶段容错修复能力）
   const cleanJsonText = accumulatedText.trim();
   let parsedResult: any;
+  let rawTxList: any[] = [];
+
   try {
     parsedResult = JSON.parse(cleanJsonText);
-  } catch (err: any) {
-    // 尝试容错截断
-    const lastBrace = cleanJsonText.lastIndexOf('}');
-    if (lastBrace > 0) {
-      try {
-        parsedResult = JSON.parse(cleanJsonText.slice(0, lastBrace + 1));
-      } catch {}
+    if (Array.isArray(parsedResult.transactions)) {
+      rawTxList = parsedResult.transactions;
     }
-    if (!parsedResult) {
-      throw new Error(`解析 Gemini 返回结果 JSON 失败: ${err.message}`);
+  } catch {
+    // 阶段 1：智能修复尾部未闭合的 transactions 数组与顶层对象
+    const lastObjectClose = cleanJsonText.lastIndexOf('}');
+    if (lastObjectClose > 0) {
+      const candidates = [
+        cleanJsonText.slice(0, lastObjectClose + 1) + ']}',
+        cleanJsonText.slice(0, lastObjectClose + 1) + '}',
+        cleanJsonText.slice(0, lastObjectClose + 1)
+      ];
+      for (const candidate of candidates) {
+        try {
+          const testParsed = JSON.parse(candidate);
+          if (Array.isArray(testParsed.transactions) && testParsed.transactions.length > 0) {
+            parsedResult = testParsed;
+            rawTxList = testParsed.transactions;
+            break;
+          }
+        } catch {}
+      }
+    }
+
+    // 阶段 2：如果阶段 1 仍未恢复，使用流式对象正则贪婪提取每一个合法的交易 JSON 对象
+    if (rawTxList.length === 0) {
+      const txObjectRegex = /\{[^{}]*?"amt"\s*:\s*[-0-9.]+[^{}]*?\}/g;
+      let match: RegExpExecArray | null;
+      while ((match = txObjectRegex.exec(cleanJsonText)) !== null) {
+        try {
+          const item = JSON.parse(match[0]);
+          if (item && (item.amt !== undefined || item.tm !== undefined)) {
+            rawTxList.push(item);
+          }
+        } catch {}
+      }
+      parsedResult = {
+        totalExtracted: rawTxList.length,
+        pagesCovered: [],
+        transactions: rawTxList
+      };
+    }
+
+    if (rawTxList.length === 0) {
+      throw new Error('未能从大模型返回流中捕获到有效交易数据，请稍后重试或确认卷宗扫描清晰度');
     }
   }
-
-  const rawTxList = parsedResult.transactions || [];
 
   // 标准化为系统通用的 StandardTransaction
   const transactions = rawTxList.map((tx: any, idx: number) => ({

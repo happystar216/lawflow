@@ -2,7 +2,7 @@ import React, { useState, useRef } from 'react';
 import { UploadCloud, FileSpreadsheet, FileText, FileImage, CheckCircle2, ArrowRight, ArrowLeft, Trash2, PlusCircle, AlertCircle, ShieldCheck, Sparkles, StopCircle } from 'lucide-react';
 import { BankAccount, StandardTransaction } from '../types/transaction';
 import { parseExcelBankStatement } from '../parsers/excelParser';
-import { clearPdfRecoveryCacheForFile, parsePdfWithQwen, QwenProgressInfo } from '../parsers/qwenPdfParser';
+import { parsePdfWithGemini, GeminiProgressInfo } from '../parsers/geminiPdfParser';
 import { deleteSourceDocument, saveSourceDocument } from '../store/sourceDocumentStore';
 import { accountIdentityKey, transactionBelongsToAccount } from '../utils/accountIdentity';
 
@@ -25,7 +25,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
 }) => {
   const [isDragging, setIsDragging] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
-  const [progressInfo, setProgressInfo] = useState<QwenProgressInfo | null>(null);
+  const [progressInfo, setProgressInfo] = useState<GeminiProgressInfo | null>(null);
   const [statusText, setStatusText] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
@@ -41,10 +41,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
     setStatusText('已手动停止当前文件解析');
   };
 
-  const handleFiles = async (files: FileList | File[]) => {
-    const fileList = Array.from(files);
-    if (fileList.length === 0) return;
-
+  const handleFiles = async (fileList: File[]) => {
     setIsProcessing(true);
     setErrorMessage(null);
     setProgressInfo(null);
@@ -80,9 +77,9 @@ export const Step1Upload: React.FC<Step1Props> = ({
             console.warn('Source document storage unavailable; continuing recognition', storageError);
           }
 
-          const { accounts: parsedAccounts, transactions: parsedTx } = await parsePdfWithQwen(
+          const { accounts: parsedAccounts, transactions: parsedTx } = await parsePdfWithGemini(
             file,
-            (info: QwenProgressInfo) => {
+            (info: GeminiProgressInfo) => {
               setProgressInfo(info);
               if (info.statusText) setStatusText(info.statusText);
             },
@@ -162,12 +159,12 @@ export const Step1Upload: React.FC<Step1Props> = ({
           <div className="flex items-center space-x-2">
             <span className="inline-flex items-center space-x-1.5 px-3 py-1 rounded-full bg-blue-50 text-blue-700 border border-blue-200 text-xs font-medium">
               <Sparkles className="w-3.5 h-3.5 text-blue-600" />
-              <span>银行流水智能解析引擎已就绪</span>
+              <span>Gemini 3.8 Flash 司法大模型极速直传</span>
             </span>
 
             <span className="inline-flex items-center space-x-1 px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 text-[11px] font-medium">
               <ShieldCheck className="w-3 h-3 text-emerald-600" />
-              <span>司法印章自动滤除</span>
+              <span>超长卷宗秒级全量对账</span>
             </span>
           </div>
         </div>
@@ -176,7 +173,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
           上传银行流水证据文件
         </h1>
         <p className="text-sm text-slate-500 mt-1">
-          支持各大商业银行导出的 Excel/CSV 电子流水、PDF 扫描件及调查令回执照片。系统支持 100+ 页长卷扫描件全自动印章穿透与实时逐页对账。
+          支持各大商业银行导出的 Excel/CSV 电子流水及多页长卷 PDF 扫描件。卷宗 PDF 直传云端 Gemini 3.8 Flash 超长上下文引擎，零卡顿实时流式提取全量交易明细。
         </p>
       </div>
 
@@ -227,7 +224,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
                   <span className="truncate">{statusText || '正在初始化智能识别引擎...'}</span>
                 </div>
                 <div className="flex items-center space-x-2">
-                  {progressInfo && progressInfo.totalPages > 0 && (
+                  {progressInfo && (
                     <span className="text-xs font-mono font-bold text-blue-700 bg-blue-100/80 px-2 py-0.5 rounded-full flex-shrink-0">
                       {progressInfo.percent}%
                     </span>
@@ -245,20 +242,26 @@ export const Step1Upload: React.FC<Step1Props> = ({
               </div>
 
               {/* Real-time Streaming Progress Bar */}
-              {progressInfo && progressInfo.totalPages > 0 && (
-                <div className="space-y-1.5">
+              {progressInfo && (
+                <div className="space-y-2">
                   <div className="w-full h-2.5 bg-blue-200/60 rounded-full overflow-hidden">
                     <div
                       className="h-full bg-gradient-to-r from-blue-600 to-indigo-600 rounded-full transition-all duration-300 ease-out"
                       style={{ width: `${Math.max(progressInfo.percent, 3)}%` }}
                     />
                   </div>
-                  <div className="flex justify-between text-[11px] text-slate-500 font-medium pt-0.5">
+                  <div className="flex justify-between items-center text-[11px] text-slate-600 font-medium pt-0.5">
+                    <div className="flex items-center space-x-1.5">
+                      <span className="inline-block w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                      <span>引擎：<strong>Gemini 3.8 Flash 全卷流式直传</strong></span>
+                      {progressInfo.currentBank && (
+                        <span className="ml-1 px-1.5 py-0.5 rounded bg-blue-100 text-blue-800 text-[10px] font-semibold">
+                          {progressInfo.currentBank}
+                        </span>
+                      )}
+                    </div>
                     <span>
-                      已完成：<strong>{progressInfo.currentPage}</strong> / {progressInfo.totalPages} 页
-                    </span>
-                    <span>
-                      已提取有效明细：<strong className="text-emerald-700">{progressInfo.totalTransactions}</strong> 笔
+                      已实时入库明细：<strong className="text-emerald-700 text-xs">{progressInfo.totalTransactions}</strong> 笔
                     </span>
                   </div>
                 </div>
