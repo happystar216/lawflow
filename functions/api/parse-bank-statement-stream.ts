@@ -21,8 +21,7 @@ export async function onRequestPost(context: any) {
         secondsElapsed += 3;
         send({
           type: 'heartbeat',
-          secondsElapsed,
-          statusText: `正在进行深度司法审计对账 (已持续 ${secondsElapsed} 秒)，连接保持中…`
+          secondsElapsed
         });
       }, 3000);
 

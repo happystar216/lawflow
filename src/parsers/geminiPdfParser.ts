@@ -61,6 +61,7 @@ export async function parsePdfWithGemini(
   let completeResult: any = null;
   let serverError = '';
   let lastCapturedCount = 0;
+  let lastPercent = 5;
 
   const handleLine = (line: string) => {
     const trimmed = line.trim();
@@ -74,21 +75,43 @@ export async function parsePdfWithGemini(
         if (typeof payload.totalTransactions === 'number' && payload.totalTransactions > lastCapturedCount) {
           lastCapturedCount = payload.totalTransactions;
         }
+        const incomingPercent = Number(payload.percent) || 15;
+        if (incomingPercent > lastPercent) {
+          lastPercent = Math.min(98, incomingPercent);
+        }
         onProgress?.({
-          statusText: payload.statusText || '正在进行司法级流水流式对账…',
+          statusText: payload.statusText || (lastCapturedCount > 0 
+            ? `Gemini 3.8 Flash 正在提取流水明细，已实时捕获 ${lastCapturedCount} 笔…`
+            : 'Gemini 3.8 Flash 正在全量深度审查卷宗…'),
           totalTransactions: payload.totalTransactions || lastCapturedCount,
-          percent: payload.percent || 15,
+          percent: lastPercent,
           currentBank: payload.currentBank,
           isStreaming: true
         });
       } else if (payload.type === 'heartbeat') {
+        const heartbeatPercent = Math.min(92, 15 + Math.floor(((payload.secondsElapsed || 0) / 100) * 75));
+        if (heartbeatPercent > lastPercent) {
+          lastPercent = heartbeatPercent;
+        }
+        // 如果已经捕获到交易明细，提示文案保留提取状态，不被保活心跳覆盖倒退
+        const displayStatus = lastCapturedCount > 0
+          ? `Gemini 3.8 Flash 正在提取流水明细，已实时捕获 ${lastCapturedCount} 笔 (耗时 ${payload.secondsElapsed || 0}s)…`
+          : (payload.statusText || `Gemini 3.8 Flash 正在全量深度审查卷宗 (已耗时 ${payload.secondsElapsed || 0}s)…`);
+
         onProgress?.({
-          statusText: payload.statusText || `Gemini 3.8 Flash 深度审查中 (已持续 ${payload.secondsElapsed || 0} 秒)…`,
+          statusText: displayStatus,
           totalTransactions: lastCapturedCount,
-          percent: Math.min(92, 15 + Math.floor(((payload.secondsElapsed || 0) / 120) * 75)),
+          percent: lastPercent,
           isStreaming: true
         });
       } else if (payload.type === 'complete') {
+        lastPercent = 100;
+        onProgress?.({
+          statusText: `🎉 卷宗审查完成！已成功全量提取并验证 ${payload.totalTransactions || lastCapturedCount} 笔银行流水明细`,
+          totalTransactions: payload.totalTransactions || lastCapturedCount,
+          percent: 100,
+          isStreaming: false
+        });
         completeResult = payload;
       } else if (payload.type === 'error') {
         serverError = payload.message || 'Gemini 解析服务返回异常';
