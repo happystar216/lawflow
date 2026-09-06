@@ -41,7 +41,10 @@ export const Step1Upload: React.FC<Step1Props> = ({
     setStatusText('已手动停止当前文件解析');
   };
 
-  const handleFiles = async (fileList: File[]) => {
+  const handleFiles = async (files: FileList | File[]) => {
+    const fileList = Array.from(files);
+    if (fileList.length === 0) return;
+
     setIsProcessing(true);
     setErrorMessage(null);
     setProgressInfo(null);
@@ -139,12 +142,9 @@ export const Step1Upload: React.FC<Step1Props> = ({
     const updatedTransactions = transactions.filter(transaction => transaction.rawSourceFile
       ? transaction.rawSourceFile !== removed.fileName
       : !sourceAccounts.some(account => transactionBelongsToAccount(transaction, account)));
-    await Promise.all([
-      deleteSourceDocument(caseId, removed.fileName),
-      clearPdfRecoveryCacheForFile(removed.fileName)
-    ]);
+    await deleteSourceDocument(caseId, removed.fileName);
     onDataUpdated(updatedAccounts, updatedTransactions);
-    setStatusText(`已删除 ${removed.fileName} 的旧识别结果；重新上传时将从头识别`);
+    setStatusText(`已删除 ${removed.fileName} 的识别结果`);
   };
 
   return (
