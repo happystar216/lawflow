@@ -10,7 +10,7 @@ export interface NormalizedRecognizedData {
 export function normalizeRecognizedData(
   inputAccounts: BankAccount[], inputTransactions: StandardTransaction[]
 ): NormalizedRecognizedData {
-  const preparedTransactions = restoreCreditCardBalanceCorrections(inputTransactions.map(upgradeLegacyGeminiReviewStatus));
+  const preparedTransactions = restoreUnsupportedBalanceCorrections(inputTransactions.map(upgradeLegacyGeminiReviewStatus));
   const stabilized = healSummaryOverriddenAmounts(stabilizePageAccountIdentities(preparedTransactions));
   const { transactions: deduped, mergedPagesByAccount } = deduplicateTransactions(stabilized);
   const calibrated = calibrateDirectionsByBalanceMath(deduped);
@@ -335,11 +335,29 @@ function upgradeLegacyGeminiReviewStatus(transaction: StandardTransaction): Stan
     : transaction;
 }
 
-function restoreCreditCardBalanceCorrections(transactions: StandardTransaction[]): StandardTransaction[] {
+function restoreUnsupportedBalanceCorrections(transactions: StandardTransaction[]): StandardTransaction[] {
   const creditCardKeys = creditCardAccountKeys(transactions);
   return transactions.map(transaction => {
-    if (!creditCardKeys.has(accountIdentityKey(transaction))) return transaction;
-    if (!/^(?:系统依据前后余额桥接关系提出金额及余额修正|系统依据相邻余额关系提出金额修正)$/.test(transaction.correctionReason || '')) return transaction;
+    const reason = transaction.correctionReason || '';
+    const isBridgeCorrection = reason === '系统依据前后余额桥接关系提出金额及余额修正';
+    const isTwoRowCorrection = reason === '系统依据相邻余额关系提出金额修正';
+    if (!isBridgeCorrection && !isTwoRowCorrection) return transaction;
+
+    const strictDigitBridge = isBridgeCorrection
+      && transaction.originalAmount !== undefined
+      && transaction.originalBalance !== undefined
+      && isOcrDigitVariant(transaction.originalAmount.toFixed(2), transaction.amount.toFixed(2))
+      && isOcrDigitVariant(transaction.originalBalance.toFixed(2), transaction.balance.toFixed(2));
+    if (!creditCardKeys.has(accountIdentityKey(transaction)) && strictDigitBridge) {
+      return {
+        ...transaction,
+        reviewStatus: !transaction.dataQualityIssues?.length && (transaction.extractionConfidence ?? 0) >= 0.8
+          ? 'AUTO_PASSED'
+          : transaction.reviewStatus
+      };
+    }
+    if (!creditCardKeys.has(accountIdentityKey(transaction)) && isTwoRowCorrection) return transaction;
+
     return {
       ...transaction,
       amount: transaction.originalAmount ?? transaction.amount,
@@ -747,12 +765,17 @@ export function healOcrBalanceAndAmountDiscrepancies(transactions: StandardTrans
             curr.balance === impliedBalCurr ||
             isOcrDigitVariant(currBalStr, impliedBalStr);
 
-          if ((isAmtPlausible && isBalPlausible) || (errPrevCurr >= 0.5 && errCurrNext >= 0.5)) {
+          if (isAmtPlausible && isBalPlausible) {
             recordCorrection(curr, '系统依据前后余额桥接关系提出金额及余额修正');
             curr.amount = impliedAmtCurr;
             curr.balance = impliedBalCurr;
-            if (curr.reviewStatus === 'AUTO_PASSED') {
-              curr.reviewStatus = 'CORRECTED';
+            if (
+              isOcrDigitVariant(currAmtStr, impliedAmtStr)
+              && isOcrDigitVariant(currBalStr, impliedBalStr)
+              && !curr.dataQualityIssues?.length
+              && (curr.extractionConfidence ?? 0) >= 0.8
+            ) {
+              curr.reviewStatus = 'AUTO_PASSED';
             }
           }
         }

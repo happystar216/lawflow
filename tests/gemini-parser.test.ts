@@ -56,3 +56,31 @@ test('Gemini parser does not silently rewrite a direction to fit balances', asyn
     globalThis.fetch = originalFetch;
   }
 });
+
+test('Gemini parser uses each page header identity instead of a carried-over transaction account', async () => {
+  const originalFetch = globalThis.fetch;
+  const modelJson = JSON.stringify({
+    totalExtracted: 2,
+    pagesCovered: [4, 6],
+    pageChecks: [
+      { pageNumber: 4, transactionCount: 1, pageType: 'TRANSACTIONS', bankName: '中国工商银行', accountName: '胡艳红', accountNumber: '2308014101400042218' },
+      { pageNumber: 6, transactionCount: 1, pageType: 'TRANSACTIONS', bankName: '中国工商银行', accountName: '胡艳红', accountNumber: '2308417101003074088' }
+    ],
+    transactions: [
+      { p: 4, bk: '中国工商银行', ac: '2308417101003074088', tm: '2025-03-21', dir: 'IN', amt: 3.1, bal: 13.85 },
+      { p: 6, bk: '中国工商银行', ac: '2308417101003074088', tm: '2024-09-21', dir: 'IN', amt: 0.01, bal: 0.01 }
+    ]
+  });
+  globalThis.fetch = async () => new Response(`data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: modelJson }] } }] })}\n\n`);
+  try {
+    const result = await parsePdfWithGeminiStream(
+      new File(['pdf'], 'test.pdf', { type: 'application/pdf' }),
+      { GEMINI_API_KEY: 'test' }, undefined, undefined, { totalPages: 6 }
+    );
+    assert.deepEqual(result.transactions.map(transaction => transaction.accountNumber), [
+      '2308014101400042218', '2308417101003074088'
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

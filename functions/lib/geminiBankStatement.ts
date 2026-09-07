@@ -38,13 +38,13 @@ function buildGeminiDirectPrompt(options?: GeminiParseOptions): string {
 6. 严格按物理列位对齐提取：摘要栏经常包含合同还款额或代扣协议文本（例如包含 "@2640.00@6@1@" 等），严禁提取摘要中的文本数值代替实际发生额！必须严格提取表格中【交易金额】一列印刷的真实发生额数值。
 7. 忠实还原数字原样：仔细核验千分位逗号与每位数字（例如 “-4,000.00” 是 4000.00，注意区分首位点阵字形），按印刷字面原样输出，严禁自行心算凑数或编造虚假数字。
 8. 信用卡与特殊账单：如遇到透支余额为负数、按月打印的周期性利息还款或免收年费（发生额印为 0.00），均如实按原件印刷数值记录。
-9. pageChecks 必须逐页列出原件的每一页，包括空白页和非交易文书页；transactions 数量必须等于各交易页 transactionCount 之和。无法确认时使用 UNKNOWN，不得虚构已覆盖页面。
+9. pageChecks 必须逐页列出原件的每一页，包括空白页和非交易文书页；transactions 数量必须等于各交易页 transactionCount 之和。每个交易页必须从该页页眉独立读取本方 bankName、accountName、accountNumber，不得沿用上一页或下一页账号；无法确认时留空，不得猜测。
 
 【输出格式】：严格输出标准 JSON，字段精简以避免超限：
 {
   "totalExtracted": 0,
   "pagesCovered": [],
-  "pageChecks": [{"pageNumber": 1, "transactionCount": 0, "pageType": "TRANSACTIONS|ACCOUNT_INFO|DOCUMENT|BLANK|UNKNOWN"}],
+  "pageChecks": [{"pageNumber": 1, "transactionCount": 0, "pageType": "TRANSACTIONS|ACCOUNT_INFO|DOCUMENT|BLANK|UNKNOWN", "bankName": "该页页眉银行", "accountName": "该页页眉户名", "accountNumber": "该页页眉本方账号"}],
   "transactions": [
     {
       "p": 原件页码数字,
@@ -244,6 +244,16 @@ export async function parsePdfWithGeminiStream(
   }
 
   const expectedHolder = options?.respondentName?.trim() || '';
+  const pageIdentities = new Map<number, { bankName: string; accountName: string; accountNumber: string }>();
+  for (const check of Array.isArray(parsedResult.pageChecks) ? parsedResult.pageChecks : []) {
+    const pageNumber = Number(check?.pageNumber);
+    if (!Number.isInteger(pageNumber) || pageNumber < 1) continue;
+    pageIdentities.set(pageNumber, {
+      bankName: String(check?.bankName || '').trim(),
+      accountName: String(check?.accountName || '').trim(),
+      accountNumber: String(check?.accountNumber || '').replace(/\s+/g, '')
+    });
+  }
 
   const rawTransactions = rawTxList.map((tx: any, idx: number) => {
     const rawHolder = String(tx.holder || '').trim();
@@ -255,15 +265,16 @@ export async function parsePdfWithGeminiStream(
     const rawBalance = tx.bal === null || tx.bal === undefined || tx.bal === '' ? null : Number(tx.bal);
     const balance = rawBalance !== null && Number.isFinite(rawBalance) ? rawBalance : null;
     const rawPageNumber = Number.parseInt(String(tx.p || ''), 10);
+    const pageIdentity = pageIdentities.get(rawPageNumber);
     const dataQualityIssues: Array<'INVALID_DATE' | 'INVALID_AMOUNT' | 'UNKNOWN_DIRECTION'> = [];
     if (!transactionTime) dataQualityIssues.push('INVALID_DATE');
     if (!Number.isFinite(rawAmount) || amount <= 0) dataQualityIssues.push('INVALID_AMOUNT');
     if (direction === 'UNKNOWN') dataQualityIssues.push('UNKNOWN_DIRECTION');
     return {
       id: `TX_GEMINI_${idx + 1}`,
-      accountNumber: String(tx.ac || '').replace(/\s+/g, ''),
-      accountName: resolvedAccountName,
-      bankName: String(tx.bk || '商业银行'),
+      accountNumber: pageIdentity?.accountNumber || String(tx.ac || '').replace(/\s+/g, ''),
+      accountName: pageIdentity?.accountName || resolvedAccountName,
+      bankName: pageIdentity?.bankName || String(tx.bk || '商业银行'),
       transactionTime,
       transactionDate: transactionTime.slice(0, 10),
       direction,

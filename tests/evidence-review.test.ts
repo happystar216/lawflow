@@ -394,6 +394,7 @@ test('normalizeRecognizedData mathematically heals OCR single-digit error (4000 
   assert.ok(healedP9Row1, 'p9_row1 must exist');
   assert.equal(healedP9Row1.amount, 4000.00, 'Amount 1000.00 should be healed to 4000.00 based on balance bridge');
   assert.equal(healedP9Row1.balance, 6497.36, 'Balance 6197.36 should be healed to 6497.36 based on balance bridge');
+  assert.equal(healedP9Row1.reviewStatus, 'AUTO_PASSED', 'A strict two-field OCR digit repair should not remain pending');
 
   const healedIssues = balanceContinuityIssues(normalized.transactions);
   assert.equal(healedIssues.length, 0, 'All breaks between Page 9 and Page 8 should be eliminated');
@@ -475,6 +476,30 @@ test('normalizer restores legacy balance-derived amount changes on credit card s
   assert.equal(normalized.transactions[0].correctionReason, undefined);
 });
 
+test('normalizer restores an unsupported legacy balance-bridge amount rewrite', () => {
+  const rewritten: StandardTransaction = {
+    ...makeTx('unsafe-legacy-correction', 9, 2, '2023-07-03', '10:02:06', 'IN', 220, 320),
+    accountNumber: '2308417101003074088', bankName: '中国工商银行',
+    originalAmount: 50, originalBalance: 500, reviewStatus: 'CORRECTED',
+    correctionReason: '系统依据前后余额桥接关系提出金额及余额修正'
+  };
+  const normalized = normalizeRecognizedData([{ ...account, accountNumber: rewritten.accountNumber, bankName: rewritten.bankName }], [rewritten]);
+  assert.equal(normalized.transactions[0].amount, 50);
+  assert.equal(normalized.transactions[0].balance, 500);
+  assert.equal(normalized.transactions[0].correctionReason, undefined);
+});
+
+test('normalizer does not invent a bridge amount when both neighboring balances merely disagree', () => {
+  const rows = [
+    { ...makeTx('unsafe-prev', 9, 1, '2023-07-01', '09:00:00', 'IN', 10, 100), bankName: '中国工商银行' },
+    { ...makeTx('unsafe-current', 9, 2, '2023-07-02', '09:00:00', 'IN', 50, 500), bankName: '中国工商银行' },
+    { ...makeTx('unsafe-next', 9, 3, '2023-07-03', '09:00:00', 'OUT', 20, 300), bankName: '中国工商银行' }
+  ];
+  const normalized = normalizeRecognizedData([{ ...account, bankName: '中国工商银行' }], rows);
+  assert.equal(normalized.transactions.find(transaction => transaction.id === 'unsafe-current')?.amount, 50);
+  assert.equal(normalized.transactions.find(transaction => transaction.id === 'unsafe-current')?.balance, 500);
+});
+
 test('one isolated long-interval mismatch does not label a normal statement page as periodic', () => {
   const rows = [
     { ...makeTx('gap-a', 4, 1, '2023-01-01', '2023-01-01', 'IN', 10, 110), bankName: '中国工商银行' },
@@ -484,5 +509,4 @@ test('one isolated long-interval mismatch does not label a normal statement page
   assert.equal(issues.some(issue => /跨期离散账单/.test(issue.title)), false);
   assert.equal(issues.some(issue => issue.category === 'BALANCE_BREAK'), false);
 });
-
 
