@@ -50,6 +50,8 @@ test('Gemini parser does not silently rewrite a direction to fit balances', asyn
     assert.equal(result.transactions[1].direction, 'OUT');
     assert.equal(result.transactions[1].amount, 50);
     assert.equal(result.transactions[1].balance, 150);
+    assert.equal(result.transactions[1].extractionConfidence, 0.9);
+    assert.equal(result.transactions[1].reviewStatus, 'AUTO_PASSED');
   } finally {
     globalThis.fetch = originalFetch;
   }

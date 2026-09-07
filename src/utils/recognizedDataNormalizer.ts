@@ -10,7 +10,8 @@ export interface NormalizedRecognizedData {
 export function normalizeRecognizedData(
   inputAccounts: BankAccount[], inputTransactions: StandardTransaction[]
 ): NormalizedRecognizedData {
-  const stabilized = healSummaryOverriddenAmounts(stabilizePageAccountIdentities(inputTransactions));
+  const preparedTransactions = inputTransactions.map(upgradeLegacyGeminiReviewStatus);
+  const stabilized = healSummaryOverriddenAmounts(stabilizePageAccountIdentities(preparedTransactions));
   const { transactions: deduped, mergedPagesByAccount } = deduplicateTransactions(stabilized);
   const calibrated = calibrateDirectionsByBalanceMath(deduped);
   const transactions = healOcrBalanceAndAmountDiscrepancies(calibrated);
@@ -36,6 +37,7 @@ export function normalizeRecognizedData(
   const pageWarnings = allWarnings.filter(warning => warningPage(warning));
   const unscopedWarnings = allWarnings.filter(warning => !warningPage(warning));
   const coveredWarningSet = new Set<string>();
+  const assignedUnscopedWarningSet = new Set<string>();
   const keys = new Set([...transactionsByAccount.keys(), ...sourceAccounts.keys()]);
   const accounts: BankAccount[] = [];
 
@@ -47,12 +49,24 @@ export function normalizeRecognizedData(
     const mergedPages = mergedPagesByAccount.get(key) || new Set<number>();
     const pages = [...new Set([...originalPages, ...mergedPages])].sort((a, b) => a - b);
     const pageSet = new Set(pages);
-    const parseWarnings = pageWarnings.filter(warning => {
+    const scopedPageWarnings = pageWarnings.filter(warning => {
       const page = warningPage(warning);
       if (!page || !pageSet.has(page)) return false;
       coveredWarningSet.add(warning);
       return true;
     });
+    // File-level parser warnings belong to a real account when one exists. Assign each
+    // warning once so a shared parser caveat neither creates a fake zero-transaction
+    // account nor appears repeatedly on every account extracted from the same file.
+    const accountUnscopedWarnings = originals
+      .flatMap(original => original.parseWarnings || [])
+      .filter(warning => !isLegacyDerivedWarning(warning) && !warningPage(warning))
+      .filter(warning => {
+        if (assignedUnscopedWarningSet.has(warning)) return false;
+        assignedUnscopedWarningSet.add(warning);
+        return true;
+      });
+    const parseWarnings = [...new Set([...scopedPageWarnings, ...accountUnscopedWarnings])];
     const representative = bestOriginal(originals) || minimalAccount(accountTransactions[0]);
     const bankName = mostFrequent(accountTransactions.map(item => item.bankName).filter(isUsefulBankName))
       || representative.bankName || '待核验银行';
@@ -109,7 +123,21 @@ export function normalizeRecognizedData(
   }
 
   const orphanWarnings = pageWarnings.filter(warning => !coveredWarningSet.has(warning));
-  const documentWarnings = [...new Set([...unscopedWarnings, ...orphanWarnings])];
+  let unassignedUnscopedWarnings = unscopedWarnings.filter(warning => !assignedUnscopedWarningSet.has(warning));
+  // Previously normalized browser data may already contain file-level warnings on a
+  // synthetic review account. Migrate those warnings back to a real account from the
+  // same source file so refreshing an existing import also removes the stale card.
+  if (accounts.length && unassignedUnscopedWarnings.length) {
+    for (const warning of unassignedUnscopedWarnings) {
+      const sourceFile = inputAccounts.find(account => account.parseWarnings?.includes(warning))?.fileName;
+      const target = accounts.find(account => sourceFile && account.fileName === sourceFile) || accounts[0];
+      target.parseWarnings = [...new Set([...(target.parseWarnings || []), warning])];
+      target.parseStatus = 'NEEDS_REVIEW';
+      assignedUnscopedWarningSet.add(warning);
+    }
+    unassignedUnscopedWarnings = unscopedWarnings.filter(warning => !assignedUnscopedWarningSet.has(warning));
+  }
+  const documentWarnings = [...new Set([...unassignedUnscopedWarnings, ...orphanWarnings])];
   if (documentWarnings.length) {
     const existing = inputAccounts.find(isDocumentReviewAccount);
     const sourceFile = existing?.fileName || transactions[0]?.rawSourceFile || inputAccounts[0]?.fileName || '';
@@ -290,6 +318,17 @@ function isLegacyDerivedWarning(warning: string): boolean {
 function warningPage(warning: string): number | undefined {
   const match = warning.match(/第\s*(\d+)\s*页/);
   return match ? Number(match[1]) : undefined;
+}
+
+function upgradeLegacyGeminiReviewStatus(transaction: StandardTransaction): StandardTransaction {
+  const isLegacyBlanketPending = transaction.extractionMethod === 'GEMINI_DIRECT_PDF'
+    && transaction.reviewStatus === 'PENDING'
+    && transaction.extractionConfidence === 0.75
+    && !transaction.dataQualityIssues?.length
+    && !transaction.correctionReason;
+  return isLegacyBlanketPending
+    ? { ...transaction, extractionConfidence: 0.9, reviewStatus: 'AUTO_PASSED' }
+    : transaction;
 }
 
 function isUsefulBankName(value: string): boolean {

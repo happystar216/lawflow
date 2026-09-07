@@ -278,8 +278,8 @@ export async function parsePdfWithGeminiStream(
       rawText: `${tx.tm || ''} ${tx.dir || ''} ${tx.amt || ''} ${tx.sm || ''}`,
       balanceAvailable: balance !== null,
       extractionMethod: 'GEMINI_DIRECT_PDF',
-      extractionConfidence: dataQualityIssues.length ? 0.4 : 0.75,
-      reviewStatus: 'PENDING',
+      extractionConfidence: dataQualityIssues.length ? 0.4 : 0.9,
+      reviewStatus: dataQualityIssues.length ? 'PENDING' : 'AUTO_PASSED',
       dataQualityIssues
     };
   });
