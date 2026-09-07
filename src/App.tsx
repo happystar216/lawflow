@@ -218,8 +218,9 @@ export const App: React.FC = () => {
             accounts={accounts}
             transactions={transactions}
             onDataUpdated={(accs, txs) => {
-              setAccounts(accs);
-              setTransactions(txs);
+              const normalized = normalizeRecognizedData(accs, txs);
+              setAccounts(normalized.accounts);
+              setTransactions(normalized.transactions);
             }}
             onPrev={() => goToStep(0)}
             onNext={() => {
