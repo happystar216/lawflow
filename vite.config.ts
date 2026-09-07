@@ -13,15 +13,20 @@ export default defineConfig({
     chunkSizeWarningLimit: 3000,
     target: 'es2020',
     rollupOptions: {
-      treeshake: {
-        moduleSideEffects: (id) => !id.includes('node_modules/pdfjs-dist')
-      },
       output: {
-        manualChunks: {
-          'react-vendor': ['react', 'react-dom'],
-          'echarts-vendor': ['echarts', 'echarts-for-react'],
-          'office-vendor': ['exceljs', 'docx', 'file-saver'],
-          'pdfjs-vendor': ['pdfjs-dist']
+        manualChunks(id) {
+          if (id.includes('node_modules/pdfjs-dist')) {
+            return 'pdfjs-vendor';
+          }
+          if (id.includes('node_modules/echarts') || id.includes('node_modules/zrender')) {
+            return 'echarts-vendor';
+          }
+          if (id.includes('node_modules/exceljs') || id.includes('node_modules/docx') || id.includes('node_modules/file-saver')) {
+            return 'office-vendor';
+          }
+          if (id.includes('node_modules/react') || id.includes('node_modules/react-dom') || id.includes('node_modules/lucide-react')) {
+            return 'react-vendor';
+          }
         }
       }
     }

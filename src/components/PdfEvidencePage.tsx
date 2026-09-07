@@ -1,9 +1,18 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { FileWarning, LoaderCircle, RotateCw, ZoomIn, ZoomOut } from 'lucide-react';
-import { getDocument, GlobalWorkerOptions } from 'pdfjs-dist';
-import workerUrl from 'pdfjs-dist/build/pdf.worker.min.js?url';
 
-GlobalWorkerOptions.workerSrc = workerUrl;
+let pdfjsLibPromise: Promise<any> | null = null;
+async function getPdfjs() {
+  if (!pdfjsLibPromise) {
+    pdfjsLibPromise = (async () => {
+      const pdfjs = await import('pdfjs-dist');
+      const workerUrl = (await import('pdfjs-dist/build/pdf.worker.min.js?url')).default;
+      pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
+      return pdfjs;
+    })();
+  }
+  return pdfjsLibPromise;
+}
 
 interface PdfEvidencePageProps {
   file: File | null;
@@ -19,7 +28,7 @@ export const PdfEvidencePage: React.FC<PdfEvidencePageProps> = ({ file, pageNumb
 
   useEffect(() => {
     let cancelled = false;
-    let loadingTask: ReturnType<typeof getDocument> | undefined;
+    let loadingTask: any = undefined;
     let renderTask: { cancel: () => void; promise: Promise<unknown> } | undefined;
     if (!file) {
       setStatus('MISSING');
@@ -28,7 +37,8 @@ export const PdfEvidencePage: React.FC<PdfEvidencePageProps> = ({ file, pageNumb
     setStatus('LOADING');
     (async () => {
       try {
-        loadingTask = getDocument({ data: new Uint8Array(await file.arrayBuffer()) });
+        const pdfjs = await getPdfjs();
+        loadingTask = pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()) });
         const document = await loadingTask.promise;
         if (cancelled) return;
         setPageCount(document.numPages);

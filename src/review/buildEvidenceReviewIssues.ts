@@ -81,7 +81,21 @@ export function buildEvidenceReviewIssues(
   }
   for (const [pageNumber, pageIssues] of balanceByPage) {
     const transactionIds = [...new Set(pageIssues.flatMap(({ previous, transaction }) => [previous.id, transaction.id]))];
-    generated.push({
+    const longIntervalCount = pageIssues.filter(i => i.isLongInterval).length;
+    const isMainlyDiscrete = longIntervalCount >= Math.ceil(pageIssues.length / 2);
+
+    if (isMainlyDiscrete) {
+      generated.push({
+        id: stableIssueId(`${account.accountNumber}|discrete_statement|${pageNumber}|${transactionIds.join('|')}`),
+        category: 'DATA_WARNING', severity: 'ADVISORY',
+        title: `第 ${pageNumber || '?'} 页包含跨期离散账单（${pageIssues.length} 处跨月间隔）`,
+        description: `本页流水记账时间跨度较大（记账间隔普遍超过 30 天），多见于利息结计、年费减免、分期代扣或跨月汇总表。建议结合关联消费卡日常流水综合核对。`,
+        instructions: ['确认该页是否属于非逐日利息/还款汇总表', '如无遗漏交易行，可直接标记为已确认', '如存在关联日常消费卡，对照核验总体收支'],
+        pageNumber: pageNumber || undefined,
+        transactionIds, status: 'PENDING'
+      });
+    } else {
+      generated.push({
         id: stableIssueId(`${account.accountNumber}|balance|${pageNumber}|${transactionIds.join('|')}`),
         category: 'BALANCE_BREAK', severity: 'REQUIRED',
         title: `第 ${pageNumber || '?'} 页余额不连续（${pageIssues.length} 处）`,
@@ -90,6 +104,7 @@ export function buildEvidenceReviewIssues(
         pageNumber: pageNumber || undefined,
         transactionIds, status: 'PENDING'
       });
+    }
   }
 
   const existing = new Map((account.reviewIssues || []).map(issue => [issue.id, issue]));
