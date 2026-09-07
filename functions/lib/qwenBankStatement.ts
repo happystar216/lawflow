@@ -86,6 +86,7 @@ const extractionPrompt = (expectedPages: number, inputKind: 'pdf' | 'image', isP
 7. rawRowIndex 使用该页交易明细的 1 起始顺序。transactions 数量必须等于各页有效交易数之和。
 8. 一个分片可能同时包含多家银行或多个账户。每笔 transaction 的 bankName、accountName、accountNumber 必须填写“流水所属的本方账户”（通常来自页眉、账户信息栏或银行卡号），绝不能填写收款人、付款人或对手方的银行与账号。向多家不同银行转账仍然归属于发起交易的同一个本方账户；对方信息只能放入 counterpartyName、counterpartyAccount、counterpartyBank。
 9. 不得把不同本方银行或不同本方账号的交易统一归入 document 中的单一账户。页面切换本方账户时，按该页实际抬头填写。
+10. 严格区分表格中【发生额/交易金额】列与【摘要/备注】栏的文字数字：摘要常有批次号或协议额（如 @2640.00@），若账户余额不足发生部分划扣，必须严格以表格【发生额】列印刷的真实扣款额（如 0.84）为准，严禁将摘要中的应扣额当成实际发生额。
 
 严格输出以下结构：
 {

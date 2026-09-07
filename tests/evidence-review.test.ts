@@ -212,3 +212,40 @@ test('normalizeRecognizedData correctly reconciles opening balance from loan dis
   assert.equal(normalized.accounts[0].balanceDiff < 1, true);
 });
 
+test('normalizeRecognizedData self-heals transaction amount when LLM extracts contract amount from summary instead of actual partial payment', () => {
+  // Row 1 (2023-10-31): bal = 0.84
+  const row1 = makeTx('tx1', 4, 1, '2023-10-31', '21:46:43', 'OUT', 9099.42, 0.84);
+  // Row 2 (2023-11-30): actual withdrawal 0.84, bal 0.00. LLM extracted amount=2640.00 from summary '@2640.00@6@1@', but rawText has 0.84
+  const row2 = {
+    ...makeTx('tx2', 4, 2, '2023-11-30', '21:40:04', 'OUT', 2640.00, 0.00),
+    summary: '5045237200078J001@胡艳红@2640.00@6@1@',
+    rawText: '2023-11-30 21:40:04 OUT 0.84 5045237200078J001@胡艳红@2640.00@6@1@'
+  };
+
+  const rawAccount: BankAccount = {
+    accountNumber: '62220201',
+    accountName: '胡艳红',
+    bankName: '中国光大银行',
+    ownerType: 'DEBTOR_MAIN',
+    fileName: '光大银行流水.pdf',
+    fileType: 'pdf',
+    totalIn: 0,
+    totalOut: 2640.00,
+    transactionCount: 2,
+    startDate: '2023-10-31',
+    endDate: '2023-11-30',
+    startBalance: 0.84 + 9099.42,
+    endBalance: 0.00,
+    isBalanced: false,
+    balanceDiff: 2639.16,
+    balanceAvailable: true
+  };
+
+  const normalized = normalizeRecognizedData([rawAccount], [row1, row2]);
+  const healedTx = normalized.transactions.find(t => t.id === 'tx2');
+  assert.equal(healedTx?.amount, 0.84, 'Amount should be auto-healed to 0.84');
+  assert.equal(normalized.accounts[0].isBalanced, true);
+  assert.equal(normalized.accounts[0].balanceContinuityIssueCount, 0);
+});
+
+

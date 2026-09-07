@@ -10,7 +10,7 @@ export interface NormalizedRecognizedData {
 export function normalizeRecognizedData(
   inputAccounts: BankAccount[], inputTransactions: StandardTransaction[]
 ): NormalizedRecognizedData {
-  const transactions = stabilizePageAccountIdentities(inputTransactions);
+  const transactions = healSummaryOverriddenAmounts(stabilizePageAccountIdentities(inputTransactions));
   const transactionsByAccount = new Map<string, StandardTransaction[]>();
   for (const transaction of transactions) {
     const key = accountIdentityKey(transaction);
@@ -219,6 +219,40 @@ function unifyInterleavedStatementAccounts(transactions: StandardTransaction[]):
     }
   }
 
+  return transactions;
+}
+
+function healSummaryOverriddenAmounts(transactions: StandardTransaction[]): StandardTransaction[] {
+  const sorted = [...transactions].sort((a, b) => (a.rawPageNumber || 0) - (b.rawPageNumber || 0) || (a.rawRowIndex || 0) - (b.rawRowIndex || 0));
+  for (let i = 1; i < sorted.length; i++) {
+    const prev = sorted[i - 1];
+    const curr = sorted[i];
+    if (
+      prev.balanceAvailable === false ||
+      curr.balanceAvailable === false ||
+      curr.direction === 'UNKNOWN' ||
+      prev.balance == null ||
+      curr.balance == null
+    ) {
+      continue;
+    }
+
+    const delta = curr.direction === 'IN' ? curr.amount : -curr.amount;
+    const diff = Math.abs(prev.balance + delta - curr.balance);
+    if (diff >= 1) {
+      const impliedAmount = curr.direction === 'OUT' ? prev.balance - curr.balance : curr.balance - prev.balance;
+      if (impliedAmount > 0) {
+        const impliedRounded = Math.round(impliedAmount * 100) / 100;
+        const impliedStr = impliedRounded.toFixed(2);
+        const currAmtStr = curr.amount.toFixed(2);
+        const summaryHasCurrAmt = curr.summary && (curr.summary.includes(currAmtStr) || curr.summary.includes(String(curr.amount)));
+        const rawTextHasImplied = curr.rawText && (curr.rawText.includes(impliedStr) || curr.rawText.includes(String(impliedRounded)));
+        if (summaryHasCurrAmt && rawTextHasImplied) {
+          curr.amount = impliedRounded;
+        }
+      }
+    }
+  }
   return transactions;
 }
 
