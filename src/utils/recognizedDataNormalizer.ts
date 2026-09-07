@@ -12,7 +12,8 @@ export function normalizeRecognizedData(
 ): NormalizedRecognizedData {
   const stabilized = healSummaryOverriddenAmounts(stabilizePageAccountIdentities(inputTransactions));
   const { transactions: deduped, mergedPagesByAccount } = deduplicateTransactions(stabilized);
-  const transactions = calibrateDirectionsByBalanceMath(deduped);
+  const calibrated = calibrateDirectionsByBalanceMath(deduped);
+  const transactions = healOcrBalanceAndAmountDiscrepancies(calibrated);
   const transactionsByAccount = new Map<string, StandardTransaction[]>();
   for (const transaction of transactions) {
     const key = accountIdentityKey(transaction);
@@ -591,4 +592,134 @@ export function calibrateDirectionsByBalanceMath(transactions: StandardTransacti
   return transactions;
 }
 
+/**
+ * Mathematically heals single-transaction OCR digit errors (e.g. faint dot-matrix printer font
+ * where '4' was misrecognized as '1', or comma shifts) by reconciling the balance bridge between T_{i-1}, T_i, and T_{i+1}.
+ */
+export function healOcrBalanceAndAmountDiscrepancies(transactions: StandardTransaction[]): StandardTransaction[] {
+  const byAccount = new Map<string, StandardTransaction[]>();
+  for (const tx of transactions) {
+    const key = accountIdentityKey(tx);
+    byAccount.set(key, [...(byAccount.get(key) || []), tx]);
+  }
 
+  for (const [, accTxs] of byAccount) {
+    if (accTxs.length < 2) continue;
+
+    const ordered = chronologicalTransactions(accTxs);
+
+    // Pass 1: Bridge healing across three consecutive transactions (T_{i-1}, T_i, T_{i+1})
+    // Where T_i has OCR digit misreads in amount and/or balance, but T_{i-1} and T_{i+1} have solid balances.
+    for (let i = 1; i < ordered.length - 1; i++) {
+      const prev = ordered[i - 1];
+      const curr = ordered[i];
+      const next = ordered[i + 1];
+
+      if (
+        prev.balanceAvailable === false || curr.balanceAvailable === false || next.balanceAvailable === false ||
+        prev.balance == null || curr.balance == null || next.balance == null ||
+        curr.direction === 'UNKNOWN' || next.direction === 'UNKNOWN'
+      ) {
+        continue;
+      }
+
+      // Check current discontinuity around curr
+      const deltaCurr = curr.direction === 'IN' ? curr.amount : -curr.amount;
+      const errPrevCurr = Math.abs(prev.balance + deltaCurr - curr.balance);
+
+      const deltaNext = next.direction === 'IN' ? next.amount : -next.amount;
+      const errCurrNext = Math.abs(curr.balance + deltaNext - next.balance);
+
+      // If there is a break around curr (either before or after)
+      if (errPrevCurr >= 0.5 || errCurrNext >= 0.5) {
+        // Implied balance of curr deduced from next
+        const impliedBalCurr = Math.round((next.direction === 'OUT' ? next.balance + next.amount : next.balance - next.amount) * 100) / 100;
+        // Implied amount of curr deduced from prev and impliedBalCurr
+        const impliedAmtCurr = Math.round(Math.abs(curr.direction === 'IN' ? impliedBalCurr - prev.balance : prev.balance - impliedBalCurr) * 100) / 100;
+
+        // Verify that this implied state is directionally consistent and positive
+        const impliedDelta = curr.direction === 'IN' ? impliedAmtCurr : -impliedAmtCurr;
+        const testErrPrev = Math.abs(prev.balance + impliedDelta - impliedBalCurr);
+        const testErrNext = Math.abs(impliedBalCurr + deltaNext - next.balance);
+
+        if (testErrPrev < 0.05 && testErrNext < 0.05 && impliedAmtCurr > 0) {
+          const currAmtStr = curr.amount.toFixed(2);
+          const impliedAmtStr = impliedAmtCurr.toFixed(2);
+          const currBalStr = curr.balance.toFixed(2);
+          const impliedBalStr = impliedBalCurr.toFixed(2);
+
+          const isAmtPlausible =
+            curr.amount === impliedAmtCurr ||
+            isOcrDigitVariant(currAmtStr, impliedAmtStr) ||
+            (curr.rawText && (curr.rawText.includes(impliedAmtStr) || curr.rawText.includes(String(impliedAmtCurr)))) ||
+            (curr.summary && (curr.summary.includes(impliedAmtStr) || curr.summary.includes(String(impliedAmtCurr))));
+
+          const isBalPlausible =
+            curr.balance === impliedBalCurr ||
+            isOcrDigitVariant(currBalStr, impliedBalStr);
+
+          if ((isAmtPlausible && isBalPlausible) || (errPrevCurr >= 0.5 && errCurrNext >= 0.5)) {
+            curr.amount = impliedAmtCurr;
+            curr.balance = impliedBalCurr;
+            if (curr.reviewStatus === 'AUTO_PASSED') {
+              curr.reviewStatus = 'CORRECTED';
+            }
+          }
+        }
+      }
+    }
+
+    // Pass 2: Two-transaction balance or amount healing (T_{i-1} and T_i)
+    for (let i = 1; i < ordered.length; i++) {
+      const prev = ordered[i - 1];
+      const curr = ordered[i];
+
+      if (
+        prev.balanceAvailable === false || curr.balanceAvailable === false ||
+        prev.balance == null || curr.balance == null ||
+        curr.direction === 'UNKNOWN'
+      ) {
+        continue;
+      }
+
+      const delta = curr.direction === 'IN' ? curr.amount : -curr.amount;
+      const diff = Math.abs(prev.balance + delta - curr.balance);
+
+      if (diff >= 0.5) {
+        const impliedAmt = Math.round(Math.abs(curr.direction === 'IN' ? curr.balance - prev.balance : prev.balance - curr.balance) * 100) / 100;
+        if (impliedAmt > 0) {
+          const impliedStr = impliedAmt.toFixed(2);
+          const currAmtStr = curr.amount.toFixed(2);
+
+          if (
+            isOcrDigitVariant(currAmtStr, impliedStr) ||
+            (curr.rawText && (curr.rawText.includes(impliedStr) || curr.rawText.includes(String(impliedAmt)))) ||
+            (curr.summary && (curr.summary.includes(impliedStr) || curr.summary.includes(String(impliedAmt))))
+          ) {
+            curr.amount = impliedAmt;
+            if (curr.reviewStatus === 'AUTO_PASSED') {
+              curr.reviewStatus = 'CORRECTED';
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return transactions;
+}
+
+function isOcrDigitVariant(strA: string, strB: string): boolean {
+  if (strA === strB) return true;
+  if (Math.abs(strA.length - strB.length) > 1) return false;
+  if (strA.length === strB.length) {
+    let diffCount = 0;
+    for (let i = 0; i < strA.length; i++) {
+      if (strA[i] !== strB[i]) {
+        diffCount++;
+      }
+    }
+    if (diffCount <= 1) return true;
+  }
+  return false;
+}

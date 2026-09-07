@@ -35,6 +35,8 @@ function buildGeminiDirectPrompt(options?: GeminiParseOptions): string {
 4. 借贷方向：收入/贷方填 IN，支出/借方填 OUT。
 5. 账号统一规范：同一份银行对账单内，若表头有【系统账号】且部分行有【卡号】、部分行为横杠“-”，必须全单统一使用同一个账号/卡号（ac），严禁在同一份单据内交替混用两个账号，确保同一账单流水不被割裂！
 6. 严格区分【交易金额】列与【摘要/备注】中的文本数值：摘要栏经常出现协议合同还款额或代扣批次信息（例如包含 "@2640.00@6@1@" 等），严禁将摘要文本中的约定金额错当成该笔实际发生额！当卡内余额不足时，银行表格上可能只发生部分划扣（例如实际划扣 0.84 元），必须严格以表格中【交易金额】一列印刷的真实发生额数值为准（即填 0.84，绝不能填 2640.00），确保上一笔余额 ± 交易金额 = 本笔交易余额！
+7. 仔细核验金额数字与千分位逗号：例如 “-4,000.00” 是 4000.00，绝不能漏看前面的“4”而错识别为“1000.00”！结合上下文余额验算：上一笔余额 ± 本笔金额 = 交易后余额！
+8. 信用卡对账单（如贷记卡历史明细、年费结息汇总）：若存在透支余额为负数、或按月度打印的自动转账还款、透支利息等周期性汇总表，发生额与更新后余额如实按行记录，严禁自行编造。
 
 【输出格式】：严格输出标准 JSON，字段精简以避免超限：
 {
@@ -449,31 +451,82 @@ function areGeminiTransactionsDuplicate(a: any, b: any): boolean {
 }
 
 function calibrateGeminiDirections(transactions: any[]): any[] {
-  for (let i = 1; i < transactions.length; i++) {
-    const prev = transactions[i - 1];
-    const curr = transactions[i];
+  // Group by account
+  const byAccount = new Map<string, any[]>();
+  for (const tx of transactions) {
+    const key = `${tx.bankName || ''}_${tx.accountNumber || ''}`;
+    byAccount.set(key, [...(byAccount.get(key) || []), tx]);
+  }
 
-    if (
-      prev.accountNumber !== curr.accountNumber ||
-      prev.balance == null ||
-      curr.balance == null ||
-      !curr.amount
-    ) {
-      continue;
+  for (const [, accTxs] of byAccount) {
+    if (accTxs.length < 2) continue;
+
+    // Detect reverse order
+    let forwardDatePairs = 0;
+    let reverseDatePairs = 0;
+    for (let i = 1; i < accTxs.length; i++) {
+      const prevDate = String(accTxs[i - 1].transactionDate || accTxs[i - 1].transactionTime || '').slice(0, 10);
+      const currDate = String(accTxs[i].transactionDate || accTxs[i].transactionTime || '').slice(0, 10);
+      if (prevDate && currDate && prevDate !== currDate) {
+        if (prevDate < currDate) forwardDatePairs++;
+        else if (prevDate > currDate) reverseDatePairs++;
+      }
+    }
+    const isReverse = reverseDatePairs > forwardDatePairs && reverseDatePairs >= 1;
+    const chronological = isReverse ? [...accTxs].reverse() : accTxs;
+
+    // 1. Calibrate directions
+    for (let i = 1; i < chronological.length; i++) {
+      const prev = chronological[i - 1];
+      const curr = chronological[i];
+
+      if (prev.balance == null || curr.balance == null || !curr.amount) continue;
+
+      const prevBal = Number(prev.balance);
+      const currBal = Number(curr.balance);
+      const amt = Number(curr.amount);
+      const diffIn = Math.abs(prevBal + amt - currBal);
+      const diffOut = Math.abs(prevBal - amt - currBal);
+
+      if (diffIn < 0.05 && diffOut >= 0.05) {
+        curr.direction = 'IN';
+      } else if (diffOut < 0.05 && diffIn >= 0.05) {
+        curr.direction = 'OUT';
+      }
     }
 
-    const prevBal = Number(prev.balance);
-    const currBal = Number(curr.balance);
-    const amt = Number(curr.amount);
-    const diffIn = Math.abs(prevBal + amt - currBal);
-    const diffOut = Math.abs(prevBal - amt - currBal);
+    // 2. Bridge heal OCR digit discrepancies
+    for (let i = 1; i < chronological.length - 1; i++) {
+      const prev = chronological[i - 1];
+      const curr = chronological[i];
+      const next = chronological[i + 1];
 
-    if (diffIn < 0.05 && diffOut >= 0.05) {
-      curr.direction = 'IN';
-    } else if (diffOut < 0.05 && diffIn >= 0.05) {
-      curr.direction = 'OUT';
+      if (prev.balance == null || curr.balance == null || next.balance == null || !curr.amount || !next.amount) continue;
+
+      const prevBal = Number(prev.balance);
+      const currBal = Number(curr.balance);
+      const nextBal = Number(next.balance);
+      const currAmt = Number(curr.amount);
+      const nextAmt = Number(next.amount);
+
+      const deltaCurr = curr.direction === 'IN' ? currAmt : -currAmt;
+      const errPrevCurr = Math.abs(prevBal + deltaCurr - currBal);
+      const deltaNext = next.direction === 'IN' ? nextAmt : -nextAmt;
+      const errCurrNext = Math.abs(currBal + deltaNext - nextBal);
+
+      if (errPrevCurr >= 0.5 || errCurrNext >= 0.5) {
+        const impliedBalCurr = Math.round((next.direction === 'OUT' ? nextBal + nextAmt : nextBal - nextAmt) * 100) / 100;
+        const impliedAmtCurr = Math.round(Math.abs(curr.direction === 'IN' ? impliedBalCurr - prevBal : prevBal - impliedBalCurr) * 100) / 100;
+        const impliedDelta = curr.direction === 'IN' ? impliedAmtCurr : -impliedAmtCurr;
+
+        if (Math.abs(prevBal + impliedDelta - impliedBalCurr) < 0.05 && Math.abs(impliedBalCurr + deltaNext - nextBal) < 0.05 && impliedAmtCurr > 0) {
+          curr.amount = impliedAmtCurr;
+          curr.balance = impliedBalCurr;
+        }
+      }
     }
   }
+
   return transactions;
 }
 

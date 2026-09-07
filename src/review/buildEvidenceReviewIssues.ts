@@ -1,6 +1,6 @@
 import { BankAccount, EvidenceReviewIssue, StandardTransaction } from '../types/transaction';
 import { transactionBelongsToAccount } from '../utils/accountIdentity';
-import { balanceContinuityIssues } from '../utils/transactionSequence';
+import { balanceContinuityIssues, daysBetween } from '../utils/transactionSequence';
 
 export function buildEvidenceReviewIssues(
   account: BankAccount,
@@ -81,8 +81,37 @@ export function buildEvidenceReviewIssues(
   }
   for (const [pageNumber, pageIssues] of balanceByPage) {
     const transactionIds = [...new Set(pageIssues.flatMap(({ previous, transaction }) => [previous.id, transaction.id]))];
+    const pageTransactions = transactions.filter(t => (t.rawPageNumber || 0) === pageNumber);
+
     const longIntervalCount = pageIssues.filter(i => i.isLongInterval).length;
-    const isMainlyDiscrete = longIntervalCount >= Math.ceil(pageIssues.length / 2);
+
+    // Check 1: Monthly or periodic intervals (>= 20 days or cross-month transitions)
+    const crossMonthCount = pageIssues.filter(i => {
+      const prevD = (i.previous.transactionDate || '').slice(0, 7);
+      const currD = (i.transaction.transactionDate || '').slice(0, 7);
+      return i.isLongInterval || (prevD && currD && prevD !== currD) || (i.daysApart != null && i.daysApart >= 20);
+    }).length;
+
+    // Check 2: Periodic settlement descriptions (利息, 年费, 还款, 代扣, 分期, 违约金, 减免)
+    const isPeriodicDesc = (tx: StandardTransaction) =>
+      /结息|利息|年费|还款|代扣|分期|违约金|滞纳金|减免/.test(tx.summary || tx.counterpartyName || '');
+    const periodicIssueCount = pageIssues.filter(i => isPeriodicDesc(i.transaction) || isPeriodicDesc(i.previous)).length;
+    const isPeriodicDominant = periodicIssueCount >= Math.ceil(pageIssues.length * 0.5) ||
+      (pageTransactions.length > 0 && pageTransactions.filter(isPeriodicDesc).length >= Math.ceil(pageTransactions.length * 0.5));
+
+    // Check 3: Page time density (average days per transaction on page)
+    const dates = pageTransactions.map(t => t.transactionDate).filter(Boolean).sort() as string[];
+    const pageSpanDays = dates.length >= 2 ? daysBetween(dates[0], dates[dates.length - 1]) : 0;
+    const isSparseStatement = dates.length >= 2 && pageSpanDays >= 45 && (pageSpanDays / dates.length) >= 10;
+
+    // Check 4: Credit card negative / overdraft balances
+    const isCreditCardOverdraft = pageTransactions.some(t => t.balance != null && t.balance < 0);
+
+    const isMainlyDiscrete =
+      longIntervalCount >= Math.ceil(pageIssues.length / 2) ||
+      crossMonthCount >= Math.ceil(pageIssues.length / 2) ||
+      (isPeriodicDominant && (isSparseStatement || crossMonthCount > 0 || isCreditCardOverdraft)) ||
+      (isSparseStatement && isCreditCardOverdraft);
 
     if (isMainlyDiscrete) {
       generated.push({

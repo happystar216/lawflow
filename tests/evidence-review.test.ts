@@ -353,6 +353,97 @@ test('normalizeRecognizedData calibrates credit card installment conversion dire
   assert.equal(normalized.accounts[0].balanceContinuityIssueCount, 0, 'All breaks should be resolved');
 });
 
+test('normalizeRecognizedData mathematically heals OCR single-digit error (4000 vs 1000, 6497.36 vs 6197.36) bridging Page 9 and Page 8', () => {
+  const bridgeAccount: BankAccount = {
+    accountNumber: '6214663610258281',
+    accountName: '胡艳红',
+    bankName: '中国工商银行',
+    ownerType: 'DEBTOR_MAIN',
+    fileName: '工行流水卷宗.pdf',
+    fileType: 'pdf',
+    totalIn: 0,
+    totalOut: 0,
+    transactionCount: 3,
+    startDate: '2023-07-03',
+    endDate: '2023-07-21',
+    startBalance: 10524.36,
+    endBalance: 3095.02,
+    isBalanced: true,
+    balanceDiff: 0,
+    balanceAvailable: true
+  };
+
+  // Reverse statement order as printed: Page 8 (later dates) printed before Page 9 (earlier dates)
+  const rawTxs: StandardTransaction[] = [
+    { ...makeTx('p8_last', 8, 21, '2023-07-21', '07:29:10', 'OUT', 3402.34, 3095.02), accountNumber: bridgeAccount.accountNumber, bankName: bridgeAccount.bankName, summary: '批量还款' },
+    { ...makeTx('p9_row1', 9, 1, '2023-07-05', '09:23:02', 'OUT', 1000.00, 6197.36), accountNumber: bridgeAccount.accountNumber, bankName: bridgeAccount.bankName, summary: '手机银行 跨行汇款' },
+    { ...makeTx('p9_row2', 9, 2, '2023-07-03', '10:02:06', 'OUT', 27.00, 10497.36), accountNumber: bridgeAccount.accountNumber, bankName: bridgeAccount.bankName, summary: '自助终端 汇费' }
+  ];
+
+  // Before healing, there are balance continuity breaks
+  const rawIssues = balanceContinuityIssues(rawTxs);
+  assert.ok(rawIssues.length >= 1, 'Raw OCR misread should have balance continuity issues');
+
+  const normalized = normalizeRecognizedData([bridgeAccount], rawTxs);
+  const healedP9Row1 = normalized.transactions.find(t => t.id === 'p9_row1');
+  assert.ok(healedP9Row1, 'p9_row1 must exist');
+  assert.equal(healedP9Row1.amount, 4000.00, 'Amount 1000.00 should be healed to 4000.00 based on balance bridge');
+  assert.equal(healedP9Row1.balance, 6497.36, 'Balance 6197.36 should be healed to 6497.36 based on balance bridge');
+
+  const healedIssues = balanceContinuityIssues(normalized.transactions);
+  assert.equal(healedIssues.length, 0, 'All breaks between Page 9 and Page 8 should be eliminated');
+});
+
+test('buildEvidenceReviewIssues treats Page 18 credit card periodic settlement summary (repayment & interest) as advisory discrete statement rather than 12 balance breaks', () => {
+  const ccAccount: BankAccount = {
+    accountNumber: '4135190011771192',
+    accountName: '胡艳红',
+    bankName: '中国工商银行信用卡',
+    ownerType: 'DEBTOR_MAIN',
+    fileName: '工行流水卷宗.pdf',
+    fileType: 'pdf',
+    totalIn: 0,
+    totalOut: 0,
+    transactionCount: 15,
+    startDate: '2023-06-14',
+    endDate: '2024-10-17',
+    startBalance: -10755.22,
+    endBalance: -14188.97,
+    isBalanced: false,
+    balanceDiff: 0,
+    balanceAvailable: true
+  };
+
+  const page18Txs: StandardTransaction[] = [
+    { ...makeTx('r1', 18, 1, '2023-06-14', '2023-06-14', 'IN', 0.00, -10755.22), accountNumber: ccAccount.accountNumber, bankName: ccAccount.bankName, summary: '减免年费100.00元 年费减免' },
+    { ...makeTx('r2', 18, 2, '2023-12-10', '2023-12-10', 'IN', 307.24, -6523.53), accountNumber: ccAccount.accountNumber, bankName: ccAccount.bankName, summary: '人民币自动转帐还款' },
+    { ...makeTx('r3', 18, 3, '2024-02-10', '2024-02-10', 'IN', 370.93, -8474.56), accountNumber: ccAccount.accountNumber, bankName: ccAccount.bankName, summary: '人民币自动转帐还款' },
+    { ...makeTx('r4', 18, 4, '2024-02-17', '2024-02-17', 'OUT', 50.46, -8704.58), accountNumber: ccAccount.accountNumber, bankName: ccAccount.bankName, summary: '透支利息' },
+    { ...makeTx('r5', 18, 5, '2024-03-10', '2024-03-10', 'IN', 7.66, -13009.72), accountNumber: ccAccount.accountNumber, bankName: ccAccount.bankName, summary: '人民币自动转帐还款' },
+    { ...makeTx('r6', 18, 6, '2024-03-17', '2024-03-17', 'OUT', 31.64, -12119.20), accountNumber: ccAccount.accountNumber, bankName: ccAccount.bankName, summary: '透支利息' },
+    { ...makeTx('r7', 18, 7, '2024-04-10', '2024-04-10', 'IN', 10.84, -8711.92), accountNumber: ccAccount.accountNumber, bankName: ccAccount.bankName, summary: '人民币自动转帐还款' },
+    { ...makeTx('r8', 18, 8, '2024-05-10', '2024-05-10', 'IN', 62.70, -12737.63), accountNumber: ccAccount.accountNumber, bankName: ccAccount.bankName, summary: '人民币自动转帐还款' },
+    { ...makeTx('r9', 18, 9, '2024-06-10', '2024-06-10', 'IN', 993.37, -6744.05), accountNumber: ccAccount.accountNumber, bankName: ccAccount.bankName, summary: '人民币自动转帐还款' },
+    { ...makeTx('r10', 18, 10, '2024-06-14', '2024-06-14', 'IN', 0.00, -3636.64), accountNumber: ccAccount.accountNumber, bankName: ccAccount.bankName, summary: '减免年费50.00元 年费减免' },
+    { ...makeTx('r11', 18, 11, '2024-07-10', '2024-07-10', 'IN', 89.72, -7183.54), accountNumber: ccAccount.accountNumber, bankName: ccAccount.bankName, summary: '人民币自动转帐还款' },
+    { ...makeTx('r12', 18, 12, '2024-08-10', '2024-08-10', 'IN', 3.08, -6493.38), accountNumber: ccAccount.accountNumber, bankName: ccAccount.bankName, summary: '人民币自动转帐还款' },
+    { ...makeTx('r13', 18, 13, '2024-09-17', '2024-09-17', 'OUT', 134.82, -13709.04), accountNumber: ccAccount.accountNumber, bankName: ccAccount.bankName, summary: '透支利息' },
+    { ...makeTx('r14', 18, 14, '2024-10-13', '2024-10-13', 'OUT', 193.06, -13902.10), accountNumber: ccAccount.accountNumber, bankName: ccAccount.bankName, summary: '违约金' },
+    { ...makeTx('r15', 18, 15, '2024-10-17', '2024-10-17', 'OUT', 286.87, -14188.97), accountNumber: ccAccount.accountNumber, bankName: ccAccount.bankName, summary: '透支利息' }
+  ];
+
+  const issues = buildEvidenceReviewIssues(ccAccount, page18Txs);
+  // Page 18 should be categorized as advisory DATA_WARNING (discrete_statement), NOT blocking BALANCE_BREAK
+  const balanceBreakIssues = issues.filter(i => i.category === 'BALANCE_BREAK');
+  assert.equal(balanceBreakIssues.length, 0, 'No false BALANCE_BREAK issues should be reported for credit card summary table');
+
+  const discreteIssue = issues.find(i => i.category === 'DATA_WARNING' && i.pageNumber === 18);
+  assert.ok(discreteIssue, 'Advisory discrete statement issue should be created for Page 18');
+  assert.equal(discreteIssue.severity, 'ADVISORY');
+  assert.match(discreteIssue.title, /第 18 页包含跨期离散账单/);
+});
+
+
 
 
 
