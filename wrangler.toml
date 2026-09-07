@@ -6,6 +6,8 @@ pages_build_output_dir = "dist"
 # DASHSCOPE_API_KEY  = 百炼 API Key（Secret）
 # DASHSCOPE_BASE_URL = https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
 # QWEN_MODEL         = qwen3.8-flash（optional; this is the code default）
+# LAWFLOW_ALLOWED_ORIGIN = https://your-production-domain.example（recommended）
+# LAWFLOW_REQUIRE_ACCESS = true（recommended; requires a Cloudflare Access policy）
 
 # Cloudflare D1 Database Binding (Optional for cloud sync)
 # [[d1_databases]]

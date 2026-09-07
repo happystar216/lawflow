@@ -16,6 +16,7 @@ export interface CaseRecord {
 const DB_NAME = 'LawFlow_Cases_DB_v2';
 const DB_VERSION = 1;
 const STORE_NAME = 'cases';
+let saveQueue: Promise<void> = Promise.resolve();
 
 function openDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -51,7 +52,8 @@ export async function listSavedCases(targetUserId?: string): Promise<CaseRecord[
       req.onsuccess = () => {
         const records = req.result as CaseRecord[];
         // Filter by user if userId matches
-        const userCases = records.filter(r => !r.userId || r.userId === userId || r.userId === currentUser?.email);
+        const userCases = records.filter(r => r.userId === userId || r.userId === currentUser?.email
+          || (!r.userId && userId === 'DEFAULT_USER'));
         resolve(userCases.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()));
       };
       req.onerror = () => reject(req.error);
@@ -73,7 +75,13 @@ export async function listSavedCases(targetUserId?: string): Promise<CaseRecord[
 /**
  * Saves or updates a case record for the current user.
  */
-export async function saveCaseRecord(record: CaseRecord): Promise<void> {
+export function saveCaseRecord(record: CaseRecord): Promise<void> {
+  const save = () => persistCaseRecord(record);
+  saveQueue = saveQueue.then(save, save);
+  return saveQueue;
+}
+
+async function persistCaseRecord(record: CaseRecord): Promise<void> {
   const currentUser = getCurrentSessionUser();
   const userId = currentUser?.id || 'DEFAULT_USER';
 

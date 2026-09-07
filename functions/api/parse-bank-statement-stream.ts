@@ -1,7 +1,10 @@
 import { parseBankStatementWithQwen } from '../lib/qwenBankStatement';
 import { parsePdfWithGeminiStream } from '../lib/geminiBankStatement';
+import { guardParseRequest, secureResponseHeaders, validateUploadedFile } from '../lib/requestSecurity';
 
 export async function onRequestPost(context: any) {
+  const rejected = guardParseRequest(context);
+  if (rejected) return rejected;
   let formData: FormData;
   try {
     formData = await context.request.formData();
@@ -10,6 +13,8 @@ export async function onRequestPost(context: any) {
   }
   const file = formData.get('file');
   if (!(file instanceof File)) return new Response('缺少页面文件', { status: 400 });
+  const invalidFile = validateUploadedFile(file);
+  if (invalidFile) return invalidFile;
   const options = chunkOptions(formData, file);
 
   const encoder = new TextEncoder();
@@ -66,7 +71,7 @@ export async function onRequestPost(context: any) {
             totalPages: options.totalPages,
             percent: 100,
             totalTransactions: result.transactions.length,
-            statusText: `🎉 已完成全量审查！共提取并验证 ${result.transactions.length} 笔银行交易明细`
+            statusText: `已完成结构化提取，共识别 ${result.transactions.length} 笔；请对照原件完成复核`
           });
 
           send({
@@ -78,7 +83,8 @@ export async function onRequestPost(context: any) {
             coveredPages: result.pagesCovered,
             totalPages: options.totalPages,
             pageCount: options.totalPages,
-            countComplete: true
+            countComplete: result.countComplete,
+            warnings: result.warnings
           });
         } else {
           // 回退使用 Qwen 单页/分片解析引擎
@@ -130,8 +136,7 @@ export async function onRequestPost(context: any) {
   return new Response(stream, {
     headers: {
       'Content-Type': 'text/event-stream; charset=utf-8',
-      'Cache-Control': 'no-cache, no-transform',
-      'Access-Control-Allow-Origin': '*'
+      ...secureResponseHeaders
     }
   });
 }
@@ -170,11 +175,5 @@ function chunkOptions(formData: FormData, file: File) {
 }
 
 export async function onRequestOptions() {
-  return new Response(null, {
-    headers: {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'POST, OPTIONS',
-      'Access-Control-Allow-Headers': '*'
-    }
-  });
+  return new Response(null, { status: 405, headers: secureResponseHeaders });
 }

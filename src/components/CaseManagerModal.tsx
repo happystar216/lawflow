@@ -206,7 +206,7 @@ export const CaseManagerModal: React.FC<CaseManagerModalProps> = ({
                       {suspectedAmount > 0 && (
                         <span className="text-rose-600 font-bold flex items-center space-x-1">
                           <ShieldAlert className="w-3 h-3" />
-                          <span>涉嫌转移: ¥{suspectedAmount.toLocaleString()} ({matchesCount} 项)</span>
+                          <span>待核查对外支出: ¥{suspectedAmount.toLocaleString()} ({matchesCount} 项)</span>
                         </span>
                       )}
                     </div>

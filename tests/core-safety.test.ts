@@ -7,6 +7,7 @@ import { Rule10_UndisclosedReceivables } from '../src/engine/rules/Rule10_Undisc
 import { Rule11_FalseAssetDeclaration } from '../src/engine/rules/Rule11_FalseAssetDeclaration';
 import { Rule05_FabricatedRemarksBilateral } from '../src/engine/rules/Rule05_FabricatedRemarksBilateral';
 import { Rule08_WealthInsuranceTransfer } from '../src/engine/rules/Rule08_WealthInsuranceTransfer';
+import { Rule04_FastInFastOutZeroBalance } from '../src/engine/rules/Rule04_FastInFastOutZeroBalance';
 import { BankAccount, StandardTransaction } from '../src/types/transaction';
 import { CaseMetadata } from '../src/types/case';
 
@@ -78,6 +79,17 @@ test('internal netting requires a debtor-owned, opposite-side pair', () => {
   assert.equal(result.processedTransactions.find(item => item.id === 'unmatched')?.isInternalTransfer, undefined);
 });
 
+test('internal netting never pairs an owned transfer with a same-amount spouse transaction', () => {
+  const accounts = [account('A'), account('B'), account('S', 'SPOUSE')];
+  const transactions = [
+    { ...tx('owned-out', 'A', 'OUT', 1000, '张三'), counterpartyAccount: 'B' },
+    { ...tx('spouse-in', 'S', 'IN', 1000, '第三方'), counterpartyAccount: 'X' }
+  ];
+  const result = calculateInternalNetting(transactions, accounts);
+  assert.equal(result.internalCount, 0);
+  assert.equal(result.processedTransactions.some(item => item.isInternalTransfer), false);
+});
+
 test('balance audit reports a real difference and distinguishes unavailable balances', () => {
   const available = { ...account('A'), startBalance: 100, endBalance: 50 };
   const report = auditAccountBalance(available, [tx('out', 'A', 'OUT', 25, '甲')]);
@@ -103,6 +115,13 @@ test('CSV parsing preserves quoted fields and derives the opening balance', asyn
   assert.equal(parsed.account.startBalance, 1000);
   assert.equal(parsed.account.endBalance, 1100);
   assert.equal(auditAccountBalance(parsed.account, parsed.transactions).isBalanced, true);
+});
+
+test('CSV parsing preserves a signed amount when no direction column exists', async () => {
+  const file = new File(['交易日期,交易金额,摘要\n2024-01-01,-100,支出'], 'signed.csv', { type: 'text/csv' });
+  const parsed = await parseExcelBankStatement(file);
+  assert.equal(parsed.transactions[0].direction, 'OUT');
+  assert.equal(parsed.transactions[0].amount, 100);
 });
 
 test('receivable rule excludes repayment remarks and leaves matches unadopted', () => {
@@ -159,4 +178,12 @@ test('false-report rule requires an actual declaration and uses current article 
   assert.equal(matches.length, 1);
   assert.equal(matches[0].lawyerAdopted, false);
   assert.match(matches[0].statutoryBasis[0], /第252条/);
+});
+
+test('fast-in-fast-out rule never pairs transactions from different accounts', () => {
+  const rule = new Rule04_FastInFastOutZeroBalance();
+  const incoming = tx('incoming', 'A', 'IN', 50000, '甲');
+  const outgoing = { ...tx('outgoing', 'B', 'OUT', 50000, '乙'), transactionDate: '2024-03-02' };
+  const matches = rule.evaluate({ caseMeta: caseMeta(), allTransactions: [incoming, outgoing], counterpartySummaries: {} });
+  assert.equal(matches.length, 0);
 });

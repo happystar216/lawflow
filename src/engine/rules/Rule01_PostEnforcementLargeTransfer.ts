@@ -36,7 +36,7 @@ export class Rule01_PostEnforcementLargeTransfer extends BaseRule {
 
       if (isPostReport || isPostExecution) {
         const phase = isPostReport ? '《报告财产令》送达后' : '执行立案后';
-        const severity: SeverityLevel = isPostReport ? 'L0' : 'L0';
+        const severity: SeverityLevel = isPostReport ? 'L0' : 'L1';
 
         matches.push({
           matchId: `${this.ruleId}_${tx.id}`,

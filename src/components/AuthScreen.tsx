@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Mail, Lock, Building, User as UserIcon, ArrowRight, ShieldCheck, Scale, AlertCircle, Sparkles } from 'lucide-react';
+import { Mail, Lock, Building, User as UserIcon, ArrowRight, ShieldCheck, Scale, AlertCircle } from 'lucide-react';
 import { loginWithEmail, registerWithEmail } from '../store/authStore';
 import { User } from '../types/user';
 
@@ -34,11 +34,6 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onAuthenticated }) => {
     } finally {
       setLoading(false);
     }
-  };
-
-  const handleQuickDemoAccount = () => {
-    setEmail('happystar216@gmail.com');
-    setPassword('xqzb');
   };
 
   return (
@@ -89,18 +84,8 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onAuthenticated }) => {
         {/* Form */}
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
-            <label className="block text-xs font-medium text-slate-300 mb-1.5 flex items-center justify-between">
+            <label className="block text-xs font-medium text-slate-300 mb-1.5">
               <span>工作邮箱</span>
-              {mode === 'login' && (
-                <button
-                  type="button"
-                  onClick={handleQuickDemoAccount}
-                  className="text-[10px] text-blue-400 hover:text-blue-300 flex items-center space-x-1"
-                >
-                  <Sparkles className="w-2.5 h-2.5" />
-                  <span>快捷填入专属账号</span>
-                </button>
-              )}
             </label>
             <div className="relative">
               <Mail className="w-4 h-4 absolute left-3.5 top-3 text-slate-500" />
@@ -189,7 +174,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onAuthenticated }) => {
         {/* Security badge */}
         <div className="bg-slate-800/40 border border-slate-800 rounded-2xl p-3.5 flex items-center space-x-3 text-[11px] text-slate-400">
           <ShieldCheck className="w-4 h-4 text-emerald-400 flex-shrink-0" />
-          <span>遵循司法保密要求，案件流水数据在本地浏览器沙箱加密运算</span>
+          <span>本地资料按浏览器用户配置隔离；PDF 智能识别会发送至已配置的云端模型，请仅上传获授权处理的材料</span>
         </div>
       </div>
     </div>

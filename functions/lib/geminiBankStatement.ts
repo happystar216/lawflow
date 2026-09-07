@@ -37,11 +37,13 @@ function buildGeminiDirectPrompt(options?: GeminiParseOptions): string {
 6. 严格按物理列位对齐提取：摘要栏经常包含合同还款额或代扣协议文本（例如包含 "@2640.00@6@1@" 等），严禁提取摘要中的文本数值代替实际发生额！必须严格提取表格中【交易金额】一列印刷的真实发生额数值。
 7. 忠实还原数字原样：仔细核验千分位逗号与每位数字（例如 “-4,000.00” 是 4000.00，注意区分首位点阵字形），按印刷字面原样输出，严禁自行心算凑数或编造虚假数字。
 8. 信用卡与特殊账单：如遇到透支余额为负数、按月打印的周期性利息还款或免收年费（发生额印为 0.00），均如实按原件印刷数值记录。
+9. pageChecks 必须逐页列出原件的每一页，包括空白页和非交易文书页；transactions 数量必须等于各交易页 transactionCount 之和。无法确认时使用 UNKNOWN，不得虚构已覆盖页面。
 
 【输出格式】：严格输出标准 JSON，字段精简以避免超限：
 {
   "totalExtracted": 0,
   "pagesCovered": [],
+  "pageChecks": [{"pageNumber": 1, "transactionCount": 0, "pageType": "TRANSACTIONS|ACCOUNT_INFO|DOCUMENT|BLANK|UNKNOWN"}],
   "transactions": [
     {
       "p": 原件页码数字,
@@ -245,35 +247,60 @@ export async function parsePdfWithGeminiStream(
   const rawTransactions = rawTxList.map((tx: any, idx: number) => {
     const rawHolder = String(tx.holder || '').trim();
     const resolvedAccountName = rawHolder || expectedHolder || '被执行人';
+    const transactionTime = normalizeGeminiDateTime(tx.tm);
+    const direction = normalizeGeminiDirection(tx.dir);
+    const rawAmount = Number(tx.amt);
+    const amount = Number.isFinite(rawAmount) ? Math.abs(rawAmount) : 0;
+    const rawBalance = tx.bal === null || tx.bal === undefined || tx.bal === '' ? null : Number(tx.bal);
+    const balance = rawBalance !== null && Number.isFinite(rawBalance) ? rawBalance : null;
+    const rawPageNumber = Number.parseInt(String(tx.p || ''), 10);
+    const dataQualityIssues: Array<'INVALID_DATE' | 'INVALID_AMOUNT' | 'UNKNOWN_DIRECTION'> = [];
+    if (!transactionTime) dataQualityIssues.push('INVALID_DATE');
+    if (!Number.isFinite(rawAmount) || amount <= 0) dataQualityIssues.push('INVALID_AMOUNT');
+    if (direction === 'UNKNOWN') dataQualityIssues.push('UNKNOWN_DIRECTION');
     return {
       id: `TX_GEMINI_${idx + 1}`,
       accountNumber: String(tx.ac || '').replace(/\s+/g, ''),
       accountName: resolvedAccountName,
       bankName: String(tx.bk || '商业银行'),
-      transactionTime: String(tx.tm || ''),
-      transactionDate: String(tx.tm || '').slice(0, 10),
-      direction: String(tx.dir || 'OUT').toUpperCase() === 'IN' ? 'IN' : 'OUT',
-      amount: Math.abs(Number(tx.amt) || 0),
-      balance: tx.bal !== null && tx.bal !== undefined ? Number(tx.bal) : null,
+      transactionTime,
+      transactionDate: transactionTime.slice(0, 10),
+      direction,
+      amount,
+      balance,
       counterpartyName: String(tx.cp || ''),
       counterpartyAccount: String(tx.ca || ''),
       counterpartyBank: '',
       summary: String(tx.sm || ''),
       rawSourceFile: file.name,
-      rawPageNumber: Number(tx.p) || 1,
+      rawPageNumber: Number.isInteger(rawPageNumber) && rawPageNumber > 0 ? rawPageNumber : undefined,
       rawRowIndex: idx + 1,
       rawText: `${tx.tm || ''} ${tx.dir || ''} ${tx.amt || ''} ${tx.sm || ''}`,
-      balanceAvailable: tx.bal !== null && tx.bal !== undefined,
+      balanceAvailable: balance !== null,
       extractionMethod: 'GEMINI_DIRECT_PDF',
-      extractionConfidence: 0.98,
-      reviewStatus: 'AUTO_PASSED',
-      dataQualityIssues: []
+      extractionConfidence: dataQualityIssues.length ? 0.4 : 0.75,
+      reviewStatus: 'PENDING',
+      dataQualityIssues
     };
   });
 
-  // 跨页/跨模板重复流水自动去重与收支方向数学校准
-  const deduplicated = deduplicateGeminiTransactions(rawTransactions);
-  const transactions = calibrateGeminiDirections(deduplicated);
+  // Deduplication preserves the extracted values. Any mathematical correction is performed later
+  // by the shared normalizer, which records the original values and requires lawyer review.
+  const transactions = deduplicateGeminiTransactions(rawTransactions);
+  const expectedPages = Math.max(1, Number(options?.totalPages) || 1);
+  const reportedPages = Array.isArray(parsedResult.pagesCovered)
+    ? parsedResult.pagesCovered.map((page: unknown) => Number(page)).filter((page: number) => Number.isInteger(page) && page >= 1 && page <= expectedPages)
+    : [];
+  const checkedPages = Array.isArray(parsedResult.pageChecks)
+    ? parsedResult.pageChecks.map((item: any) => Number(item?.pageNumber)).filter((page: number) => Number.isInteger(page) && page >= 1 && page <= expectedPages)
+    : [];
+  const transactionPages = transactions.map((item: any) => item.rawPageNumber).filter((page: unknown): page is number => typeof page === 'number');
+  const pagesCovered = [...new Set([...reportedPages, ...checkedPages, ...transactionPages])].sort((a, b) => a - b);
+  const missingPages = Array.from({ length: expectedPages }, (_, index) => index + 1).filter(page => !pagesCovered.includes(page));
+  const warnings = [
+    'Gemini 直传结果未经独立二次清点，所有识别交易均需律师对照原件复核',
+    ...(missingPages.length ? [`页面覆盖不完整，缺少第 ${missingPages.join('、')} 页的结构化确认`] : [])
+  ];
 
   // 生成聚合银行账户摘要
   const accountMap = new Map<string, any>();
@@ -296,10 +323,10 @@ export async function parsePdfWithGeminiStream(
         startDate: t.transactionDate,
         endDate: t.transactionDate,
         startBalance: initBalance,
-        endBalance: t.balance || 0,
+        endBalance: t.balance ?? 0,
         isBalanced: true,
         balanceDiff: 0,
-        balanceAvailable: true
+        balanceAvailable: t.balanceAvailable !== false
       });
     }
     const acc = accountMap.get(key);
@@ -315,6 +342,10 @@ export async function parsePdfWithGeminiStream(
     const calculatedEndBalance = acc.startBalance + acc.totalIn - acc.totalOut;
     acc.balanceDiff = Math.abs(calculatedEndBalance - acc.endBalance);
     acc.isBalanced = acc.balanceDiff < 1.0;
+    acc.parseStatus = 'NEEDS_REVIEW';
+    acc.parseWarnings = warnings;
+    acc.coveredPages = pagesCovered;
+    acc.totalPages = expectedPages;
   }
 
   const accounts = Array.from(accountMap.values());
@@ -334,7 +365,11 @@ export async function parsePdfWithGeminiStream(
     endBalance: 0,
     isBalanced: true,
     balanceDiff: 0,
-    balanceAvailable: true
+    balanceAvailable: false,
+    parseStatus: 'NEEDS_REVIEW',
+    parseWarnings: warnings,
+    coveredPages: pagesCovered,
+    totalPages: expectedPages
   };
 
   return {
@@ -342,8 +377,35 @@ export async function parsePdfWithGeminiStream(
     accounts,
     transactions,
     totalCount: transactions.length,
-    pagesCovered: parsedResult.pagesCovered || []
+    pagesCovered,
+    warnings,
+    countComplete: missingPages.length === 0 && pagesCovered.length === expectedPages
   };
+}
+
+function normalizeGeminiDirection(value: unknown): 'IN' | 'OUT' | 'UNKNOWN' {
+  const normalized = String(value || '').trim().toUpperCase();
+  if (normalized === 'IN') return 'IN';
+  if (normalized === 'OUT') return 'OUT';
+  return 'UNKNOWN';
+}
+
+function normalizeGeminiDateTime(value: unknown): string {
+  const text = String(value || '').trim().replace(/\//g, '-');
+  const match = text.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T](\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?/);
+  if (!match) return '';
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return '';
+  const isoDate = `${match[1]}-${match[2].padStart(2, '0')}-${match[3].padStart(2, '0')}`;
+  if (!match[4]) return isoDate;
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6] || 0);
+  if (hour > 23 || minute > 59 || second > 59) return '';
+  return `${isoDate} ${match[4].padStart(2, '0')}:${match[5].padStart(2, '0')}:${String(match[6] || '0').padStart(2, '0')}`;
 }
 
 function deduplicateGeminiTransactions(transactions: any[]): any[] {
@@ -449,85 +511,3 @@ function areGeminiTransactionsDuplicate(a: any, b: any): boolean {
 
   return false;
 }
-
-function calibrateGeminiDirections(transactions: any[]): any[] {
-  // Group by account
-  const byAccount = new Map<string, any[]>();
-  for (const tx of transactions) {
-    const key = `${tx.bankName || ''}_${tx.accountNumber || ''}`;
-    byAccount.set(key, [...(byAccount.get(key) || []), tx]);
-  }
-
-  for (const [, accTxs] of byAccount) {
-    if (accTxs.length < 2) continue;
-
-    // Detect reverse order
-    let forwardDatePairs = 0;
-    let reverseDatePairs = 0;
-    for (let i = 1; i < accTxs.length; i++) {
-      const prevDate = String(accTxs[i - 1].transactionDate || accTxs[i - 1].transactionTime || '').slice(0, 10);
-      const currDate = String(accTxs[i].transactionDate || accTxs[i].transactionTime || '').slice(0, 10);
-      if (prevDate && currDate && prevDate !== currDate) {
-        if (prevDate < currDate) forwardDatePairs++;
-        else if (prevDate > currDate) reverseDatePairs++;
-      }
-    }
-    const isReverse = reverseDatePairs > forwardDatePairs && reverseDatePairs >= 1;
-    const chronological = isReverse ? [...accTxs].reverse() : accTxs;
-
-    // 1. Calibrate directions
-    for (let i = 1; i < chronological.length; i++) {
-      const prev = chronological[i - 1];
-      const curr = chronological[i];
-
-      if (prev.balance == null || curr.balance == null || !curr.amount) continue;
-
-      const prevBal = Number(prev.balance);
-      const currBal = Number(curr.balance);
-      const amt = Number(curr.amount);
-      const diffIn = Math.abs(prevBal + amt - currBal);
-      const diffOut = Math.abs(prevBal - amt - currBal);
-
-      if (diffIn < 0.05 && diffOut >= 0.05) {
-        curr.direction = 'IN';
-      } else if (diffOut < 0.05 && diffIn >= 0.05) {
-        curr.direction = 'OUT';
-      }
-    }
-
-    // 2. Bridge heal OCR digit discrepancies
-    for (let i = 1; i < chronological.length - 1; i++) {
-      const prev = chronological[i - 1];
-      const curr = chronological[i];
-      const next = chronological[i + 1];
-
-      if (prev.balance == null || curr.balance == null || next.balance == null || !curr.amount || !next.amount) continue;
-
-      const prevBal = Number(prev.balance);
-      const currBal = Number(curr.balance);
-      const nextBal = Number(next.balance);
-      const currAmt = Number(curr.amount);
-      const nextAmt = Number(next.amount);
-
-      const deltaCurr = curr.direction === 'IN' ? currAmt : -currAmt;
-      const errPrevCurr = Math.abs(prevBal + deltaCurr - currBal);
-      const deltaNext = next.direction === 'IN' ? nextAmt : -nextAmt;
-      const errCurrNext = Math.abs(currBal + deltaNext - nextBal);
-
-      if (errPrevCurr >= 0.5 || errCurrNext >= 0.5) {
-        const impliedBalCurr = Math.round((next.direction === 'OUT' ? nextBal + nextAmt : nextBal - nextAmt) * 100) / 100;
-        const impliedAmtCurr = Math.round(Math.abs(curr.direction === 'IN' ? impliedBalCurr - prevBal : prevBal - impliedBalCurr) * 100) / 100;
-        const impliedDelta = curr.direction === 'IN' ? impliedAmtCurr : -impliedAmtCurr;
-
-        if (Math.abs(prevBal + impliedDelta - impliedBalCurr) < 0.05 && Math.abs(impliedBalCurr + deltaNext - nextBal) < 0.05 && impliedAmtCurr > 0) {
-          curr.amount = impliedAmtCurr;
-          curr.balance = impliedBalCurr;
-        }
-      }
-    }
-  }
-
-  return transactions;
-}
-
-

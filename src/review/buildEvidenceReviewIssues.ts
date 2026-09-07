@@ -58,8 +58,8 @@ export function buildEvidenceReviewIssues(
   }
 
   appendTransactionIssueGroup(generated, account, transactions, 'LOW_CONFIDENCE',
-    transaction => (transaction.extractionConfidence ?? 1) < 0.8,
-    '识别结果待核对', '本页有交易字段读取把握较低，需与原件逐字段核对。',
+    transaction => (transaction.extractionConfidence ?? 1) < 0.8 || transaction.reviewStatus === 'CORRECTED',
+    '识别或自动修正结果待核对', '本页有交易字段读取把握较低，或系统曾依据余额关系提出自动修正，需与原件逐字段核对。',
     ['核对交易日期和收支方向', '核对金额及交易后余额', '核对对手方和摘要']);
   appendTransactionIssueGroup(generated, account, transactions, 'INVALID_AMOUNT',
     transaction => (transaction.amount <= 0 || Boolean(transaction.dataQualityIssues?.includes('INVALID_AMOUNT'))) && !isFeeWaiver(transaction),

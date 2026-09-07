@@ -21,6 +21,11 @@ export class Rule11_FalseAssetDeclaration extends BaseRule {
     const declaredIncomeItem = declaredAssets.find(a => a.category === 'income');
     if (!declaredIncomeItem) return matches;
     const declaredIncomeValue = declaredIncomeItem.declaredValue;
+    const explicitlyNoIncome = declaredIncomeValue === 0
+      && /无(?:任何|固定|稳定)?收入|零收入|未取得收入/.test(declaredIncomeItem.declaredContent || '');
+    // A positive declaration has no period/口径 metadata in the current data model, so it cannot
+    // safely be compared with cumulative bank inflows over an arbitrary statement range.
+    if (!explicitlyNoIncome) return matches;
 
     // Calculate actual incoming after report order date
     const t4 = context.caseMeta.timeline.reportOrderServedDate || context.caseMeta.timeline.executionFilingDate;

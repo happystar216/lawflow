@@ -8,21 +8,9 @@ interface StoredUserRecord {
   passwordHash: string;
 }
 
-// Default system accounts available for immediate login
-const DEFAULT_ACCOUNTS: StoredUserRecord[] = [
-  {
-    user: {
-      id: 'USER_DEFAULT_001',
-      email: 'happystar216@gmail.com',
-      name: '执行合伙人律师',
-      firmName: '北京执行与争议解决团队',
-      role: 'LAWYER',
-      createdAt: '2024-01-01',
-      lastLoginAt: new Date().toISOString()
-    },
-    passwordHash: 'xqzb' // Supported password
-  }
-];
+const DEFAULT_ACCOUNTS: StoredUserRecord[] = [];
+const HASH_PREFIX = 'pbkdf2-sha256';
+const HASH_ITERATIONS = 210_000;
 
 function getStoredUsers(): StoredUserRecord[] {
   try {
@@ -71,8 +59,13 @@ export async function loginWithEmail(email: string, password: string): Promise<U
     throw new Error('未找到该邮箱账户，请先注册或检查邮箱拼写');
   }
 
-  if (record.passwordHash !== cleanPassword && cleanPassword !== 'xqzb') {
+  if (!(await verifyPassword(cleanPassword, record.passwordHash))) {
     throw new Error('密码错误，请重新输入');
+  }
+
+  // Migrate legacy plaintext local records only after the user proves knowledge of the password.
+  if (!record.passwordHash.startsWith(`${HASH_PREFIX}$`)) {
+    record.passwordHash = await hashPassword(cleanPassword);
   }
 
   // Update last login
@@ -99,8 +92,8 @@ export async function registerWithEmail(
     throw new Error('请输入有效的邮箱地址');
   }
 
-  if (cleanPassword.length < 4) {
-    throw new Error('密码长度至少需要4位字符');
+  if (cleanPassword.length < 10) {
+    throw new Error('密码长度至少需要10位字符');
   }
 
   const users = getStoredUsers();
@@ -121,7 +114,7 @@ export async function registerWithEmail(
 
   users.push({
     user: newUser,
-    passwordHash: cleanPassword
+    passwordHash: await hashPassword(cleanPassword)
   });
 
   saveStoredUsers(users);
@@ -136,4 +129,40 @@ export async function registerWithEmail(
 export function logoutUser(): void {
   localStorage.removeItem(CURRENT_SESSION_KEY);
   localStorage.removeItem('LAWFLOW_AUTH_TOKEN');
+}
+
+async function hashPassword(password: string): Promise<string> {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const derived = await derivePassword(password, salt);
+  return `${HASH_PREFIX}$${HASH_ITERATIONS}$${bytesToBase64(salt)}$${bytesToBase64(derived)}`;
+}
+
+async function verifyPassword(password: string, stored: string): Promise<boolean> {
+  if (!stored.startsWith(`${HASH_PREFIX}$`)) return stored === password;
+  const [, iterationsText, saltText, expectedText] = stored.split('$');
+  const iterations = Number(iterationsText);
+  if (!Number.isInteger(iterations) || iterations < 100_000 || !saltText || !expectedText) return false;
+  const actual = await derivePassword(password, base64ToBytes(saltText), iterations);
+  const expected = base64ToBytes(expectedText);
+  if (actual.length !== expected.length) return false;
+  let difference = 0;
+  for (let index = 0; index < actual.length; index += 1) difference |= actual[index] ^ expected[index];
+  return difference === 0;
+}
+
+async function derivePassword(password: string, salt: Uint8Array, iterations = HASH_ITERATIONS): Promise<Uint8Array> {
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveBits']);
+  const saltBuffer = Uint8Array.from(salt).buffer;
+  const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt: saltBuffer, iterations }, key, 256);
+  return new Uint8Array(bits);
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+function base64ToBytes(value: string): Uint8Array {
+  return Uint8Array.from(atob(value), character => character.charCodeAt(0));
 }

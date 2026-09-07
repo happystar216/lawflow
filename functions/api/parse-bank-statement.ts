@@ -1,10 +1,15 @@
 import { parseBankStatementWithQwen } from '../lib/qwenBankStatement';
+import { guardParseRequest, secureResponseHeaders, validateUploadedFile } from '../lib/requestSecurity';
 
 export async function onRequestPost(context: any) {
+  const rejected = guardParseRequest(context);
+  if (rejected) return rejected;
   try {
     const formData = await context.request.formData();
     const file = formData.get('file');
     if (!(file instanceof File)) return json({ error: '缺少页面文件' }, 400);
+    const invalidFile = validateUploadedFile(file);
+    if (invalidFile) return invalidFile;
     const pageStart = positive(formData.get('pageStart'), 1);
     const pageEnd = positive(formData.get('pageEnd'), pageStart);
     const contextBefore = formData.get('contextBefore');
@@ -42,9 +47,9 @@ function positive(value: FormDataEntryValue | null, fallback: number): number {
 }
 
 export async function onRequestOptions() {
-  return new Response(null, { headers: { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'POST, OPTIONS', 'Access-Control-Allow-Headers': '*' } });
+  return new Response(null, { status: 405, headers: secureResponseHeaders });
 }
 
 function json(body: unknown, status: number): Response {
-  return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json; charset=utf-8', 'Access-Control-Allow-Origin': '*' } });
+  return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json; charset=utf-8', ...secureResponseHeaders } });
 }

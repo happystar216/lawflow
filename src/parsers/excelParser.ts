@@ -126,15 +126,15 @@ export async function parseExcelBankStatement(
         direction = 'IN';
       }
     } else if (colMap['amount'] !== undefined) {
-      amount = cleanNumber(row[colMap['amount']]);
+      const signedAmount = signedNumber(row[colMap['amount']]);
+      amount = Math.abs(signedAmount);
       const dirText = String(row[colMap['direction']] || '').trim();
       if (/存入|进|贷|收|\+/.test(dirText)) {
         direction = 'IN';
       } else if (/支|出|借|-/.test(dirText)) {
         direction = 'OUT';
       } else {
-        direction = amount < 0 ? 'OUT' : 'IN';
-        amount = Math.abs(amount);
+        direction = signedAmount < 0 ? 'OUT' : 'IN';
       }
     }
 
@@ -246,10 +246,14 @@ function parseCsvRows(text: string): string[][] {
 }
 
 function cleanNumber(val: any): number {
-  if (typeof val === 'number') return Math.abs(val);
+  return Math.abs(signedNumber(val));
+}
+
+function signedNumber(val: any): number {
+  if (typeof val === 'number') return val;
   const s = String(val || '').replace(/[,¥$\s]/g, '');
   const n = parseFloat(s);
-  return isNaN(n) ? 0 : Math.abs(n);
+  return isNaN(n) ? 0 : n;
 }
 
 function parseDateString(s: string): string {

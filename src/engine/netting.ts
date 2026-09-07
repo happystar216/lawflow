@@ -33,6 +33,7 @@ export function calculateInternalNetting(
     if (tx.isInternalTransfer || tx.direction === 'UNKNOWN') continue;
 
     // Check if counterparty is explicitly in owned accounts list
+    const sourceAcc = tx.accountNumber?.trim() || '';
     const counterpartyAcc = tx.counterpartyAccount?.trim() || '';
     const counterpartyName = tx.counterpartyName?.trim() || '';
 
@@ -44,6 +45,10 @@ export function calculateInternalNetting(
       const oppositeDir = tx.direction === 'OUT' ? 'IN' : 'OUT';
       const matchPair = txList.find((other, idx) => {
         if (idx === i || other.isInternalTransfer) return false;
+        if (!ownedAccountNumbers.has(other.accountNumber?.trim() || '')) return false;
+        if (counterpartyAcc && other.accountNumber?.trim() !== counterpartyAcc) return false;
+        const otherCounterpartyAcc = other.counterpartyAccount?.trim() || '';
+        if (sourceAcc && otherCounterpartyAcc && otherCounterpartyAcc !== sourceAcc) return false;
         if (other.direction !== oppositeDir) return false;
         if (Math.abs(other.amount - tx.amount) > 0.01) return false;
         

@@ -33,6 +33,18 @@ export interface PdfPageImageRenderer {
   destroy(): Promise<void>;
 }
 
+export async function getPdfPageCount(file: File): Promise<number> {
+  const pdfjs = await getPdfjs();
+  const loadingTask = pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()) });
+  try {
+    const document = await loadingTask.promise;
+    if (!document.numPages) throw new Error('PDF 中没有可读取的页面');
+    return document.numPages;
+  } finally {
+    await loadingTask.destroy();
+  }
+}
+
 export async function createPdfPageImageRenderer(file: File): Promise<PdfPageImageRenderer> {
   const pdfjs = await getPdfjs();
   const loadingTask = pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()) });

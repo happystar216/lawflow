@@ -244,6 +244,9 @@ test('normalizeRecognizedData self-heals transaction amount when LLM extracts co
   const normalized = normalizeRecognizedData([rawAccount], [row1, row2]);
   const healedTx = normalized.transactions.find(t => t.id === 'tx2');
   assert.equal(healedTx?.amount, 0.84, 'Amount should be auto-healed to 0.84');
+  assert.equal(healedTx?.originalAmount, 2640, 'Original extracted amount must remain auditable');
+  assert.equal(healedTx?.reviewStatus, 'CORRECTED');
+  assert.match(healedTx?.correctionReason || '', /修正/);
   assert.equal(normalized.accounts[0].isBalanced, true);
   assert.equal(normalized.accounts[0].balanceContinuityIssueCount, 0);
 });
@@ -446,8 +449,6 @@ test('buildEvidenceReviewIssues treats Page 18 credit card periodic settlement s
   assert.equal(discreteIssue.severity, 'ADVISORY');
   assert.match(discreteIssue.title, /第 18 页包含跨期离散账单/);
 });
-
-
 
 
 

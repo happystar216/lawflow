@@ -3,10 +3,10 @@ import { AnomalyMatch, RuleCategory, SeverityLevel } from '../../types/rules';
 
 export class Rule04_FastInFastOutZeroBalance extends BaseRule {
   readonly ruleId = 'RULE_FAST_IN_FAST_OUT';
-  readonly name = '快进快出·账面余额归零';
+  readonly name = '同账户大额资金快进快出';
   readonly category: RuleCategory = 'ABILITY_PROOF';
   readonly defaultSeverity: SeverityLevel = 'L1';
-  readonly description = '大额款项到账后 24-48 小时内即刻全额转出，账面余额常年归零应对查控。';
+  readonly description = '识别同一账户大额款项到账后 48 小时内发生的近额转出，提示核查资金用途与去向。';
   readonly statutoryBasis = [
     '《民事诉讼法》第253条',
     '法释〔2024〕13号第3条（有履行能力而拒不履行）',
@@ -16,6 +16,7 @@ export class Rule04_FastInFastOutZeroBalance extends BaseRule {
   evaluate(context: RuleContext): AnomalyMatch[] {
     const matches: AnomalyMatch[] = [];
     const txList = context.allTransactions.filter(t => !t.isInternalTransfer);
+    const matchedOutgoingIds = new Set<string>();
 
     for (let i = 0; i < txList.length; i++) {
       const inTx = txList[i];
@@ -25,6 +26,7 @@ export class Rule04_FastInFastOutZeroBalance extends BaseRule {
       const tIn = new Date(inTx.transactionDate).getTime();
       const outTx = txList.find((other, idx) => {
         if (idx <= i || other.direction !== 'OUT') return false;
+        if (matchedOutgoingIds.has(other.id) || other.accountNumber !== inTx.accountNumber) return false;
         const tOut = new Date(other.transactionDate).getTime();
         const diffHours = (tOut - tIn) / (1000 * 3600);
         if (diffHours < 0 || diffHours > 48) return false;
@@ -32,6 +34,7 @@ export class Rule04_FastInFastOutZeroBalance extends BaseRule {
       });
 
       if (outTx) {
+        matchedOutgoingIds.add(outTx.id);
         matches.push({
           matchId: `${this.ruleId}_${inTx.id}_${outTx.id}`,
           ruleId: this.ruleId,

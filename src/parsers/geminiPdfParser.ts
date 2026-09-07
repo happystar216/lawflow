@@ -1,4 +1,5 @@
 import { BankAccount, StandardTransaction } from '../types/transaction';
+import { getPdfPageCount } from './pdfPageImageRenderer';
 
 export interface GeminiProgressInfo {
   statusText: string;
@@ -38,13 +39,14 @@ export async function parsePdfWithGemini(
   });
 
   const formData = new FormData();
+  const totalPages = options?.totalPages && options.totalPages > 0
+    ? options.totalPages
+    : await getPdfPageCount(file);
   formData.append('file', file);
   formData.append('sourceFileName', file.name);
   formData.append('pageStart', '1');
-  if (options?.totalPages && options.totalPages > 0) {
-    formData.append('pageEnd', String(options.totalPages));
-    formData.append('totalPages', String(options.totalPages));
-  }
+  formData.append('pageEnd', String(totalPages));
+  formData.append('totalPages', String(totalPages));
   if (options?.respondentName) {
     formData.append('respondentName', options.respondentName.trim());
   }
@@ -124,7 +126,7 @@ export async function parsePdfWithGemini(
       } else if (payload.type === 'complete') {
         lastPercent = 100;
         onProgress?.({
-          statusText: `🎉 卷宗审查完成！已成功全量提取并验证 ${payload.totalTransactions || lastCapturedCount} 笔银行流水明细`,
+          statusText: `结构化提取完成，共识别 ${payload.totalTransactions || lastCapturedCount} 笔；请进入原件核对步骤复核`,
           totalTransactions: payload.totalTransactions || lastCapturedCount,
           percent: 100,
           isStreaming: false

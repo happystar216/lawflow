@@ -101,6 +101,12 @@ export const Step4Compute: React.FC<Step4Props> = ({
         </div>
       </div>
 
+      {accounts.some(account => account.parseStatus && account.parseStatus !== 'COMPLETE') && (
+        <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-xs leading-relaxed text-amber-900">
+          当前存在尚未完成原件核对的账户或页面。以下计算属于初步分析，修正识别数据后应重新执行计算，不能直接作为事实结论引用。
+        </div>
+      )}
+
       {/* Rule Settings Drawer */}
       {showRuleSettings && (
         <div className="bg-slate-900 text-white rounded-2xl p-6 shadow-xl space-y-4">
@@ -157,7 +163,7 @@ export const Step4Compute: React.FC<Step4Props> = ({
             {/* Card 2: Post Enforcement Transfer */}
             <div className="bg-white rounded-2xl border border-slate-200/80 p-5 shadow-sm space-y-2">
               <div className="flex items-center justify-between text-xs text-slate-400">
-                <span>执行立案后涉嫌转移</span>
+                    <span>执行立案后对外支出</span>
                 <Flame className="w-4 h-4 text-rose-500" />
               </div>
               <div className="text-2xl font-bold text-rose-600">
@@ -185,7 +191,7 @@ export const Step4Compute: React.FC<Step4Props> = ({
             {/* Card 4: Anomalies Found */}
             <div className="bg-white rounded-2xl border border-slate-200/80 p-5 shadow-sm space-y-2">
               <div className="flex items-center justify-between text-xs text-slate-400">
-                <span>命中异常证据项</span>
+                <span>命中待核查分析线索</span>
                 <ShieldAlert className="w-4 h-4 text-indigo-500" />
               </div>
               <div className="text-2xl font-bold text-indigo-600">
@@ -241,7 +247,7 @@ export const Step4Compute: React.FC<Step4Props> = ({
 
                 <div>
                   <div className="flex justify-between text-xs font-medium text-slate-600 mb-1">
-                    <span>执行立案后涉嫌转移款项 (L0/L1)</span>
+                    <span>执行立案后待核查对外支出</span>
                     <span className="font-mono text-rose-600 font-bold">¥ {evaluationReport.postExecutionTransferAmount.toLocaleString()}</span>
                   </div>
                   <div className="w-full bg-slate-100 rounded-full h-3">
@@ -257,7 +263,7 @@ export const Step4Compute: React.FC<Step4Props> = ({
 
               <div className="p-3 bg-blue-50/60 rounded-xl border border-blue-100 text-xs text-blue-800 leading-relaxed">
                 {evaluationReport.postExecutionTransferAmount > 0 ? (
-                  <>💡 <strong>穿透结论</strong>：被执行人虽在法庭声称“无财产可供执行”，但流水经内部对冲后，其在执行立案后依然发生了高达 <strong>¥{evaluationReport.postExecutionTransferAmount.toLocaleString()} 元</strong> 的对外转移支付，且执行期间总收入覆盖标的额的 <strong>{(evaluationReport.solvencyCoverageRate * 100).toFixed(0)}%</strong>，完全具备履行能力。</>
+                  <>💡 <strong>核查提示</strong>：流水经内部对冲后，执行立案后存在 <strong>¥{evaluationReport.postExecutionTransferAmount.toLocaleString()} 元</strong> 对外支出，执行期间入账累计相当于执行标的的 <strong>{(evaluationReport.solvencyCoverageRate * 100).toFixed(0)}%</strong>。这仅表明存在资金活动，是否属于可供执行财产、正常经营周转或其他合法支出，仍需结合余额、款项性质和原始凭证核实。</>
                 ) : (
                   <>💡 <strong>穿透结论</strong>：被执行人名下流水经内部对冲后，真实外部净流出达 <strong>¥{(evaluationReport.netExternalOut || evaluationReport.totalRawOut).toLocaleString()} 元</strong>；{evaluationReport.postExecutionTransferAmount === 0 ? '若尚未在前置标注中设定【执行立案日】，系统无法锁定立案后突击转移节点，建议返回设定时间坐标；若已设定，则表明立案后无新增大额流出。' : ''}</>
                 )}

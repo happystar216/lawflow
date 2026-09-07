@@ -68,11 +68,15 @@ export interface StandardTransaction {
   rawRowIndex?: number;
   rawText?: string;
   balanceAvailable?: boolean;
-  extractionMethod?: 'DOCUMENT_PDF' | 'DOCUMENT_IMAGE' | 'MANUAL';
+  extractionMethod?: 'DOCUMENT_PDF' | 'DOCUMENT_IMAGE' | 'GEMINI_DIRECT_PDF' | 'MANUAL';
   extractionConfidence?: number;
   extractionChunkId?: string;
   reviewStatus?: 'AUTO_PASSED' | 'PENDING' | 'VERIFIED' | 'CORRECTED';
   dataQualityIssues?: Array<'INVALID_DATE' | 'INVALID_AMOUNT' | 'UNKNOWN_DIRECTION'>;
+  originalAmount?: number;
+  originalBalance?: number;
+  originalDirection?: FlowDirection;
+  correctionReason?: string;
   reviewedBy?: string;
   reviewedAt?: string;
 

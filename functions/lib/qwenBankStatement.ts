@@ -135,7 +135,7 @@ export async function parseBankStatementWithQwen(
   const fileData = `data:${mimeType};base64,${arrayBufferToBase64(await file.arrayBuffer())}`;
   onActivity?.(`正在读取第 ${pageStart}–${pageEnd} 页全部交易…`);
 
-  let inputContent = isImage
+  let inputContent: unknown[] = isImage
     ? [
         { type: 'text', text: extractionPrompt(expectedPages, inputKind, options.isPageSlice) },
         { type: 'image_url', image_url: { url: fileData } }

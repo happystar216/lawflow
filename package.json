@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.functions.json",
+    "build": "npm run typecheck && vite build",
     "test": "tsx --test tests/**/*.test.ts",
     "preview": "vite preview",
     "deploy": "npm run build && wrangler pages deploy dist --project-name=lawflow"

@@ -6,6 +6,7 @@ import { BankAccount, StandardTransaction } from '../types/transaction';
 import { exportEvidenceAnalysisWord } from '../exporters/docxExporter';
 import { exportEvidenceAnalysisExcel } from '../exporters/excelExporter';
 import { exportEvidencePdfBooklet } from '../exporters/pdfEvidenceExporter';
+import { buildEvidenceReviewIssues } from '../review/buildEvidenceReviewIssues';
 
 interface Step6Props {
   caseMeta: CaseMetadata;
@@ -24,12 +25,13 @@ export const Step6Export: React.FC<Step6Props> = ({ caseMeta, evaluationReport, 
   const repaymentChecks = evaluationReport.matches.filter(match => match.ruleId === 'RULE_FABRICATED_REMARKS_BILATERAL');
   const pendingRepaymentChecks = repaymentChecks.filter(match => !match.verificationStatus || match.verificationStatus === 'PENDING');
   const hiddenAssetClues = evaluationReport.matches.filter(match => match.category === 'ASSET_CLUE');
-  const unresolvedDataChecks = accounts.flatMap(account => account.reviewIssues || []).filter(issue => issue.status === 'PENDING' || issue.status === 'UNRESOLVED');
+  const reviewedAccounts = accounts.map(account => ({ ...account, reviewIssues: buildEvidenceReviewIssues(account, transactions) }));
+  const unresolvedDataChecks = reviewedAccounts.flatMap(account => account.reviewIssues || []).filter(issue => issue.status === 'PENDING' || issue.status === 'UNRESOLVED');
 
   const handleExportWord = async () => {
     setIsExportingWord(true);
     try {
-      await exportEvidenceAnalysisWord(caseMeta, evaluationReport, transactions, accounts);
+      await exportEvidenceAnalysisWord(caseMeta, evaluationReport, transactions, reviewedAccounts);
       setDownloadSuccess(true);
     } catch (error) {
       console.error('Word export error:', error);
@@ -41,7 +43,7 @@ export const Step6Export: React.FC<Step6Props> = ({ caseMeta, evaluationReport, 
   const handleExportExcel = async () => {
     setIsExportingExcel(true);
     try {
-      await exportEvidenceAnalysisExcel(caseMeta, evaluationReport, transactions, accounts);
+      await exportEvidenceAnalysisExcel(caseMeta, evaluationReport, transactions, reviewedAccounts);
       setDownloadSuccess(true);
     } catch (error) {
       console.error('Excel export error:', error);
@@ -190,7 +192,7 @@ export const Step6Export: React.FC<Step6Props> = ({ caseMeta, evaluationReport, 
 
         <div className="text-xs text-slate-400 flex items-center space-x-1">
           <Scale className="w-3.5 h-3.5 text-blue-500" />
-          <span>执析宝 - 让执行银行流水转化为坚不可摧的法庭证据</span>
+          <span>执析宝 - 让银行流水核查过程更清晰、可追溯</span>
         </div>
       </div>
     </div>

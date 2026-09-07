@@ -1,3 +1,5 @@
+import { getCurrentSessionUser } from './authStore';
+
 const DB_NAME = 'LawFlow_Source_Documents_v1';
 const STORE_NAME = 'documents';
 
@@ -23,10 +25,11 @@ function openDb(): Promise<IDBDatabase> {
 }
 
 export async function saveSourceDocument(caseId: string, file: File): Promise<void> {
+  const userId = getCurrentSessionUser()?.id || 'DEFAULT_USER';
   const db = await openDb();
   const transaction = db.transaction(STORE_NAME, 'readwrite');
   transaction.objectStore(STORE_NAME).put({
-    id: `${caseId}|${file.name}`,
+    id: documentId(userId, caseId, file.name),
     caseId,
     fileName: file.name,
     file,
@@ -40,7 +43,8 @@ export async function getSourceDocument(caseId: string, fileName: string): Promi
   try {
     const db = await openDb();
     const transaction = db.transaction(STORE_NAME, 'readonly');
-    const request = transaction.objectStore(STORE_NAME).get(`${caseId}|${fileName}`);
+    const userId = getCurrentSessionUser()?.id || 'DEFAULT_USER';
+    const request = transaction.objectStore(STORE_NAME).get(documentId(userId, caseId, fileName));
     const record = await new Promise<StoredSourceDocument | undefined>((resolve, reject) => {
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
@@ -56,12 +60,17 @@ export async function deleteSourceDocument(caseId: string, fileName: string): Pr
   try {
     const db = await openDb();
     const transaction = db.transaction(STORE_NAME, 'readwrite');
-    transaction.objectStore(STORE_NAME).delete(`${caseId}|${fileName}`);
+    const userId = getCurrentSessionUser()?.id || 'DEFAULT_USER';
+    transaction.objectStore(STORE_NAME).delete(documentId(userId, caseId, fileName));
     await transactionDone(transaction);
     db.close();
   } catch {
     // Removing an account must not be blocked by optional local document cleanup.
   }
+}
+
+function documentId(userId: string, caseId: string, fileName: string): string {
+  return `${userId}|${caseId}|${fileName}`;
 }
 
 function transactionDone(transaction: IDBTransaction): Promise<void> {

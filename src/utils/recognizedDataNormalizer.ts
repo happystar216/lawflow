@@ -258,6 +258,7 @@ function healSummaryOverriddenAmounts(transactions: StandardTransaction[]): Stan
         const summaryHasCurrAmt = curr.summary && (curr.summary.includes(currAmtStr) || curr.summary.includes(String(curr.amount)));
         const rawTextHasImplied = curr.rawText && (curr.rawText.includes(impliedStr) || curr.rawText.includes(String(impliedRounded)));
         if (summaryHasCurrAmt && rawTextHasImplied) {
+          recordCorrection(curr, '摘要金额与交易列冲突，系统依据原始行及余额关系提出修正');
           curr.amount = impliedRounded;
         }
       }
@@ -581,11 +582,13 @@ export function calibrateDirectionsByBalanceMath(transactions: StandardTransacti
       const diffOut = Math.abs(prev.balance - curr.amount - curr.balance);
 
       if (diffIn < 0.05 && diffOut >= 0.05 && curr.direction !== 'IN') {
+        recordCorrection(curr, '系统依据相邻余额关系修正收支方向');
         curr.direction = 'IN';
         if (curr.reviewStatus === 'AUTO_PASSED') {
           curr.reviewStatus = 'CORRECTED';
         }
       } else if (diffOut < 0.05 && diffIn >= 0.05 && curr.direction !== 'OUT') {
+        recordCorrection(curr, '系统依据相邻余额关系修正收支方向');
         curr.direction = 'OUT';
         if (curr.reviewStatus === 'AUTO_PASSED') {
           curr.reviewStatus = 'CORRECTED';
@@ -664,6 +667,7 @@ export function healOcrBalanceAndAmountDiscrepancies(transactions: StandardTrans
             isOcrDigitVariant(currBalStr, impliedBalStr);
 
           if ((isAmtPlausible && isBalPlausible) || (errPrevCurr >= 0.5 && errCurrNext >= 0.5)) {
+            recordCorrection(curr, '系统依据前后余额桥接关系提出金额及余额修正');
             curr.amount = impliedAmtCurr;
             curr.balance = impliedBalCurr;
             if (curr.reviewStatus === 'AUTO_PASSED') {
@@ -701,6 +705,7 @@ export function healOcrBalanceAndAmountDiscrepancies(transactions: StandardTrans
             (curr.rawText && (curr.rawText.includes(impliedStr) || curr.rawText.includes(String(impliedAmt)))) ||
             (curr.summary && (curr.summary.includes(impliedStr) || curr.summary.includes(String(impliedAmt))))
           ) {
+            recordCorrection(curr, '系统依据相邻余额关系提出金额修正');
             curr.amount = impliedAmt;
             if (curr.reviewStatus === 'AUTO_PASSED') {
               curr.reviewStatus = 'CORRECTED';
@@ -727,4 +732,14 @@ function isOcrDigitVariant(strA: string, strB: string): boolean {
     if (diffCount <= 1) return true;
   }
   return false;
+}
+
+function recordCorrection(transaction: StandardTransaction, reason: string): void {
+  if (transaction.originalAmount === undefined) transaction.originalAmount = transaction.amount;
+  if (transaction.originalBalance === undefined && transaction.balance != null) transaction.originalBalance = transaction.balance;
+  if (transaction.originalDirection === undefined) transaction.originalDirection = transaction.direction;
+  transaction.correctionReason = transaction.correctionReason
+    ? `${transaction.correctionReason}；${reason}`
+    : reason;
+  transaction.reviewStatus = 'CORRECTED';
 }

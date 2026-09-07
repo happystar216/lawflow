@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useRef } from 'react';
+import React, { lazy, Suspense, useState, useMemo, useEffect } from 'react';
 import { CaseMetadata } from './types/case';
 import { BankAccount, StandardTransaction } from './types/transaction';
 import { CaseEvaluationReport } from './types/evidence';
@@ -9,15 +9,16 @@ import { AuthScreen } from './components/AuthScreen';
 import { CaseManagerModal } from './components/CaseManagerModal';
 import { WorkflowStepper, WorkflowStep } from './components/WorkflowStepper';
 import { Step0CaseSetup } from './components/Step0CaseSetup';
-import { Step1Upload } from './components/Step1Upload';
 import { Step2Verify } from './components/Step2Verify';
 import { Step3PreAnnotation } from './components/Step3PreAnnotation';
-import { Step4Compute } from './components/Step4Compute';
 import { Step5PostAnnotation } from './components/Step5PostAnnotation';
-import { Step6Export } from './components/Step6Export';
 import { getCurrentSessionUser, logoutUser } from './store/authStore';
 import { CaseRecord, saveCaseRecord, listSavedCases } from './store/caseStore';
 import { normalizeRecognizedData } from './utils/recognizedDataNormalizer';
+
+const Step1Upload = lazy(() => import('./components/Step1Upload').then(module => ({ default: module.Step1Upload })));
+const Step4Compute = lazy(() => import('./components/Step4Compute').then(module => ({ default: module.Step4Compute })));
+const Step6Export = lazy(() => import('./components/Step6Export').then(module => ({ default: module.Step6Export })));
 
 function createBlankCase(): CaseMetadata {
   return {
@@ -51,33 +52,27 @@ export const App: React.FC = () => {
   const [currentStep, setCurrentStep] = useState<WorkflowStep>(0);
   const [completedSteps, setCompletedSteps] = useState<Set<WorkflowStep>>(new Set());
   const [isCaseManagerOpen, setIsCaseManagerOpen] = useState(false);
-
-  const isInitialMount = useRef(true);
-
-  const LOCAL_STORAGE_ACTIVE_CASE = 'LAWFLOW_ACTIVE_CASE_DATA_v1';
+  const [hydratedUserId, setHydratedUserId] = useState<string | null>(null);
+  const activeCaseStorageKey = currentUser ? `LAWFLOW_ACTIVE_CASE_DATA_v2_${currentUser.id}` : '';
 
   // IndexedDB is authoritative for large evidence sets. localStorage keeps only small UI/session metadata.
   useEffect(() => {
+    let cancelled = false;
+    setHydratedUserId(null);
+    if (!currentUser) return () => { cancelled = true; };
+    const userId = currentUser.id;
+
     let session: any = null;
     try {
-      const saved = localStorage.getItem(LOCAL_STORAGE_ACTIVE_CASE);
+      const saved = localStorage.getItem(`LAWFLOW_ACTIVE_CASE_DATA_v2_${userId}`);
       if (saved) session = JSON.parse(saved);
     } catch (e) {
       console.warn('Failed to restore active case from storage:', e);
     }
 
-    if (!currentUser) {
-      // Backward compatibility for a legacy full localStorage record.
-      if (session?.caseMeta) {
-        const normalized = normalizeRecognizedData(session.accounts || [], session.transactions || []);
-        setCaseMeta(session.caseMeta); setAccounts(normalized.accounts); setTransactions(normalized.transactions);
-        setEvaluationReport(session.evaluationReport || null);
-      }
-      return;
-    }
-
     async function loadUserCases() {
-      const savedList = await listSavedCases(currentUser?.id);
+      const savedList = await listSavedCases(userId);
+      if (cancelled) return;
       const requestedCaseId = session?.caseId || session?.caseMeta?.id;
       const active = savedList.find(record => record.metadata.id === requestedCaseId) || savedList[0];
       if (active) {
@@ -98,21 +93,23 @@ export const App: React.FC = () => {
         } else {
           setEvaluationReport(active.evaluationReport || null);
         }
-      } else if (session?.caseMeta) {
-        const normalized = normalizeRecognizedData(session.accounts || [], session.transactions || []);
-        setCaseMeta(session.caseMeta); setAccounts(normalized.accounts); setTransactions(normalized.transactions);
-        setEvaluationReport(session.evaluationReport || null);
+      } else {
+        setCaseMeta(createBlankCase());
+        setAccounts([]);
+        setTransactions([]);
+        setEvaluationReport(null);
+        setCurrentStep(0);
+        setCompletedSteps(new Set());
       }
+      setHydratedUserId(userId);
     }
     loadUserCases();
+    return () => { cancelled = true; };
   }, [currentUser]);
 
   // Auto-Save active case to localStorage & IndexedDB on every change
   useEffect(() => {
-    if (isInitialMount.current) {
-      isInitialMount.current = false;
-      return;
-    }
+    if (!currentUser || hydratedUserId !== currentUser.id) return;
 
     try {
       const payload = {
@@ -121,12 +118,12 @@ export const App: React.FC = () => {
         completedSteps: Array.from(completedSteps),
         updatedAt: new Date().toISOString()
       };
-      localStorage.setItem(LOCAL_STORAGE_ACTIVE_CASE, JSON.stringify(payload));
+      localStorage.setItem(activeCaseStorageKey, JSON.stringify(payload));
     } catch (e) {
       console.warn('Failed to save to localStorage:', e);
     }
 
-    if (currentUser && caseMeta && caseMeta.id && (caseMeta.caseNumber || caseMeta.respondentName || transactions.length > 0)) {
+    if (caseMeta && caseMeta.id && (caseMeta.caseNumber || caseMeta.respondentName || transactions.length > 0)) {
       const record: CaseRecord = {
         metadata: caseMeta,
         accounts,
@@ -137,7 +134,7 @@ export const App: React.FC = () => {
       };
       saveCaseRecord(record).catch(err => console.warn('Auto-save error', err));
     }
-  }, [caseMeta, accounts, transactions, currentStep, completedSteps, evaluationReport, currentUser]);
+  }, [caseMeta, accounts, transactions, currentStep, completedSteps, evaluationReport, currentUser, hydratedUserId, activeCaseStorageKey]);
 
   const handleNewCase = () => {
     const blankCase = createBlankCase();
@@ -147,7 +144,7 @@ export const App: React.FC = () => {
     setEvaluationReport(null);
     setCurrentStep(0);
     setCompletedSteps(new Set());
-    localStorage.removeItem(LOCAL_STORAGE_ACTIVE_CASE);
+    if (activeCaseStorageKey) localStorage.removeItem(activeCaseStorageKey);
   };
 
   const handleSelectCaseFromStore = (record: CaseRecord) => {
@@ -168,6 +165,13 @@ export const App: React.FC = () => {
 
   const handleLogout = () => {
     logoutUser();
+    setCaseMeta(createBlankCase());
+    setAccounts([]);
+    setTransactions([]);
+    setEvaluationReport(null);
+    setCurrentStep(0);
+    setCompletedSteps(new Set());
+    setHydratedUserId(null);
     setCurrentUser(null);
   };
 
@@ -200,6 +204,7 @@ export const App: React.FC = () => {
       />
 
       <main className="flex-1 pb-16">
+        <Suspense fallback={<div className="max-w-5xl mx-auto p-8 text-sm text-slate-500">正在加载当前工作步骤…</div>}>
         {currentStep === 0 && (
           <Step0CaseSetup
             caseMeta={caseMeta}
@@ -307,10 +312,11 @@ export const App: React.FC = () => {
             onPrev={() => goToStep(5)}
           />
         )}
+        </Suspense>
       </main>
 
       <footer className="bg-white border-t border-slate-200 py-4 text-center text-xs text-slate-400">
-        © 执析宝 (LawFlow) · 执行律师银行流水智能穿透与司法取证系统 · 本地沙箱加密运算
+        © 执析宝 (LawFlow) · 执行律师银行流水智能穿透与司法取证系统 · AI 结果须经律师结合原件复核
       </footer>
 
       {/* Case Manager Modal */}
