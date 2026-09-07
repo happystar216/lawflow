@@ -29,7 +29,7 @@ export const PdfEvidencePage: React.FC<PdfEvidencePageProps> = ({ file, pageNumb
   useEffect(() => {
     let cancelled = false;
     let loadingTask: any = undefined;
-    let renderTask: { cancel: () => void; promise: Promise<unknown> } | undefined;
+    let renderTask: any = undefined;
     if (!file) {
       setStatus('MISSING');
       return;
@@ -54,8 +54,9 @@ export const PdfEvidencePage: React.FC<PdfEvidencePageProps> = ({ file, pageNumb
         canvas.style.height = `${viewport.height}px`;
         const context = canvas.getContext('2d');
         if (!context) throw new Error('无法创建页面画布');
-        renderTask = page.render({ canvasContext: context, viewport, transform: ratio === 1 ? undefined : [ratio, 0, 0, ratio, 0, 0] });
-        await renderTask.promise;
+        const activeRenderTask = page.render({ canvasContext: context, viewport, transform: ratio === 1 ? undefined : [ratio, 0, 0, ratio, 0, 0] });
+        renderTask = activeRenderTask;
+        await activeRenderTask.promise;
         if (!cancelled) setStatus('READY');
       } catch (error: any) {
         if (!cancelled && error?.name !== 'RenderingCancelledException') setStatus('ERROR');
