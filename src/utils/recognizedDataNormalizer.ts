@@ -1,6 +1,6 @@
 import { BankAccount, StandardTransaction } from '../types/transaction';
 import { accountIdentityKey, isReliableAccountNumber, normalizeAccountIdentityPart } from './accountIdentity';
-import { balanceContinuityIssues, chronologicalTransactions, isFeeWaiver } from './transactionSequence';
+import { balanceContinuityIssues, chronologicalTransactions, isCreditCardStatement, isFeeWaiver } from './transactionSequence';
 
 export interface NormalizedRecognizedData {
   accounts: BankAccount[];
@@ -10,7 +10,7 @@ export interface NormalizedRecognizedData {
 export function normalizeRecognizedData(
   inputAccounts: BankAccount[], inputTransactions: StandardTransaction[]
 ): NormalizedRecognizedData {
-  const preparedTransactions = inputTransactions.map(upgradeLegacyGeminiReviewStatus);
+  const preparedTransactions = restoreCreditCardBalanceCorrections(inputTransactions.map(upgradeLegacyGeminiReviewStatus));
   const stabilized = healSummaryOverriddenAmounts(stabilizePageAccountIdentities(preparedTransactions));
   const { transactions: deduped, mergedPagesByAccount } = deduplicateTransactions(stabilized);
   const calibrated = calibrateDirectionsByBalanceMath(deduped);
@@ -18,6 +18,10 @@ export function normalizeRecognizedData(
   for (const transaction of transactions) {
     if (isFeeWaiver(transaction) && transaction.dataQualityIssues) {
       transaction.dataQualityIssues = transaction.dataQualityIssues.filter(q => q !== 'INVALID_AMOUNT');
+      if (!transaction.dataQualityIssues.length && transaction.reviewStatus === 'PENDING') {
+        transaction.extractionConfidence = Math.max(transaction.extractionConfidence ?? 0, 0.9);
+        transaction.reviewStatus = 'AUTO_PASSED';
+      }
     }
   }
   const transactionsByAccount = new Map<string, StandardTransaction[]>();
@@ -94,11 +98,9 @@ export function normalizeRecognizedData(
         : firstWithBalance.direction === 'OUT'
         ? firstWithBalance.balance + firstWithBalance.amount
         : firstWithBalance.balance;
-      if (Math.abs(startBalance - firstWithBalance.balance) < 0.01 && Math.abs(startBalance - inferredStart) >= 0.01) {
-        startBalance = inferredStart;
-      }
+      startBalance = inferredStart;
     }
-    if (lastWithBalance && lastWithBalance.balance != null && (endBalance === 0 || endBalance == null)) {
+    if (lastWithBalance && lastWithBalance.balance != null) {
       endBalance = lastWithBalance.balance;
     }
 
@@ -262,9 +264,11 @@ function unifyInterleavedStatementAccounts(transactions: StandardTransaction[]):
 
 function healSummaryOverriddenAmounts(transactions: StandardTransaction[]): StandardTransaction[] {
   const sorted = [...transactions].sort((a, b) => (a.rawPageNumber || 0) - (b.rawPageNumber || 0) || (a.rawRowIndex || 0) - (b.rawRowIndex || 0));
+  const creditCardKeys = creditCardAccountKeys(sorted);
   for (let i = 1; i < sorted.length; i++) {
     const prev = sorted[i - 1];
     const curr = sorted[i];
+    if (creditCardKeys.has(accountIdentityKey(curr))) continue;
     if (
       prev.balanceAvailable === false ||
       curr.balanceAvailable === false ||
@@ -329,6 +333,33 @@ function upgradeLegacyGeminiReviewStatus(transaction: StandardTransaction): Stan
   return isLegacyBlanketPending
     ? { ...transaction, extractionConfidence: 0.9, reviewStatus: 'AUTO_PASSED' }
     : transaction;
+}
+
+function restoreCreditCardBalanceCorrections(transactions: StandardTransaction[]): StandardTransaction[] {
+  const creditCardKeys = creditCardAccountKeys(transactions);
+  return transactions.map(transaction => {
+    if (!creditCardKeys.has(accountIdentityKey(transaction))) return transaction;
+    if (!/^(?:系统依据前后余额桥接关系提出金额及余额修正|系统依据相邻余额关系提出金额修正)$/.test(transaction.correctionReason || '')) return transaction;
+    return {
+      ...transaction,
+      amount: transaction.originalAmount ?? transaction.amount,
+      balance: transaction.originalBalance ?? transaction.balance,
+      reviewStatus: transaction.dataQualityIssues?.length ? 'PENDING' : 'AUTO_PASSED',
+      correctionReason: undefined,
+      originalAmount: undefined,
+      originalBalance: undefined,
+      originalDirection: undefined
+    };
+  });
+}
+
+function creditCardAccountKeys(transactions: StandardTransaction[]): Set<string> {
+  const groups = new Map<string, StandardTransaction[]>();
+  for (const transaction of transactions) {
+    const key = accountIdentityKey(transaction);
+    groups.set(key, [...(groups.get(key) || []), transaction]);
+  }
+  return new Set([...groups].filter(([, rows]) => isCreditCardStatement(rows)).map(([key]) => key));
 }
 
 function isUsefulBankName(value: string): boolean {
@@ -633,6 +664,16 @@ export function calibrateDirectionsByBalanceMath(transactions: StandardTransacti
           curr.reviewStatus = 'CORRECTED';
         }
       }
+      if (
+        curr.correctionReason === '系统依据相邻余额关系修正收支方向'
+        && curr.originalAmount === curr.amount
+        && curr.originalBalance === curr.balance
+        && !curr.dataQualityIssues?.length
+        && (curr.extractionConfidence ?? 0) >= 0.8
+        && ((curr.direction === 'IN' && diffIn < 0.05) || (curr.direction === 'OUT' && diffOut < 0.05))
+      ) {
+        curr.reviewStatus = 'AUTO_PASSED';
+      }
     }
   }
 
@@ -652,6 +693,7 @@ export function healOcrBalanceAndAmountDiscrepancies(transactions: StandardTrans
 
   for (const [, accTxs] of byAccount) {
     if (accTxs.length < 2) continue;
+    if (isCreditCardStatement(accTxs)) continue;
 
     const ordered = chronologicalTransactions(accTxs);
 

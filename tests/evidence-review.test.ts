@@ -353,6 +353,8 @@ test('normalizeRecognizedData calibrates credit card installment conversion dire
   const normalized = normalizeRecognizedData([account], rawTxs);
   assert.equal(normalized.transactions.find(t => t.id === 'c4')?.direction, 'IN', 'c4 should be calibrated to IN');
   assert.equal(normalized.transactions.find(t => t.id === 'c7')?.direction, 'IN', 'c7 should be calibrated to IN');
+  assert.equal(normalized.transactions.find(t => t.id === 'c4')?.reviewStatus, 'AUTO_PASSED');
+  assert.equal(normalized.transactions.find(t => t.id === 'c7')?.reviewStatus, 'AUTO_PASSED');
   assert.equal(normalized.accounts[0].balanceContinuityIssueCount, 0, 'All breaks should be resolved');
 });
 
@@ -397,7 +399,7 @@ test('normalizeRecognizedData mathematically heals OCR single-digit error (4000 
   assert.equal(healedIssues.length, 0, 'All breaks between Page 9 and Page 8 should be eliminated');
 });
 
-test('buildEvidenceReviewIssues treats Page 18 credit card periodic settlement summary (repayment & interest) as advisory discrete statement rather than 12 balance breaks', () => {
+test('credit card periodic settlement rows do not create deposit-account balance warnings', () => {
   const ccAccount: BankAccount = {
     accountNumber: '4135190011771192',
     accountName: '胡艳红',
@@ -436,19 +438,51 @@ test('buildEvidenceReviewIssues treats Page 18 credit card periodic settlement s
   ];
 
   const issues = buildEvidenceReviewIssues(ccAccount, page18Txs);
-  // Page 18 should be categorized as advisory DATA_WARNING (discrete_statement), NOT blocking BALANCE_BREAK
-  const balanceBreakIssues = issues.filter(i => i.category === 'BALANCE_BREAK');
-  assert.equal(balanceBreakIssues.length, 0, 'No false BALANCE_BREAK issues should be reported for credit card summary table');
+  assert.equal(issues.some(i => i.category === 'BALANCE_BREAK'), false);
 
   // Fee waiver transactions (r1, r10) with 0.00 amount should NOT be flagged as INVALID_AMOUNT
   const invalidAmountIssues = issues.filter(i => i.category === 'INVALID_AMOUNT');
   assert.equal(invalidAmountIssues.length, 0, 'Legitimate 0-amount fee waiver transactions should not trigger INVALID_AMOUNT');
 
-  const discreteIssue = issues.find(i => i.category === 'DATA_WARNING' && i.pageNumber === 18);
-  assert.ok(discreteIssue, 'Advisory discrete statement issue should be created for Page 18');
-  assert.equal(discreteIssue.severity, 'ADVISORY');
-  assert.match(discreteIssue.title, /第 18 页包含跨期离散账单/);
+  assert.equal(issues.some(i => /跨期离散账单/.test(i.title)), false);
+  const audit = auditAccountBalance(ccAccount, page18Txs);
+  assert.equal(audit.isAuditable, false);
+  assert.equal(audit.unavailableReason, 'CREDIT_CARD_STATEMENT');
 });
 
+test('normalizer accepts a zero-amount fee waiver without leaving it pending', () => {
+  const feeWaiver: StandardTransaction = {
+    ...makeTx('waiver', 18, 1, '2023-06-14', '2023-06-14', 'IN', 0, -10755.22),
+    accountNumber: '4135190011771192', bankName: '中国工商银行信用卡', summary: '减免年费100.00元 年费减免',
+    extractionConfidence: 0.5, reviewStatus: 'PENDING', dataQualityIssues: ['INVALID_AMOUNT']
+  };
+  const normalized = normalizeRecognizedData([{ ...account, accountNumber: feeWaiver.accountNumber, bankName: feeWaiver.bankName }], [feeWaiver]);
+  assert.deepEqual(normalized.transactions[0].dataQualityIssues, []);
+  assert.equal(normalized.transactions[0].reviewStatus, 'AUTO_PASSED');
+  assert.equal(normalized.transactions[0].extractionConfidence, 0.9);
+});
+
+test('normalizer restores legacy balance-derived amount changes on credit card statements', () => {
+  const corrected: StandardTransaction = {
+    ...makeTx('legacy-card-correction', 18, 4, '2024-02-17', '2024-02-17', 'OUT', 4250.59, -8704.58),
+    accountNumber: '4135190011771192', bankName: '中国工商银行信用卡', summary: '透支利息',
+    reviewStatus: 'CORRECTED', originalAmount: 50.46, originalBalance: -8704.58,
+    correctionReason: '系统依据前后余额桥接关系提出金额及余额修正'
+  };
+  const normalized = normalizeRecognizedData([{ ...account, accountNumber: corrected.accountNumber, bankName: corrected.bankName }], [corrected]);
+  assert.equal(normalized.transactions[0].amount, 50.46);
+  assert.equal(normalized.transactions[0].reviewStatus, 'AUTO_PASSED');
+  assert.equal(normalized.transactions[0].correctionReason, undefined);
+});
+
+test('one isolated long-interval mismatch does not label a normal statement page as periodic', () => {
+  const rows = [
+    { ...makeTx('gap-a', 4, 1, '2023-01-01', '2023-01-01', 'IN', 10, 110), bankName: '中国工商银行' },
+    { ...makeTx('gap-b', 4, 2, '2023-06-01', '2023-06-01', 'IN', 10, 150), bankName: '中国工商银行' }
+  ];
+  const issues = buildEvidenceReviewIssues({ ...account, bankName: '中国工商银行', parseWarnings: [] }, rows);
+  assert.equal(issues.some(issue => /跨期离散账单/.test(issue.title)), false);
+  assert.equal(issues.some(issue => issue.category === 'BALANCE_BREAK'), false);
+});
 
 

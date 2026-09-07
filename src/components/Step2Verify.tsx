@@ -612,12 +612,14 @@ export const Step2Verify: React.FC<Step2Props> = ({
             title="平账审计状态"
             value={
               !auditReport.isAuditable
-                ? "缺少余额，无法自动平账"
+                ? auditReport.unavailableReason === "CREDIT_CARD_STATEMENT"
+                  ? "信用卡账单，不适用储蓄卡逐笔平账"
+                  : "缺少余额，无法自动平账"
                 : auditReport.isBalanced
                   ? "借贷平衡"
                   : `差额 ¥${auditReport.difference.toFixed(2)}`
             }
-            alert={!auditReport.isBalanced}
+            alert={auditReport.isAuditable && !auditReport.isBalanced}
           />
           <AuditCard
             title="账户收入总计"

@@ -18,6 +18,28 @@ export function isFeeWaiver(transaction: StandardTransaction): boolean {
 }
 
 /**
+ * Credit-card histories may expose a shared outstanding balance rather than a
+ * deposit-account balance that can be audited across every displayed card.
+ */
+export function isCreditCardStatement(transactions: StandardTransaction[], bankName = ''): boolean {
+  const text = [bankName, ...transactions.flatMap(transaction => [
+    transaction.bankName, transaction.summary, transaction.counterpartyName, transaction.rawText
+  ])].filter(Boolean).join(' ');
+  if (/信用卡|贷记卡|牡丹卡/.test(text)) return true;
+
+  const withBalance = transactions.filter(transaction => transaction.balanceAvailable !== false && transaction.balance != null);
+  const negativeBalances = withBalance.filter(transaction => Number(transaction.balance) < 0).length;
+  const creditCardRows = transactions.filter(transaction =>
+    /透支|年费|自动转[账帐]还款|分期付款|消费转分期|分期利息|分期费用/.test(
+      `${transaction.summary || ''} ${transaction.counterpartyName || ''} ${transaction.rawText || ''}`
+    )
+  ).length;
+  return withBalance.length > 0
+    && negativeBalances >= Math.ceil(withBalance.length / 2)
+    && creditCardRows >= Math.min(2, transactions.length);
+}
+
+/**
  * Normalizes dates and timestamps into ISO-comparable strings YYYY-MM-DD HH:mm:ss.
  */
 export function normalizeTransactionTimestamp(tx: StandardTransaction): string {

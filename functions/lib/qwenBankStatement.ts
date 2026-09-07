@@ -80,6 +80,7 @@ const extractionPrompt = (expectedPages: number, inputKind: 'pdf' | 'image', isP
 1. 不得只提取大额、可疑或示例交易；所有有效交易逐笔输出，包括小额、手续费、利息、冲正、现金、保险、理财和内部转账。
 2. 不得因对手方、摘要、余额或账号缺失而丢弃一笔已有日期与发生额的交易；缺失文本用空字符串，余额无法识别时用 null。
 3. 借方/支出为 OUT，贷方/收入为 IN。若银行版式以正负号表达，以该版式含义为准；确实无法判断时填 UNKNOWN，不得猜测。
+   中国工商银行信用卡历史明细中的【借贷标志】必须按银行表格含义读取：1 为借记/消费/支出（OUT），2 为贷记/还款/冲正/收入（IN）。
 4. 同一交易跨行展示时合并为一笔；不要把页眉、页脚、合计、小计、期初余额、期末余额当作交易。
 5. rawPageNumber 必须使用本分片内的 1 起始页码，范围是 1 到 ${expectedPages}；不要猜测原文件页码。${isPageSlice ? ' 本图只是原页的一段：只输出本段中可见且有交易序号、日期或关键字段的交易；跨出图像边缘的续行不得虚构，也不要把表头当交易。rawRowIndex 按本段从上到下排列即可。' : ''}
 6. pageChecks 必须严格包含 ${expectedPages} 项，每页一项；即使没有交易，也必须输出 transactionCount: 0。pageType 必须填写 TRANSACTIONS（交易明细）、ACCOUNT_INFO（开户/账户信息）、DOCUMENT（法院或银行文书）、BLANK（空白）或 UNKNOWN。

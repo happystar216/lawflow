@@ -1,6 +1,6 @@
 import { BankAccount, EvidenceReviewIssue, StandardTransaction } from '../types/transaction';
 import { transactionBelongsToAccount } from '../utils/accountIdentity';
-import { balanceContinuityIssues, daysBetween, isFeeWaiver } from '../utils/transactionSequence';
+import { balanceContinuityIssues, daysBetween, isCreditCardStatement, isFeeWaiver } from '../utils/transactionSequence';
 
 export function buildEvidenceReviewIssues(
   account: BankAccount,
@@ -75,11 +75,15 @@ export function buildEvidenceReviewIssues(
     ['核对原件借贷标识或收支栏', '确认为收入或支出并保存']);
 
   const balanceByPage = new Map<number, ReturnType<typeof balanceContinuityIssues>>();
-  for (const issue of balanceContinuityIssues(transactions)) {
+  const balanceIssues = isCreditCardStatement(transactions, account.bankName) ? [] : balanceContinuityIssues(transactions);
+  for (const issue of balanceIssues) {
     const page = issue.transaction.rawPageNumber || 0;
     balanceByPage.set(page, [...(balanceByPage.get(page) || []), issue]);
   }
   for (const [pageNumber, pageIssues] of balanceByPage) {
+    // One isolated mismatch across a long period is a statement-range gap, not
+    // enough evidence to classify the whole page as a periodic statement.
+    if (pageIssues.length === 1 && pageIssues[0].isLongInterval) continue;
     const transactionIds = [...new Set(pageIssues.flatMap(({ previous, transaction }) => [previous.id, transaction.id]))];
     const pageTransactions = transactions.filter(t => (t.rawPageNumber || 0) === pageNumber);
 

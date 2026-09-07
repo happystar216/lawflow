@@ -1,11 +1,12 @@
 import { BankAccount, StandardTransaction } from '../types/transaction';
 import { transactionBelongsToAccount } from '../utils/accountIdentity';
-import { chronologicalTransactions, isFeeWaiver } from '../utils/transactionSequence';
+import { chronologicalTransactions, isCreditCardStatement, isFeeWaiver } from '../utils/transactionSequence';
 
 export interface AuditReport {
   accountNumber: string;
   isBalanced: boolean;
   isAuditable: boolean;
+  unavailableReason?: 'MISSING_BALANCE' | 'CREDIT_CARD_STATEMENT';
   calculatedEndBalance: number;
   statedEndBalance: number;
   difference: number;
@@ -47,7 +48,13 @@ export function auditAccountBalance(
     }
   });
 
-  const isAuditable = account.balanceAvailable !== false;
+  const isCreditCard = isCreditCardStatement(accountTx, account.bankName);
+  const unavailableReason = account.balanceAvailable === false
+    ? 'MISSING_BALANCE' as const
+    : isCreditCard
+      ? 'CREDIT_CARD_STATEMENT' as const
+      : undefined;
+  const isAuditable = !unavailableReason;
   let startBalance = account.startBalance;
   let endBalance = account.endBalance;
 
@@ -87,6 +94,7 @@ export function auditAccountBalance(
     accountNumber: account.accountNumber,
     isBalanced,
     isAuditable,
+    unavailableReason,
     calculatedEndBalance,
     statedEndBalance: endBalance,
     difference: diff,
