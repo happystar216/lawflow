@@ -103,20 +103,94 @@ function stabilizePageAccountIdentities(input: StandardTransaction[]): StandardT
   for (const [page, pageTransactions] of [...pages.entries()].sort((a, b) => a[0] - b[0])) {
     const reliable = pageTransactions.filter(item => isReliableAccountNumber(item.accountNumber));
     const reliableKeys = new Set(reliable.map(accountNumberKey));
-    if (reliableKeys.size === 1) {
-      const identity = reliable[0];
-      for (const transaction of pageTransactions.filter(item => !isReliableAccountNumber(item.accountNumber))) copyIdentity(transaction, identity);
+    if (reliableKeys.size >= 1) {
+      // Unify all rows on a single page to the dominant reliable account
+      const counts = new Map<string, { item: StandardTransaction; count: number }>();
+      for (const item of reliable) {
+        const k = accountNumberKey(item);
+        const curr = counts.get(k);
+        counts.set(k, { item, count: (curr?.count || 0) + 1 });
+      }
+      const primary = [...counts.values()].sort((a, b) => b.count - a.count)[0].item;
+      for (const transaction of pageTransactions) {
+        copyIdentity(transaction, primary);
+      }
       continue;
     }
-    const allUnique = reliable.length === pageTransactions.length
-      && new Set(reliable.map(accountNumberKey)).size === reliable.length;
-    if (!allUnique || pageTransactions.length < 2) continue;
     const previous = [...transactions].reverse().find(item => (item.rawPageNumber || 0) < page && isReliableAccountNumber(item.accountNumber));
     const next = transactions.find(item => (item.rawPageNumber || 0) > page && isReliableAccountNumber(item.accountNumber));
     if (previous && next && accountNumberKey(previous) === accountNumberKey(next)) {
       for (const transaction of pageTransactions) copyIdentity(transaction, previous);
+    } else if (previous) {
+      for (const transaction of pageTransactions) copyIdentity(transaction, previous);
     }
   }
+
+  // Cross-page account aliasing / bridging for interleaved statements
+  return unifyInterleavedStatementAccounts(transactions);
+}
+
+function unifyInterleavedStatementAccounts(transactions: StandardTransaction[]): StandardTransaction[] {
+  const accountsByBank = new Map<string, Set<string>>();
+  for (const t of transactions) {
+    if (!isReliableAccountNumber(t.accountNumber)) continue;
+    const b = normalizeAccountIdentityPart(t.bankName || '');
+    const acc = normalizeAccountIdentityPart(t.accountNumber);
+    const set = accountsByBank.get(b) || new Set();
+    set.add(acc);
+    accountsByBank.set(b, set);
+  }
+
+  for (const [, accSet] of accountsByBank) {
+    if (accSet.size < 2) continue;
+    const accList = [...accSet];
+    for (let i = 0; i < accList.length; i++) {
+      for (let j = i + 1; j < accList.length; j++) {
+        const acc1 = accList[i];
+        const acc2 = accList[j];
+        const combined = transactions
+          .filter(t => {
+            const a = normalizeAccountIdentityPart(t.accountNumber);
+            return a === acc1 || a === acc2;
+          })
+          .sort((a, b) => (a.rawPageNumber || 0) - (b.rawPageNumber || 0) || (a.rawRowIndex || 0) - (b.rawRowIndex || 0));
+
+        let transitions = 0;
+        let continuousHits = 0;
+        for (let k = 1; k < combined.length; k++) {
+          const prev = combined[k - 1];
+          const curr = combined[k];
+          const prevAcc = normalizeAccountIdentityPart(prev.accountNumber);
+          const currAcc = normalizeAccountIdentityPart(curr.accountNumber);
+          if (prevAcc !== currAcc) {
+            transitions++;
+            if (prev.balance != null && curr.balance != null && curr.direction !== 'UNKNOWN') {
+              const delta = curr.direction === 'IN' ? curr.amount : -curr.amount;
+              if (Math.abs(prev.balance + delta - curr.balance) < 1) {
+                continuousHits++;
+              }
+            }
+          }
+        }
+
+        if (continuousHits > 0 || transitions >= 2) {
+          const count1 = combined.filter(t => normalizeAccountIdentityPart(t.accountNumber) === acc1).length;
+          const count2 = combined.filter(t => normalizeAccountIdentityPart(t.accountNumber) === acc2).length;
+          const targetAcc = count1 >= count2 ? acc1 : acc2;
+          const sourceAcc = count1 >= count2 ? acc2 : acc1;
+          const targetItem = combined.find(t => normalizeAccountIdentityPart(t.accountNumber) === targetAcc)!;
+
+          for (const t of transactions) {
+            if (normalizeAccountIdentityPart(t.accountNumber) === sourceAcc) {
+              t.accountNumber = targetItem.accountNumber;
+              if (targetItem.accountName) t.accountName = targetItem.accountName;
+            }
+          }
+        }
+      }
+    }
+  }
+
   return transactions;
 }
 
