@@ -240,8 +240,7 @@ export async function parsePdfWithGeminiStream(
 
   const expectedHolder = options?.respondentName?.trim() || '';
 
-  // 标准化为系统通用的 StandardTransaction
-  const transactions = rawTxList.map((tx: any, idx: number) => {
+  const rawTransactions = rawTxList.map((tx: any, idx: number) => {
     const rawHolder = String(tx.holder || '').trim();
     const resolvedAccountName = rawHolder || expectedHolder || '被执行人';
     return {
@@ -269,6 +268,9 @@ export async function parsePdfWithGeminiStream(
       dataQualityIssues: []
     };
   });
+
+  // 跨页/跨模板重复流水自动去重
+  const transactions = deduplicateGeminiTransactions(rawTransactions);
 
   // 生成聚合银行账户摘要
   const accountMap = new Map<string, any>();
@@ -340,3 +342,108 @@ export async function parsePdfWithGeminiStream(
     pagesCovered: parsedResult.pagesCovered || []
   };
 }
+
+function deduplicateGeminiTransactions(transactions: any[]): any[] {
+  const result: any[] = [];
+  const matchedTargetsByPage = new Map<number, Set<number>>();
+
+  for (const candidate of transactions) {
+    const candPage = Number(candidate.rawPageNumber) || 0;
+    const pageMatched = matchedTargetsByPage.get(candPage) || new Set<number>();
+    let matchedIdx = -1;
+
+    for (let i = 0; i < result.length; i++) {
+      if (pageMatched.has(i)) continue;
+      const target = result[i];
+      if (areGeminiTransactionsDuplicate(target, candidate)) {
+        matchedIdx = i;
+        break;
+      }
+    }
+
+    if (matchedIdx !== -1) {
+      const target = result[matchedIdx];
+      if ((!target.summary || target.summary.length < (candidate.summary?.length || 0)) && candidate.summary) {
+        target.summary = candidate.summary;
+      }
+      if (!target.counterpartyName && candidate.counterpartyName) {
+        target.counterpartyName = candidate.counterpartyName;
+      }
+      if (!target.counterpartyAccount && candidate.counterpartyAccount) {
+        target.counterpartyAccount = candidate.counterpartyAccount;
+      }
+      if (candidate.transactionTime && candidate.transactionTime.length > (target.transactionTime?.length || 0)) {
+        target.transactionTime = candidate.transactionTime;
+      }
+      if ((target.balance == null || target.balanceAvailable === false) && candidate.balance != null) {
+        target.balance = candidate.balance;
+        target.balanceAvailable = true;
+      }
+      pageMatched.add(matchedIdx);
+      matchedTargetsByPage.set(candPage, pageMatched);
+    } else {
+      result.push({ ...candidate });
+    }
+  }
+
+  return result;
+}
+
+function areGeminiTransactionsDuplicate(a: any, b: any): boolean {
+  const accA = String(a.accountNumber || '').replace(/[\s\-_—–·•]/g, '').toLowerCase();
+  const accB = String(b.accountNumber || '').replace(/[\s\-_—–·•]/g, '').toLowerCase();
+  if (accA && accB && accA !== accB) return false;
+
+  const dateA = String(a.transactionDate || '').slice(0, 10);
+  const dateB = String(b.transactionDate || '').slice(0, 10);
+  if (!dateA || !dateB || dateA !== dateB) return false;
+
+  if (a.direction !== b.direction) return false;
+
+  if (Math.abs((Number(a.amount) || 0) - (Number(b.amount) || 0)) >= 0.01) return false;
+
+  const timeA = (String(a.transactionTime || '').match(/(\d{2}:\d{2}(?::\d{2})?)/) || [])[1] || '';
+  const timeB = (String(b.transactionTime || '').match(/(\d{2}:\d{2}(?::\d{2})?)/) || [])[1] || '';
+
+  const hasBalA = a.balance != null && a.balanceAvailable !== false;
+  const hasBalB = b.balance != null && b.balanceAvailable !== false;
+
+  if (hasBalA && hasBalB) {
+    if (Math.abs(Number(a.balance) - Number(b.balance)) >= 0.01) return false;
+
+    if (a.rawPageNumber && b.rawPageNumber && a.rawPageNumber !== b.rawPageNumber) {
+      const cleanSummary = (s: string) => String(s || '').replace(/[\s\-_@#*|/\\.,:;，。、：；]/g, '').toLowerCase();
+      const sA = cleanSummary(a.summary);
+      const sB = cleanSummary(b.summary);
+      const cpA = cleanSummary(a.counterpartyName);
+      const cpB = cleanSummary(b.counterpartyName);
+      const pageDiff = Math.abs(a.rawPageNumber - b.rawPageNumber);
+
+      if (timeA && timeB) return timeA === timeB;
+      if (sA && sB) return sA.includes(sB) || sB.includes(sA);
+      if (pageDiff >= 2) {
+        if (cpA && cpB && (cpA.includes(cpB) || cpB.includes(cpA))) return true;
+        if (sA || sB) return true;
+      }
+      return false;
+    }
+
+    const cleanSummary = (s: string) => String(s || '').replace(/[\s\-_@#*|/\\.,:;，。、：；]/g, '').toLowerCase();
+    const sA = cleanSummary(a.summary);
+    const sB = cleanSummary(b.summary);
+    if ((timeA && timeB && timeA === timeB) || (sA && sB && sA === sB) || (!sA && !sB)) {
+      return true;
+    }
+    return false;
+  }
+
+  if (timeA && timeB && timeA === timeB && timeA.split(':').length === 3) return true;
+
+  const cleanSummary = (s: string) => String(s || '').replace(/[\s\-_@#*|/\\.,:;，。、：；]/g, '').toLowerCase();
+  const sA = cleanSummary(a.summary);
+  const sB = cleanSummary(b.summary);
+  if (sA && sB && (sA.includes(sB) || sB.includes(sA))) return true;
+
+  return false;
+}
+

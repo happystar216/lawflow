@@ -248,4 +248,70 @@ test('normalizeRecognizedData self-heals transaction amount when LLM extracts co
   assert.equal(normalized.accounts[0].balanceContinuityIssueCount, 0);
 });
 
+test('normalizeRecognizedData deduplicates identical transactions from multi-template court prints (e.g. Page 4 and Page 13) eliminating 10 false continuity alerts', () => {
+  const accountBase: BankAccount = {
+    accountNumber: '2308014101100042218',
+    accountName: '被执行人',
+    bankName: '中国工商银行',
+    ownerType: 'DEBTOR_MAIN',
+    fileName: '工行流水卷宗.pdf',
+    fileType: 'pdf',
+    totalIn: 0,
+    totalOut: 0,
+    transactionCount: 0,
+    startDate: '2023-06-21',
+    endDate: '2025-03-21',
+    startBalance: 100.00,
+    endBalance: 111.31,
+    isBalanced: true,
+    balanceDiff: 0,
+    balanceAvailable: true
+  };
+
+  const p4Txs: StandardTransaction[] = [
+    { ...makeTx('p4_10', 4, 1, '2025-03-21', '00:51:29', 'IN', 3.10, 111.31), accountNumber: accountBase.accountNumber, bankName: accountBase.bankName, summary: '利息 批量业务' },
+    { ...makeTx('p4_9', 4, 2, '2024-12-21', '02:30:15', 'IN', 2.50, 108.21), accountNumber: accountBase.accountNumber, bankName: accountBase.bankName, summary: '利息 批量业务' },
+    { ...makeTx('p4_8', 4, 3, '2024-06-21', '01:00:00', 'IN', 1.80, 105.71), accountNumber: accountBase.accountNumber, bankName: accountBase.bankName, summary: '利息 批量业务' },
+    { ...makeTx('p4_7', 4, 4, '2024-03-21', '02:15:00', 'IN', 1.50, 103.91), accountNumber: accountBase.accountNumber, bankName: accountBase.bankName, summary: '利息 批量业务' },
+    { ...makeTx('p4_6', 4, 5, '2023-12-21', '01:20:00', 'IN', 1.15, 102.41), accountNumber: accountBase.accountNumber, bankName: accountBase.bankName, summary: '利息 批量业务' },
+    { ...makeTx('p4_5', 4, 6, '2023-09-30', '21:43:51', 'OUT', 40.00, 101.26), accountNumber: accountBase.accountNumber, bankName: accountBase.bankName, summary: '还贷-504523' },
+    { ...makeTx('p4_4', 4, 7, '2023-09-28', '13:08:57', 'IN', 50.00, 141.26), accountNumber: accountBase.accountNumber, bankName: accountBase.bankName, summary: '网银跨行汇款' },
+    { ...makeTx('p4_3', 4, 8, '2023-09-27', '21:30:27', 'OUT', 10.00, 91.26), accountNumber: accountBase.accountNumber, bankName: accountBase.bankName, summary: '转账' },
+    { ...makeTx('p4_2', 4, 9, '2023-09-21', '06:48:17', 'IN', 0.26, 101.26), accountNumber: accountBase.accountNumber, bankName: accountBase.bankName, summary: '储蓄结息' },
+    { ...makeTx('p4_1', 4, 10, '2023-06-21', '01:00:00', 'IN', 1.00, 101.00), accountNumber: accountBase.accountNumber, bankName: accountBase.bankName, summary: '储蓄结息' }
+  ];
+
+  // Page 13: The exact same 10 transactions reprinted in forward order
+  const p13Txs: StandardTransaction[] = [
+    { ...makeTx('p13_1', 13, 1, '2023-06-21', '01:00:00', 'IN', 1.00, 101.00), accountNumber: accountBase.accountNumber, bankName: accountBase.bankName, summary: '储蓄结息' },
+    { ...makeTx('p13_2', 13, 2, '2023-09-21', '06:48:17', 'IN', 0.26, 101.26), accountNumber: accountBase.accountNumber, bankName: accountBase.bankName, summary: '储蓄结息' },
+    { ...makeTx('p13_3', 13, 3, '2023-09-27', '21:30:27', 'OUT', 10.00, 91.26), accountNumber: accountBase.accountNumber, bankName: accountBase.bankName, summary: '转账' },
+    { ...makeTx('p13_4', 13, 4, '2023-09-28', '13:08:57', 'IN', 50.00, 141.26), accountNumber: accountBase.accountNumber, bankName: accountBase.bankName, summary: '网银跨行汇款' },
+    { ...makeTx('p13_5', 13, 5, '2023-09-30', '21:43:51', 'OUT', 40.00, 101.26), accountNumber: accountBase.accountNumber, bankName: accountBase.bankName, summary: '还贷-504523' },
+    { ...makeTx('p13_6', 13, 6, '2023-12-21', '01:20:00', 'IN', 1.15, 102.41), accountNumber: accountBase.accountNumber, bankName: accountBase.bankName, summary: '利息 批量业务' },
+    { ...makeTx('p13_7', 13, 7, '2024-03-21', '02:15:00', 'IN', 1.50, 103.91), accountNumber: accountBase.accountNumber, bankName: accountBase.bankName, summary: '利息 批量业务' },
+    { ...makeTx('p13_8', 13, 8, '2024-06-21', '01:00:00', 'IN', 1.80, 105.71), accountNumber: accountBase.accountNumber, bankName: accountBase.bankName, summary: '利息 批量业务' },
+    { ...makeTx('p13_9', 13, 9, '2024-12-21', '02:30:15', 'IN', 2.50, 108.21), accountNumber: accountBase.accountNumber, bankName: accountBase.bankName, summary: '利息 批量业务' },
+    { ...makeTx('p13_10', 13, 10, '2025-03-21', '00:51:29', 'IN', 3.10, 111.31), accountNumber: accountBase.accountNumber, bankName: accountBase.bankName, summary: '利息 批量业务' }
+  ];
+
+  // Without deduplication: 20 transactions would trigger multiple balance breaks
+  const rawContinuityIssues = balanceContinuityIssues([...p4Txs, ...p13Txs]);
+  assert.ok(rawContinuityIssues.length >= 9, 'Without deduplication, duplicated pairs break continuity');
+
+  // With normalizer deduplication:
+  const normalized = normalizeRecognizedData([accountBase], [...p4Txs, ...p13Txs]);
+  assert.equal(normalized.transactions.length, 10, 'Should deduplicate from 20 to 10 transactions');
+  assert.equal(normalized.accounts[0].transactionCount, 10);
+  assert.equal(normalized.accounts[0].balanceContinuityIssueCount, 0, 'Should have 0 continuity breaks');
+  assert.equal(normalized.accounts[0].isBalanced, true, 'Account should be perfectly balanced');
+  assert.deepEqual(normalized.accounts[0].coveredPages, [4, 13], 'Both Page 4 and Page 13 should be covered');
+
+  // Review issues generated should have 0 balance breaks for Page 13
+  const issues = buildEvidenceReviewIssues(normalized.accounts[0], normalized.transactions);
+  const breakIssues = issues.filter(i => i.category === 'BALANCE_BREAK');
+  assert.equal(breakIssues.length, 0, 'No balance break review issues should exist');
+});
+
+
 

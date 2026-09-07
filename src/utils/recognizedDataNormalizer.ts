@@ -10,7 +10,8 @@ export interface NormalizedRecognizedData {
 export function normalizeRecognizedData(
   inputAccounts: BankAccount[], inputTransactions: StandardTransaction[]
 ): NormalizedRecognizedData {
-  const transactions = healSummaryOverriddenAmounts(stabilizePageAccountIdentities(inputTransactions));
+  const stabilized = healSummaryOverriddenAmounts(stabilizePageAccountIdentities(inputTransactions));
+  const { transactions, mergedPagesByAccount } = deduplicateTransactions(stabilized);
   const transactionsByAccount = new Map<string, StandardTransaction[]>();
   for (const transaction of transactions) {
     const key = accountIdentityKey(transaction);
@@ -35,7 +36,9 @@ export function normalizeRecognizedData(
     const accountTransactions = [...(transactionsByAccount.get(key) || [])].sort(compareSourceOrder);
     const originals = sourceAccounts.get(key) || [];
     if (!accountTransactions.length) continue;
-    const pages = [...new Set(accountTransactions.map(item => item.rawPageNumber).filter((page): page is number => Boolean(page)))].sort((a, b) => a - b);
+    const originalPages = accountTransactions.map(item => item.rawPageNumber).filter((page): page is number => Boolean(page));
+    const mergedPages = mergedPagesByAccount.get(key) || new Set<number>();
+    const pages = [...new Set([...originalPages, ...mergedPages])].sort((a, b) => a - b);
     const pageSet = new Set(pages);
     const parseWarnings = pageWarnings.filter(warning => {
       const page = warningPage(warning);
@@ -327,3 +330,207 @@ function sum(values: number[]): number {
 function compareSourceOrder(a: StandardTransaction, b: StandardTransaction): number {
   return (a.rawPageNumber || 0) - (b.rawPageNumber || 0) || (a.rawRowIndex || 0) - (b.rawRowIndex || 0);
 }
+
+export interface DeduplicateTransactionsResult {
+  transactions: StandardTransaction[];
+  mergedPagesByAccount: Map<string, Set<number>>;
+}
+
+export function deduplicateTransactions(transactions: StandardTransaction[]): DeduplicateTransactionsResult {
+  const result: StandardTransaction[] = [];
+  const mergedPagesByAccount = new Map<string, Set<number>>();
+  const matchedTargetsByPage = new Map<number, Set<number>>();
+
+  const sorted = [...transactions].sort(compareSourceOrder);
+
+  for (const candidate of sorted) {
+    const accKey = accountIdentityKey(candidate);
+    const candPage = candidate.rawPageNumber || 0;
+    const pageMatched = matchedTargetsByPage.get(candPage) || new Set<number>();
+    let matchedIdx = -1;
+
+    for (let i = 0; i < result.length; i++) {
+      if (pageMatched.has(i)) continue;
+      const target = result[i];
+      if (areTransactionsDuplicate(target, candidate)) {
+        matchedIdx = i;
+        break;
+      }
+    }
+
+    if (matchedIdx !== -1) {
+      const target = result[matchedIdx];
+      mergeDuplicateTransactions(target, candidate);
+      pageMatched.add(matchedIdx);
+      matchedTargetsByPage.set(candPage, pageMatched);
+
+      if (candidate.rawPageNumber) {
+        const pages = mergedPagesByAccount.get(accKey) || new Set<number>();
+        pages.add(candidate.rawPageNumber);
+        mergedPagesByAccount.set(accKey, pages);
+      }
+    } else {
+      result.push({ ...candidate });
+    }
+  }
+
+  return { transactions: result, mergedPagesByAccount };
+}
+
+function areTransactionsDuplicate(a: StandardTransaction, b: StandardTransaction): boolean {
+  // 1. Account matching
+  const accA = normalizeAccountIdentityPart(a.accountNumber);
+  const accB = normalizeAccountIdentityPart(b.accountNumber);
+  if (accA && accB && accA !== accB) return false;
+
+  // 2. Date matching (YYYY-MM-DD)
+  const dateA = (a.transactionDate || '').slice(0, 10);
+  const dateB = (b.transactionDate || '').slice(0, 10);
+  if (!dateA || !dateB || dateA !== dateB) return false;
+
+  // 3. Direction matching
+  if (a.direction !== 'UNKNOWN' && b.direction !== 'UNKNOWN' && a.direction !== b.direction) {
+    return false;
+  }
+
+  // 4. Amount matching
+  if (Math.abs(a.amount - b.amount) >= 0.01) {
+    return false;
+  }
+
+  // 5. Time-of-day compatibility
+  const timeA = extractTimeOfDay(a.transactionTime);
+  const timeB = extractTimeOfDay(b.transactionTime);
+  if (timeA && timeB && !timesCompatible(timeA, timeB)) {
+    return false;
+  }
+
+  // 6. Balance checking
+  const hasBalA = a.balanceAvailable !== false && a.balance != null;
+  const hasBalB = b.balanceAvailable !== false && b.balance != null;
+
+  if (hasBalA && hasBalB) {
+    if (Math.abs(a.balance - b.balance) >= 0.01) {
+      return false;
+    }
+
+    // Both have identical balance, date, direction, amount, and compatible time
+    if (a.rawPageNumber && b.rawPageNumber && a.rawPageNumber !== b.rawPageNumber) {
+      const sA = cleanSummaryForMatch(a.summary);
+      const sB = cleanSummaryForMatch(b.summary);
+      const cpA = cleanSummaryForMatch(a.counterpartyName);
+      const cpB = cleanSummaryForMatch(b.counterpartyName);
+      const pageDiff = Math.abs(a.rawPageNumber - b.rawPageNumber);
+
+      // 1. If both have granular time, they must match
+      if (timeA && timeB) {
+        return timeA === timeB;
+      }
+
+      // 2. If both have non-empty summary, they must match/overlap
+      if (sA && sB) {
+        return sA.includes(sB) || sB.includes(sA);
+      }
+
+      // 3. If non-adjacent pages (|pageDiff| >= 2, e.g. cross-template reprints like Page 4 vs Page 13)
+      if (pageDiff >= 2) {
+        if (cpA && cpB && (cpA.includes(cpB) || cpB.includes(cpA))) {
+          return true;
+        }
+        if (sA || sB) {
+          return true;
+        }
+      }
+
+      // 4. For adjacent pages without time and without summary, do not assume duplicate
+      return false;
+    }
+
+    // Same page duplicate: require time match or summary match
+    const sA = cleanSummaryForMatch(a.summary);
+    const sB = cleanSummaryForMatch(b.summary);
+    if ((timeA && timeB && timeA === timeB) || (sA && sB && sA === sB) || (!sA && !sB)) {
+      return true;
+    }
+    return false;
+  }
+
+  // 7. Balance not available on at least one side
+  if (a.rawPageNumber && b.rawPageNumber && a.rawPageNumber === b.rawPageNumber) {
+    if (a.rawText && b.rawText && a.rawText === b.rawText) return true;
+    return false;
+  }
+
+  // Cross-page without balance
+  if (timeA && timeB && timeA === timeB && timeA.split(':').length === 3) {
+    return true;
+  }
+
+  const sA = cleanSummaryForMatch(a.summary);
+  const sB = cleanSummaryForMatch(b.summary);
+  if (sA && sB && (sA.includes(sB) || sB.includes(sA))) {
+    return true;
+  }
+
+  const cpA = cleanSummaryForMatch(a.counterpartyName);
+  const cpB = cleanSummaryForMatch(b.counterpartyName);
+  if (cpA && cpB && (cpA.includes(cpB) || cpB.includes(cpA))) {
+    return true;
+  }
+
+  return false;
+}
+
+function extractTimeOfDay(timeStr?: string): string {
+  if (!timeStr) return '';
+  const trimmed = timeStr.trim();
+  const match = trimmed.match(/(\d{2}:\d{2}(?::\d{2})?)/);
+  if (match) {
+    return match[1];
+  }
+  return '';
+}
+
+function timesCompatible(t1: string, t2: string): boolean {
+  if (!t1 || !t2) return true;
+  const parts1 = t1.split(':');
+  const parts2 = t2.split(':');
+  if (parts1[0] !== parts2[0]) return false;
+  if (parts1[1] !== parts2[1]) return false;
+  if (parts1[2] !== undefined && parts2[2] !== undefined) {
+    return parts1[2] === parts2[2];
+  }
+  return true;
+}
+
+function cleanSummaryForMatch(str?: string): string {
+  if (!str) return '';
+  return str.replace(/[\s\-_@#*|/\\.,:;，。、：；]/g, '').trim().toLowerCase();
+}
+
+function mergeDuplicateTransactions(kept: StandardTransaction, dup: StandardTransaction): StandardTransaction {
+  if ((!kept.summary || kept.summary.length < (dup.summary?.length || 0)) && dup.summary) {
+    kept.summary = dup.summary;
+  }
+  if (!kept.counterpartyName && dup.counterpartyName) {
+    kept.counterpartyName = dup.counterpartyName;
+  }
+  if (!kept.counterpartyAccount && dup.counterpartyAccount) {
+    kept.counterpartyAccount = dup.counterpartyAccount;
+  }
+  if (!kept.counterpartyBank && dup.counterpartyBank) {
+    kept.counterpartyBank = dup.counterpartyBank;
+  }
+  if (dup.transactionTime && dup.transactionTime.length > (kept.transactionTime?.length || 0)) {
+    kept.transactionTime = dup.transactionTime;
+  }
+  if ((kept.balance == null || kept.balanceAvailable === false) && dup.balance != null && dup.balanceAvailable !== false) {
+    kept.balance = dup.balance;
+    kept.balanceAvailable = true;
+  }
+  if ((dup.extractionConfidence || 0) > (kept.extractionConfidence || 0)) {
+    kept.extractionConfidence = dup.extractionConfidence;
+  }
+  return kept;
+}
+
