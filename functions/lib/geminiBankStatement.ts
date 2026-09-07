@@ -12,15 +12,25 @@ export interface GeminiProgressCallback {
   }): void;
 }
 
-const GEMINI_DIRECT_PROMPT = `你是一名国家级司法审计与银行流水审查专家，正在对法院调取的被执行人银行流水卷宗扫描件 PDF（共 128 页）进行全量对账。
+export interface GeminiParseOptions {
+  respondentName?: string;
+  totalPages?: number;
+  sourceFileName?: string;
+}
+
+function buildGeminiDirectPrompt(options?: GeminiParseOptions): string {
+  const targetPerson = options?.respondentName ? `【被执行人：${options.respondentName}】` : '被执行人';
+  const pageHint = options?.totalPages && options.totalPages > 0 ? `（原件共约 ${options.totalPages} 页）` : '';
+
+  return `你是一名国家级司法审计与银行流水审查专家，正在对法院依法调取的${targetPerson}银行流水卷宗扫描件 PDF${pageHint}进行全量对账提取。
 
 【核心审计任务】：
-请逐页完整提取卷宗中所有银行表格页的全部有效交易明细，绝对不能遗漏任何一笔！
-卷宗中包含光大银行(53笔)、工行借记卡/活期/贷记卡(400+笔)、兴业银行(9笔)、平安银行(16笔)、绵商行(25笔)、农商行(18笔)等，实际有效交易总数在 500 笔以上！
+请逐页完整提取卷宗中所有银行明细表格页的全部有效交易明细，绝对不能遗漏任何一笔！
+卷宗可能包含多家商业银行、农村信用社或支付宝/微信对账单，实际有效交易必须全量检出！
 
 【绝对禁令】：
 1. 严禁任何形式的抽样、摘要、省略或截断！绝不能只提取大额！
-2. 几分钱的季度利息、年费、手续费、每一笔还贷、消费支出，每一行都必须作为独立交易输出！
+2. 几分钱的季度结息、年费、手续费、每一笔还贷、日常消费支出，每一行都必须作为独立交易输出！
 3. 遇到空白背页和纯回执单跳过，遇到交易表格页必须全量交出。
 4. 借贷方向：收入/贷方填 IN，支出/借方填 OUT。
 
@@ -33,6 +43,7 @@ const GEMINI_DIRECT_PROMPT = `你是一名国家级司法审计与银行流水�
       "p": 原件页码数字,
       "bk": "银行名称",
       "ac": "账号或卡号",
+      "holder": "户名(若未体现则留空)",
       "tm": "交易时间(YYYY-MM-DD HH:mm:ss，无时间则YYYY-MM-DD)",
       "dir": "IN或OUT",
       "amt": 交易金额数值,
@@ -43,12 +54,14 @@ const GEMINI_DIRECT_PROMPT = `你是一名国家级司法审计与银行流水�
     }
   ]
 }`;
+}
 
 export async function parsePdfWithGeminiStream(
   file: File,
   env: GeminiEnvironment,
   onProgress?: GeminiProgressCallback,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  options?: GeminiParseOptions
 ) {
   const apiKey = env.GEMINI_API_KEY;
   if (!apiKey) throw new Error('未配置 GEMINI_API_KEY');
@@ -67,6 +80,8 @@ export async function parsePdfWithGeminiStream(
 
   onProgress?.({ statusText: '已完成 PDF 编码，正在向 Gemini 3.8 Flash 发起流式推理…', totalTransactions: 0, percent: 15 });
 
+  const promptText = buildGeminiDirectPrompt(options);
+
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${apiKey}`;
 
   const response = await fetch(url, {
@@ -83,7 +98,7 @@ export async function parsePdfWithGeminiStream(
                 data: base64Data
               }
             },
-            { text: GEMINI_DIRECT_PROMPT }
+            { text: promptText }
           ]
         }
       ],
@@ -106,7 +121,7 @@ export async function parsePdfWithGeminiStream(
   const decoder = new TextDecoder();
   let accumulatedText = '';
   let transactionMatchCount = 0;
-  let lastCurrentBank = '光大银行';
+  let lastCurrentBank = '银行流水';
   let buffer = '';
 
   while (true) {
@@ -221,31 +236,37 @@ export async function parsePdfWithGeminiStream(
     }
   }
 
+  const expectedHolder = options?.respondentName?.trim() || '';
+
   // 标准化为系统通用的 StandardTransaction
-  const transactions = rawTxList.map((tx: any, idx: number) => ({
-    id: `TX_GEMINI_${idx + 1}`,
-    accountNumber: String(tx.ac || '').replace(/\s+/g, ''),
-    accountName: '胡艳红',
-    bankName: String(tx.bk || '未知银行'),
-    transactionTime: String(tx.tm || ''),
-    transactionDate: String(tx.tm || '').slice(0, 10),
-    direction: String(tx.dir || 'OUT').toUpperCase() === 'IN' ? 'IN' : 'OUT',
-    amount: Math.abs(Number(tx.amt) || 0),
-    balance: tx.bal !== null && tx.bal !== undefined ? Number(tx.bal) : null,
-    counterpartyName: String(tx.cp || ''),
-    counterpartyAccount: String(tx.ca || ''),
-    counterpartyBank: '',
-    summary: String(tx.sm || ''),
-    rawSourceFile: file.name,
-    rawPageNumber: Number(tx.p) || 1,
-    rawRowIndex: idx + 1,
-    rawText: `${tx.tm || ''} ${tx.dir || ''} ${tx.amt || ''} ${tx.sm || ''}`,
-    balanceAvailable: tx.bal !== null && tx.bal !== undefined,
-    extractionMethod: 'GEMINI_DIRECT_PDF',
-    extractionConfidence: 0.98,
-    reviewStatus: 'AUTO_PASSED',
-    dataQualityIssues: []
-  }));
+  const transactions = rawTxList.map((tx: any, idx: number) => {
+    const rawHolder = String(tx.holder || '').trim();
+    const resolvedAccountName = rawHolder || expectedHolder || '被执行人';
+    return {
+      id: `TX_GEMINI_${idx + 1}`,
+      accountNumber: String(tx.ac || '').replace(/\s+/g, ''),
+      accountName: resolvedAccountName,
+      bankName: String(tx.bk || '商业银行'),
+      transactionTime: String(tx.tm || ''),
+      transactionDate: String(tx.tm || '').slice(0, 10),
+      direction: String(tx.dir || 'OUT').toUpperCase() === 'IN' ? 'IN' : 'OUT',
+      amount: Math.abs(Number(tx.amt) || 0),
+      balance: tx.bal !== null && tx.bal !== undefined ? Number(tx.bal) : null,
+      counterpartyName: String(tx.cp || ''),
+      counterpartyAccount: String(tx.ca || ''),
+      counterpartyBank: '',
+      summary: String(tx.sm || ''),
+      rawSourceFile: file.name,
+      rawPageNumber: Number(tx.p) || 1,
+      rawRowIndex: idx + 1,
+      rawText: `${tx.tm || ''} ${tx.dir || ''} ${tx.amt || ''} ${tx.sm || ''}`,
+      balanceAvailable: tx.bal !== null && tx.bal !== undefined,
+      extractionMethod: 'GEMINI_DIRECT_PDF',
+      extractionConfidence: 0.98,
+      reviewStatus: 'AUTO_PASSED',
+      dataQualityIssues: []
+    };
+  });
 
   // 生成聚合银行账户摘要
   const accountMap = new Map<string, any>();
@@ -254,7 +275,7 @@ export async function parsePdfWithGeminiStream(
     if (!accountMap.has(key)) {
       accountMap.set(key, {
         accountNumber: t.accountNumber || '未知账号',
-        accountName: '胡艳红',
+        accountName: t.accountName || expectedHolder || '被执行人',
         bankName: t.bankName,
         ownerType: 'DEBTOR_MAIN',
         fileName: file.name,
@@ -283,7 +304,7 @@ export async function parsePdfWithGeminiStream(
   const accounts = Array.from(accountMap.values());
   const mainAccount = accounts[0] || {
     accountNumber: '综合汇总账户',
-    accountName: '胡艳红',
+    accountName: expectedHolder || '被执行人',
     bankName: '多银行综合',
     ownerType: 'DEBTOR_MAIN',
     fileName: file.name,

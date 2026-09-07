@@ -52,7 +52,12 @@ export async function onRequestPost(context: any) {
                 currentBank: update.currentBank
               });
             },
-            context.request.signal
+            context.request.signal,
+            {
+              respondentName: options.respondentName,
+              totalPages: options.totalPages,
+              sourceFileName: options.sourceFileName
+            }
           );
 
           send({
@@ -159,6 +164,7 @@ function chunkOptions(formData: FormData, file: File) {
     contextBefore: contextBefore instanceof File ? contextBefore : undefined,
     contextAfter: contextAfter instanceof File ? contextAfter : undefined,
     auditHint: String(formData.get('auditHint') || ''),
+    respondentName: String(formData.get('respondentName') || '').trim(),
     isPageSlice: String(formData.get('isPageSlice') || '') === 'true'
   };
 }

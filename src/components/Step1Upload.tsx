@@ -8,6 +8,7 @@ import { accountIdentityKey, transactionBelongsToAccount } from '../utils/accoun
 
 interface Step1Props {
   caseId: string;
+  caseRespondentName?: string;
   accounts: BankAccount[];
   transactions: StandardTransaction[];
   onDataUpdated: (accounts: BankAccount[], transactions: StandardTransaction[]) => void;
@@ -17,6 +18,7 @@ interface Step1Props {
 
 export const Step1Upload: React.FC<Step1Props> = ({
   caseId,
+  caseRespondentName,
   accounts,
   transactions,
   onDataUpdated,
@@ -86,7 +88,10 @@ export const Step1Upload: React.FC<Step1Props> = ({
               setProgressInfo(info);
               if (info.statusText) setStatusText(info.statusText);
             },
-            controller.signal
+            controller.signal,
+            {
+              respondentName: caseRespondentName
+            }
           );
           const oldAccountIndexes = newAccounts
             .map((account, index) => account.fileName === file.name ? index : -1)

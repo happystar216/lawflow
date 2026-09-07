@@ -8,14 +8,26 @@ export interface GeminiProgressInfo {
   isStreaming?: boolean;
 }
 
+export interface GeminiParserClientOptions {
+  respondentName?: string;
+  totalPages?: number;
+}
+
 export async function parsePdfWithGemini(
   file: File,
   onProgress?: (info: GeminiProgressInfo) => void,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  options?: GeminiParserClientOptions
 ): Promise<{ account: BankAccount; accounts: BankAccount[]; transactions: StandardTransaction[] }> {
   const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
   if (!isPdf) {
     throw new Error('仅支持 PDF 格式文件直传 Gemini 解析');
+  }
+
+  // 校验文件体积（Cloudflare 单次请求推荐 75MB 以内）
+  const maxBytes = 75 * 1024 * 1024;
+  if (file.size > maxBytes) {
+    throw new Error(`当前 PDF 文件体积约为 ${(file.size / (1024 * 1024)).toFixed(1)}MB，超过云端单次直传安全阈值 (75MB)。建议将扫描件适度压缩分辨率或拆分为上下分册后分别上传。`);
   }
 
   onProgress?.({
@@ -29,8 +41,13 @@ export async function parsePdfWithGemini(
   formData.append('file', file);
   formData.append('sourceFileName', file.name);
   formData.append('pageStart', '1');
-  formData.append('pageEnd', '128');
-  formData.append('totalPages', '128');
+  if (options?.totalPages && options.totalPages > 0) {
+    formData.append('pageEnd', String(options.totalPages));
+    formData.append('totalPages', String(options.totalPages));
+  }
+  if (options?.respondentName) {
+    formData.append('respondentName', options.respondentName.trim());
+  }
 
   let response: Response;
   try {

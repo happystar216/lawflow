@@ -214,6 +214,7 @@ export const App: React.FC = () => {
         {currentStep === 1 && (
           <Step1Upload
             caseId={caseMeta.id}
+            caseRespondentName={caseMeta.respondentName}
             accounts={accounts}
             transactions={transactions}
             onDataUpdated={(accs, txs) => {
