@@ -274,6 +274,9 @@ export async function parsePdfWithGeminiStream(
   for (const t of transactions) {
     const key = `${t.bankName}_${t.accountNumber}`;
     if (!accountMap.has(key)) {
+      const initBalance = t.balance !== null && t.balance !== undefined
+        ? (t.direction === 'IN' ? t.balance - t.amount : (t.direction === 'OUT' ? t.balance + t.amount : t.balance))
+        : 0;
       accountMap.set(key, {
         accountNumber: t.accountNumber || '未知账号',
         accountName: t.accountName || expectedHolder || '被执行人',
@@ -286,7 +289,7 @@ export async function parsePdfWithGeminiStream(
         transactionCount: 0,
         startDate: t.transactionDate,
         endDate: t.transactionDate,
-        startBalance: t.balance || 0,
+        startBalance: initBalance,
         endBalance: t.balance || 0,
         isBalanced: true,
         balanceDiff: 0,
@@ -300,6 +303,12 @@ export async function parsePdfWithGeminiStream(
     if (t.transactionDate < acc.startDate) acc.startDate = t.transactionDate;
     if (t.transactionDate > acc.endDate) acc.endDate = t.transactionDate;
     acc.endBalance = t.balance !== null ? t.balance : acc.endBalance;
+  }
+
+  for (const acc of accountMap.values()) {
+    const calculatedEndBalance = acc.startBalance + acc.totalIn - acc.totalOut;
+    acc.balanceDiff = Math.abs(calculatedEndBalance - acc.endBalance);
+    acc.isBalanced = acc.balanceDiff < 1.0;
   }
 
   const accounts = Array.from(accountMap.values());

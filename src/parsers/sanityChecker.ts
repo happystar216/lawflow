@@ -1,5 +1,6 @@
 import { BankAccount, StandardTransaction } from '../types/transaction';
 import { transactionBelongsToAccount } from '../utils/accountIdentity';
+import { chronologicalTransactions } from '../utils/transactionSequence';
 
 export interface AuditReport {
   accountNumber: string;
@@ -47,8 +48,35 @@ export function auditAccountBalance(
   });
 
   const isAuditable = account.balanceAvailable !== false;
-  const calculatedEndBalance = account.startBalance + totalIncome - totalExpense;
-  const diff = Math.abs(calculatedEndBalance - account.endBalance);
+  let startBalance = account.startBalance;
+  let endBalance = account.endBalance;
+
+  if (isAuditable && accountTx.length > 0) {
+    const chronological = chronologicalTransactions(accountTx);
+    const firstWithBalance = chronological.find(item => item.balanceAvailable !== false && item.balance != null);
+    const lastWithBalance = [...chronological].reverse().find(item => item.balanceAvailable !== false && item.balance != null);
+
+    if (firstWithBalance && firstWithBalance.balance != null && firstWithBalance.amount > 0) {
+      const inferredStart = firstWithBalance.direction === 'IN'
+        ? firstWithBalance.balance - firstWithBalance.amount
+        : firstWithBalance.direction === 'OUT'
+        ? firstWithBalance.balance + firstWithBalance.amount
+        : firstWithBalance.balance;
+
+      if (Math.abs(startBalance - firstWithBalance.balance) < 0.01 && Math.abs(startBalance - inferredStart) >= 0.01) {
+        startBalance = inferredStart;
+      }
+    }
+
+    if (lastWithBalance && lastWithBalance.balance != null) {
+      if (endBalance === 0 && lastWithBalance.balance !== 0) {
+        endBalance = lastWithBalance.balance;
+      }
+    }
+  }
+
+  const calculatedEndBalance = startBalance + totalIncome - totalExpense;
+  const diff = Math.abs(calculatedEndBalance - endBalance);
 
   // A zero ending balance can be a real statement value and must not bypass
   // reconciliation. Unknown balances should be represented separately by the
@@ -60,7 +88,7 @@ export function auditAccountBalance(
     isBalanced,
     isAuditable,
     calculatedEndBalance,
-    statedEndBalance: account.endBalance,
+    statedEndBalance: endBalance,
     difference: diff,
     totalIncome,
     totalExpense,

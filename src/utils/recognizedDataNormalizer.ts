@@ -1,6 +1,6 @@
 import { BankAccount, StandardTransaction } from '../types/transaction';
 import { accountIdentityKey, isReliableAccountNumber, normalizeAccountIdentityPart } from './accountIdentity';
-import { balanceContinuityIssues } from './transactionSequence';
+import { balanceContinuityIssues, chronologicalTransactions } from './transactionSequence';
 
 export interface NormalizedRecognizedData {
   accounts: BankAccount[];
@@ -51,9 +51,35 @@ export function normalizeRecognizedData(
     const totalOut = sum(accountTransactions.filter(item => item.direction === 'OUT').map(item => item.amount));
     const dates = accountTransactions.map(item => item.transactionDate).filter(Boolean).sort();
     const reviewIssues = [...new Map(originals.flatMap(item => item.reviewIssues || []).map(issue => [issue.id, issue])).values()];
+    const continuityIssues = balanceContinuityIssues(accountTransactions);
     const hasDerivedIssues = accountTransactions.some(item => (item.extractionConfidence ?? 1) < 0.8
       || item.amount <= 0 || !item.transactionDate || item.direction === 'UNKNOWN')
-      || balanceContinuityIssues(accountTransactions).length > 0;
+      || continuityIssues.length > 0;
+
+    const balanceAvailable = accountTransactions.some(item => item.balanceAvailable !== false);
+    const chronological = chronologicalTransactions(accountTransactions);
+    const firstWithBalance = chronological.find(item => item.balanceAvailable !== false && item.balance != null);
+    const lastWithBalance = [...chronological].reverse().find(item => item.balanceAvailable !== false && item.balance != null);
+
+    let startBalance = representative.startBalance ?? 0;
+    let endBalance = representative.endBalance ?? (lastWithBalance?.balance ?? 0);
+
+    if (firstWithBalance && firstWithBalance.balance != null && firstWithBalance.amount > 0) {
+      const inferredStart = firstWithBalance.direction === 'IN'
+        ? firstWithBalance.balance - firstWithBalance.amount
+        : firstWithBalance.direction === 'OUT'
+        ? firstWithBalance.balance + firstWithBalance.amount
+        : firstWithBalance.balance;
+      if (Math.abs(startBalance - firstWithBalance.balance) < 0.01 && Math.abs(startBalance - inferredStart) >= 0.01) {
+        startBalance = inferredStart;
+      }
+    }
+    if (lastWithBalance && lastWithBalance.balance != null && (endBalance === 0 || endBalance == null)) {
+      endBalance = lastWithBalance.balance;
+    }
+
+    const balanceDiff = balanceAvailable ? Math.abs(startBalance + totalIn - totalOut - endBalance) : 0;
+
     accounts.push({
       ...representative,
       accountNumber: accountTransactions[0].accountNumber,
@@ -63,9 +89,11 @@ export function normalizeRecognizedData(
       fileName: accountTransactions[0].rawSourceFile,
       totalIn, totalOut, transactionCount: accountTransactions.length,
       startDate: dates[0] || '', endDate: dates[dates.length - 1] || '',
+      startBalance, endBalance, balanceAvailable,
+      balanceDiff, isBalanced: balanceAvailable && balanceDiff < 1,
       parseWarnings, coveredPages: pages,
       parseStatus: parseWarnings.length || hasDerivedIssues ? 'NEEDS_REVIEW' : 'COMPLETE',
-      balanceContinuityIssueCount: balanceContinuityIssues(accountTransactions).length,
+      balanceContinuityIssueCount: continuityIssues.length,
       reviewIssues
     });
   }

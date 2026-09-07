@@ -57,11 +57,27 @@ export function daysBetween(d1?: string, d2?: string): number {
 /**
  * Truly orders transactions in chronological time order (oldest to newest).
  * Within the same day/timestamp, uses a greedy balance-chain linker to preserve valid balance math.
+ * Protects physical printed ledger row order against spurious breaks caused by OCR date typos.
  */
 export function chronologicalTransactions(transactions: StandardTransaction[]): StandardTransaction[] {
   if (transactions.length < 2) return [...transactions];
 
-  // 1. Group by date
+  // 1. Determine physical source chronological order
+  const sourceOrdered = [...transactions].sort(compareSourceOrder);
+  let forwardDatePairs = 0;
+  let reverseDatePairs = 0;
+  for (let i = 1; i < sourceOrdered.length; i++) {
+    const prevDate = (sourceOrdered[i - 1].transactionDate || '').trim();
+    const currDate = (sourceOrdered[i].transactionDate || '').trim();
+    if (prevDate && currDate && prevDate !== currDate) {
+      if (prevDate < currDate) forwardDatePairs++;
+      else if (prevDate > currDate) reverseDatePairs++;
+    }
+  }
+  const isReverseStatement = reverseDatePairs > forwardDatePairs && reverseDatePairs >= 1;
+  const physicalChronological = isReverseStatement ? [...sourceOrdered].reverse() : sourceOrdered;
+
+  // 2. Group by date
   const dateMap = new Map<string, StandardTransaction[]>();
   for (const tx of transactions) {
     const d = (tx.transactionDate || '').trim() || '9999-99-99';
@@ -70,17 +86,16 @@ export function chronologicalTransactions(transactions: StandardTransaction[]): 
     dateMap.set(d, list);
   }
 
-  // 2. Sort dates in ascending chronological order
+  // 3. Sort dates in ascending chronological order
   const sortedDates = [...dateMap.keys()].sort((a, b) => a.localeCompare(b));
 
-  // 3. For each date, order transactions
-  const result: StandardTransaction[] = [];
+  const dateOrdered: StandardTransaction[] = [];
   let runningBalance: number | null = null;
 
   for (const date of sortedDates) {
     const dayTxs = dateMap.get(date)!;
     if (dayTxs.length === 1) {
-      result.push(dayTxs[0]);
+      dateOrdered.push(dayTxs[0]);
       if (dayTxs[0].balanceAvailable !== false && dayTxs[0].balance != null) {
         runningBalance = dayTxs[0].balance;
       }
@@ -101,7 +116,7 @@ export function chronologicalTransactions(transactions: StandardTransaction[]): 
       const sortedDayTxs = rScore + 0.01 < fScore ? [...dayTxs].reverse() : dayTxs;
 
       for (const t of sortedDayTxs) {
-        result.push(t);
+        dateOrdered.push(t);
         if (t.balanceAvailable !== false && t.balance != null) runningBalance = t.balance;
       }
       continue;
@@ -110,12 +125,58 @@ export function chronologicalTransactions(transactions: StandardTransaction[]): 
     // No granular timestamps: Attempt same-day balance chain solver
     const solved = solveSameDayBalanceChain(dayTxs, runningBalance);
     for (const t of solved) {
-      result.push(t);
+      dateOrdered.push(t);
       if (t.balanceAvailable !== false && t.balance != null) runningBalance = t.balance;
     }
   }
 
-  return result;
+  // 4. Compare balance continuity between physical ledger order and date-sorted order.
+  // Physical bank statement order represents the authoritative printed sequence.
+  // If date-sorting creates more balance breaks than physical order (often due to OCR date typos),
+  // physical order must be preferred to prevent cascading false continuity alerts.
+  const physicalErrors = countOrderDiscontinuities(physicalChronological);
+  const dateErrors = countOrderDiscontinuities(dateOrdered);
+
+  if (
+    physicalErrors.broken < dateErrors.broken ||
+    (physicalErrors.valid > 0 && physicalErrors.broken === 0 && dateErrors.broken > 0)
+  ) {
+    return physicalChronological;
+  }
+
+  return dateOrdered;
+}
+
+function countOrderDiscontinuities(ordered: StandardTransaction[]): { valid: number; broken: number } {
+  let valid = 0;
+  let broken = 0;
+
+  for (let index = 1; index < ordered.length; index += 1) {
+    const previous = ordered[index - 1];
+    const current = ordered[index];
+
+    if (
+      previous.balanceAvailable === false ||
+      current.balanceAvailable === false ||
+      current.direction === 'UNKNOWN' ||
+      previous.balance == null ||
+      current.balance == null
+    ) {
+      continue;
+    }
+
+    const delta = current.direction === 'IN' ? current.amount : -current.amount;
+    const expected = previous.balance + delta;
+    const diff = Math.abs(expected - current.balance);
+
+    if (diff < 1.0) {
+      valid += 1;
+    } else {
+      broken += 1;
+    }
+  }
+
+  return { valid, broken };
 }
 
 /**

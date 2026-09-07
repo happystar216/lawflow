@@ -2,6 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildEvidenceReviewIssues } from '../src/review/buildEvidenceReviewIssues';
 import { BankAccount, StandardTransaction } from '../src/types/transaction';
+import { chronologicalTransactions, balanceContinuityIssues } from '../src/utils/transactionSequence';
+import { auditAccountBalance } from '../src/parsers/sanityChecker';
+import { normalizeRecognizedData } from '../src/utils/recognizedDataNormalizer';
 
 const account: BankAccount = {
   accountNumber: '62220001', accountName: '张三', bankName: '测试银行', ownerType: 'DEBTOR_MAIN',
@@ -73,3 +76,139 @@ test('keeps invalid rows visible and creates date, amount and direction review t
   assert.ok(issues.some(issue => issue.category === 'INVALID_AMOUNT' && issue.transactionIds.includes('invalid')));
   assert.ok(issues.some(issue => issue.category === 'INVALID_DIRECTION' && issue.transactionIds.includes('invalid')));
 });
+
+function makeTx(
+  id: string,
+  page: number,
+  row: number,
+  date: string,
+  time: string,
+  direction: 'IN' | 'OUT',
+  amount: number,
+  balance: number
+): StandardTransaction {
+  return {
+    id,
+    accountNumber: '62220201',
+    accountName: '胡艳红',
+    bankName: '中国光大银行',
+    transactionDate: date,
+    transactionTime: time,
+    direction,
+    amount,
+    balance,
+    counterpartyName: '对手方',
+    summary: '测试摘要',
+    rawSourceFile: '光大银行流水.pdf',
+    rawPageNumber: page,
+    rawRowIndex: row,
+    balanceAvailable: true,
+    extractionConfidence: 0.95,
+    extractionMethod: 'DOCUMENT_PDF'
+  };
+}
+
+test('chronologicalTransactions preserves physical order when OCR date typo would create false balance breaks', () => {
+  // Page 3 physical rows in statement:
+  // Row 6: 2023-09-21 06:48:17, IN 0.26, bal 0.84
+  // Row 7: 2023-09-28 13:08:57, IN 11739.42, bal 11740.26 (0.84 + 11739.42 = 11740.26)
+  // Row 8: 2023-09-27 21:30:27 (OCR misread from 2023-09-30), OUT 2640, bal 9100.26 (11740.26 - 2640 = 9100.26)
+  // Row 9: 2023-09-30 21:43:51, OUT 9099.42, bal 0.84 (9100.26 - 9099.42 = 0.84)
+  const row6 = makeTx('tx6', 3, 6, '2023-09-21', '06:48:17', 'IN', 0.26, 0.84);
+  const row7 = makeTx('tx7', 3, 7, '2023-09-28', '13:08:57', 'IN', 11739.42, 11740.26);
+  const row8 = makeTx('tx8', 3, 8, '2023-09-27', '21:30:27', 'OUT', 2640.00, 9100.26);
+  const row9 = makeTx('tx9', 3, 9, '2023-09-30', '21:43:51', 'OUT', 9099.42, 0.84);
+
+  const txs = [row6, row7, row8, row9];
+
+  const ordered = chronologicalTransactions(txs);
+  assert.deepEqual(ordered.map(t => t.id), ['tx6', 'tx7', 'tx8', 'tx9']);
+
+  const issues = balanceContinuityIssues(txs);
+  assert.equal(issues.length, 0, 'Should not report false balance discontinuity caused by OCR date misread');
+
+  // Also verify evidence review issues does not report balance break or false discrete statement
+  const testAcc: BankAccount = {
+    accountNumber: '62220201',
+    accountName: '胡艳红',
+    bankName: '中国光大银行',
+    ownerType: 'DEBTOR_MAIN',
+    fileName: '光大银行流水.pdf',
+    fileType: 'pdf',
+    totalIn: 11739.68,
+    totalOut: 11739.42,
+    transactionCount: 4,
+    startDate: '2023-09-21',
+    endDate: '2023-09-30',
+    startBalance: 0.58,
+    endBalance: 0.84,
+    isBalanced: true,
+    balanceDiff: 0,
+    balanceAvailable: true
+  };
+  const reviewIssues = buildEvidenceReviewIssues(testAcc, txs);
+  assert.equal(reviewIssues.some(i => i.category === 'BALANCE_BREAK'), false);
+});
+
+test('auditAccountBalance calibrates startBalance when mistakenly populated with first transaction ending balance', () => {
+  const loanTx = makeTx('tx1', 1, 1, '2023-05-31', '17:49:06', 'IN', 300000.00, 300000.00);
+  const transferTx = makeTx('tx2', 1, 2, '2023-05-31', '18:00:00', 'OUT', 299999.16, 0.84);
+
+  // Parser mistakenly initialized startBalance to 300,000.00 (the balance after loan disbursement)
+  const acc: BankAccount = {
+    accountNumber: '62220201',
+    accountName: '胡艳红',
+    bankName: '中国光大银行',
+    ownerType: 'DEBTOR_MAIN',
+    fileName: '光大银行流水.pdf',
+    fileType: 'pdf',
+    totalIn: 300000.00,
+    totalOut: 299999.16,
+    transactionCount: 2,
+    startDate: '2023-05-31',
+    endDate: '2023-05-31',
+    startBalance: 300000.00,
+    endBalance: 0.84,
+    isBalanced: false,
+    balanceDiff: 300000.00,
+    balanceAvailable: true
+  };
+
+  const report = auditAccountBalance(acc, [loanTx, transferTx]);
+  assert.equal(report.isAuditable, true);
+  assert.equal(report.isBalanced, true, 'Audit should be balanced after calibrating opening balance');
+  assert.equal(report.difference < 1, true);
+  assert.equal(report.calculatedEndBalance.toFixed(2), '0.84');
+});
+
+test('normalizeRecognizedData correctly reconciles opening balance from loan disbursement transaction', () => {
+  const loanTx = makeTx('tx1', 1, 1, '2023-05-31', '17:49:06', 'IN', 300000.00, 300000.00);
+  const transferTx = makeTx('tx2', 1, 2, '2023-05-31', '18:00:00', 'OUT', 299999.16, 0.84);
+
+  const rawAccount: BankAccount = {
+    accountNumber: '62220201',
+    accountName: '胡艳红',
+    bankName: '中国光大银行',
+    ownerType: 'DEBTOR_MAIN',
+    fileName: '光大银行流水.pdf',
+    fileType: 'pdf',
+    totalIn: 300000.00,
+    totalOut: 299999.16,
+    transactionCount: 2,
+    startDate: '2023-05-31',
+    endDate: '2023-05-31',
+    startBalance: 300000.00,
+    endBalance: 0.84,
+    isBalanced: false,
+    balanceDiff: 300000.00,
+    balanceAvailable: true
+  };
+
+  const normalized = normalizeRecognizedData([rawAccount], [loanTx, transferTx]);
+  assert.equal(normalized.accounts.length, 1);
+  assert.equal(normalized.accounts[0].startBalance, 0);
+  assert.equal(normalized.accounts[0].endBalance, 0.84);
+  assert.equal(normalized.accounts[0].isBalanced, true);
+  assert.equal(normalized.accounts[0].balanceDiff < 1, true);
+});
+
