@@ -11,7 +11,8 @@ export function normalizeRecognizedData(
   inputAccounts: BankAccount[], inputTransactions: StandardTransaction[]
 ): NormalizedRecognizedData {
   const stabilized = healSummaryOverriddenAmounts(stabilizePageAccountIdentities(inputTransactions));
-  const { transactions, mergedPagesByAccount } = deduplicateTransactions(stabilized);
+  const { transactions: deduped, mergedPagesByAccount } = deduplicateTransactions(stabilized);
+  const transactions = calibrateDirectionsByBalanceMath(deduped);
   const transactionsByAccount = new Map<string, StandardTransaction[]>();
   for (const transaction of transactions) {
     const key = accountIdentityKey(transaction);
@@ -533,4 +534,61 @@ function mergeDuplicateTransactions(kept: StandardTransaction, dup: StandardTran
   }
   return kept;
 }
+
+export function calibrateDirectionsByBalanceMath(transactions: StandardTransaction[]): StandardTransaction[] {
+  const byAccount = new Map<string, StandardTransaction[]>();
+  for (const tx of transactions) {
+    const key = accountIdentityKey(tx);
+    byAccount.set(key, [...(byAccount.get(key) || []), tx]);
+  }
+
+  for (const [, accTxs] of byAccount) {
+    const sourceOrdered = [...accTxs].sort(compareSourceOrder);
+    let forwardDatePairs = 0;
+    let reverseDatePairs = 0;
+    for (let i = 1; i < sourceOrdered.length; i++) {
+      const prevDate = (sourceOrdered[i - 1].transactionDate || '').trim();
+      const currDate = (sourceOrdered[i].transactionDate || '').trim();
+      if (prevDate && currDate && prevDate !== currDate) {
+        if (prevDate < currDate) forwardDatePairs++;
+        else if (prevDate > currDate) reverseDatePairs++;
+      }
+    }
+    const isReverseStatement = reverseDatePairs > forwardDatePairs && reverseDatePairs >= 1;
+    const physicalChronological = isReverseStatement ? [...sourceOrdered].reverse() : sourceOrdered;
+
+    for (let i = 1; i < physicalChronological.length; i++) {
+      const prev = physicalChronological[i - 1];
+      const curr = physicalChronological[i];
+
+      if (
+        prev.balanceAvailable === false ||
+        curr.balanceAvailable === false ||
+        prev.balance == null ||
+        curr.balance == null ||
+        curr.amount <= 0
+      ) {
+        continue;
+      }
+
+      const diffIn = Math.abs(prev.balance + curr.amount - curr.balance);
+      const diffOut = Math.abs(prev.balance - curr.amount - curr.balance);
+
+      if (diffIn < 0.05 && diffOut >= 0.05 && curr.direction !== 'IN') {
+        curr.direction = 'IN';
+        if (curr.reviewStatus === 'AUTO_PASSED') {
+          curr.reviewStatus = 'CORRECTED';
+        }
+      } else if (diffOut < 0.05 && diffIn >= 0.05 && curr.direction !== 'OUT') {
+        curr.direction = 'OUT';
+        if (curr.reviewStatus === 'AUTO_PASSED') {
+          curr.reviewStatus = 'CORRECTED';
+        }
+      }
+    }
+  }
+
+  return transactions;
+}
+
 

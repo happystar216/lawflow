@@ -313,5 +313,46 @@ test('normalizeRecognizedData deduplicates identical transactions from multi-tem
   assert.equal(breakIssues.length, 0, 'No balance break review issues should exist');
 });
 
+test('normalizeRecognizedData calibrates credit card installment conversion directions from balance math, resolving Page 21 breaks', () => {
+  const account: BankAccount = {
+    accountNumber: '6229100012131959',
+    accountName: '胡艳红',
+    bankName: '中国工商银行牡丹信用卡',
+    ownerType: 'DEBTOR_MAIN',
+    fileName: '工行流水卷宗.pdf',
+    fileType: 'pdf',
+    totalIn: 0,
+    totalOut: 0,
+    transactionCount: 0,
+    startDate: '2023-08-20',
+    endDate: '2023-08-29',
+    startBalance: -8843.82,
+    endBalance: -9902.92,
+    isBalanced: true,
+    balanceDiff: 0,
+    balanceAvailable: true
+  };
+
+  const rawTxs: StandardTransaction[] = [
+    { ...makeTx('c1', 21, 1, '2023-08-20', '2023-08-20', 'OUT', 49.90, -8893.72), accountNumber: account.accountNumber, bankName: account.bankName, summary: '财付通-素言帽社' },
+    { ...makeTx('c2', 21, 2, '2023-08-20', '2023-08-20', 'OUT', 29.90, -8923.62), accountNumber: account.accountNumber, bankName: account.bankName, summary: '财付通-素言帽社' },
+    { ...makeTx('c2_b', 21, 3, '2023-08-20', '2023-08-20', 'OUT', 7.00, -8930.62), accountNumber: account.accountNumber, bankName: account.bankName, summary: '财付通-素言帽社' },
+    { ...makeTx('c3', 21, 4, '2023-08-22', '2023-08-22', 'OUT', 1417.23, -10347.85), accountNumber: account.accountNumber, bankName: account.bankName, summary: '财付通-深圳迪仕艾' },
+    { ...makeTx('c4', 21, 5, '2023-08-29', '2023-08-29', 'OUT', 139.80, -10208.05), accountNumber: account.accountNumber, bankName: account.bankName, summary: '分行营业室 普通消费转分期' },
+    { ...makeTx('c5', 21, 6, '2023-08-29', '2023-08-29', 'OUT', 46.60, -10254.65), accountNumber: account.accountNumber, bankName: account.bankName, summary: '分行营业室 消费' },
+    { ...makeTx('c6', 21, 7, '2023-08-29', '2023-08-29', 'OUT', 0.84, -10255.49), accountNumber: account.accountNumber, bankName: account.bankName, summary: '分行营业室 费用' },
+    { ...makeTx('c7', 21, 8, '2023-08-29', '2023-08-29', 'OUT', 352.57, -9902.92), accountNumber: account.accountNumber, bankName: account.bankName, summary: '分行营业室 普通消费转分期' }
+  ];
+
+  const rawIssues = balanceContinuityIssues(rawTxs);
+  assert.ok(rawIssues.length >= 2, 'Uncalibrated directions cause balance continuity breaks');
+
+  const normalized = normalizeRecognizedData([account], rawTxs);
+  assert.equal(normalized.transactions.find(t => t.id === 'c4')?.direction, 'IN', 'c4 should be calibrated to IN');
+  assert.equal(normalized.transactions.find(t => t.id === 'c7')?.direction, 'IN', 'c7 should be calibrated to IN');
+  assert.equal(normalized.accounts[0].balanceContinuityIssueCount, 0, 'All breaks should be resolved');
+});
+
+
 
 

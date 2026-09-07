@@ -269,8 +269,9 @@ export async function parsePdfWithGeminiStream(
     };
   });
 
-  // 跨页/跨模板重复流水自动去重
-  const transactions = deduplicateGeminiTransactions(rawTransactions);
+  // 跨页/跨模板重复流水自动去重与收支方向数学校准
+  const deduplicated = deduplicateGeminiTransactions(rawTransactions);
+  const transactions = calibrateGeminiDirections(deduplicated);
 
   // 生成聚合银行账户摘要
   const accountMap = new Map<string, any>();
@@ -446,4 +447,34 @@ function areGeminiTransactionsDuplicate(a: any, b: any): boolean {
 
   return false;
 }
+
+function calibrateGeminiDirections(transactions: any[]): any[] {
+  for (let i = 1; i < transactions.length; i++) {
+    const prev = transactions[i - 1];
+    const curr = transactions[i];
+
+    if (
+      prev.accountNumber !== curr.accountNumber ||
+      prev.balance == null ||
+      curr.balance == null ||
+      !curr.amount
+    ) {
+      continue;
+    }
+
+    const prevBal = Number(prev.balance);
+    const currBal = Number(curr.balance);
+    const amt = Number(curr.amount);
+    const diffIn = Math.abs(prevBal + amt - currBal);
+    const diffOut = Math.abs(prevBal - amt - currBal);
+
+    if (diffIn < 0.05 && diffOut >= 0.05) {
+      curr.direction = 'IN';
+    } else if (diffOut < 0.05 && diffIn >= 0.05) {
+      curr.direction = 'OUT';
+    }
+  }
+  return transactions;
+}
+
 
