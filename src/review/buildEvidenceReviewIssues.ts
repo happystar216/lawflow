@@ -1,6 +1,6 @@
 import { BankAccount, EvidenceReviewIssue, StandardTransaction } from '../types/transaction';
 import { transactionBelongsToAccount } from '../utils/accountIdentity';
-import { balanceContinuityIssues, daysBetween } from '../utils/transactionSequence';
+import { balanceContinuityIssues, daysBetween, isFeeWaiver } from '../utils/transactionSequence';
 
 export function buildEvidenceReviewIssues(
   account: BankAccount,
@@ -62,7 +62,7 @@ export function buildEvidenceReviewIssues(
     '识别结果待核对', '本页有交易字段读取把握较低，需与原件逐字段核对。',
     ['核对交易日期和收支方向', '核对金额及交易后余额', '核对对手方和摘要']);
   appendTransactionIssueGroup(generated, account, transactions, 'INVALID_AMOUNT',
-    transaction => transaction.amount <= 0,
+    transaction => (transaction.amount <= 0 || Boolean(transaction.dataQualityIssues?.includes('INVALID_AMOUNT'))) && !isFeeWaiver(transaction),
     '交易金额异常', '本页有交易金额为零或未能可靠读取。',
     ['核对原件发生额', '确认相关行是否属于交易明细', '修正金额或说明无法确认的原因']);
   appendTransactionIssueGroup(generated, account, transactions, 'INVALID_DATE',

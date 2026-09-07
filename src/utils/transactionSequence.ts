@@ -9,6 +9,15 @@ export interface BalanceContinuityIssue {
 }
 
 /**
+ * Detects whether a zero-amount transaction is a legitimate bank fee waiver or exemption record
+ * (e.g. 减免年费, 减免费用, 年费减免, 免收年费) rather than an invalid or missing amount.
+ */
+export function isFeeWaiver(transaction: StandardTransaction): boolean {
+  const text = `${transaction.summary || ''} ${transaction.counterpartyName || ''} ${transaction.rawText || ''}`;
+  return /减免|免收|豁免|优惠|抵扣/.test(text);
+}
+
+/**
  * Normalizes dates and timestamps into ISO-comparable strings YYYY-MM-DD HH:mm:ss.
  */
 export function normalizeTransactionTimestamp(tx: StandardTransaction): string {

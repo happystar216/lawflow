@@ -437,6 +437,10 @@ test('buildEvidenceReviewIssues treats Page 18 credit card periodic settlement s
   const balanceBreakIssues = issues.filter(i => i.category === 'BALANCE_BREAK');
   assert.equal(balanceBreakIssues.length, 0, 'No false BALANCE_BREAK issues should be reported for credit card summary table');
 
+  // Fee waiver transactions (r1, r10) with 0.00 amount should NOT be flagged as INVALID_AMOUNT
+  const invalidAmountIssues = issues.filter(i => i.category === 'INVALID_AMOUNT');
+  assert.equal(invalidAmountIssues.length, 0, 'Legitimate 0-amount fee waiver transactions should not trigger INVALID_AMOUNT');
+
   const discreteIssue = issues.find(i => i.category === 'DATA_WARNING' && i.pageNumber === 18);
   assert.ok(discreteIssue, 'Advisory discrete statement issue should be created for Page 18');
   assert.equal(discreteIssue.severity, 'ADVISORY');

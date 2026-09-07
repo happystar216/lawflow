@@ -1,6 +1,6 @@
 import { BankAccount, StandardTransaction } from '../types/transaction';
 import { accountIdentityKey, isReliableAccountNumber, normalizeAccountIdentityPart } from './accountIdentity';
-import { balanceContinuityIssues, chronologicalTransactions } from './transactionSequence';
+import { balanceContinuityIssues, chronologicalTransactions, isFeeWaiver } from './transactionSequence';
 
 export interface NormalizedRecognizedData {
   accounts: BankAccount[];
@@ -14,6 +14,11 @@ export function normalizeRecognizedData(
   const { transactions: deduped, mergedPagesByAccount } = deduplicateTransactions(stabilized);
   const calibrated = calibrateDirectionsByBalanceMath(deduped);
   const transactions = healOcrBalanceAndAmountDiscrepancies(calibrated);
+  for (const transaction of transactions) {
+    if (isFeeWaiver(transaction) && transaction.dataQualityIssues) {
+      transaction.dataQualityIssues = transaction.dataQualityIssues.filter(q => q !== 'INVALID_AMOUNT');
+    }
+  }
   const transactionsByAccount = new Map<string, StandardTransaction[]>();
   for (const transaction of transactions) {
     const key = accountIdentityKey(transaction);
@@ -58,7 +63,7 @@ export function normalizeRecognizedData(
     const reviewIssues = [...new Map(originals.flatMap(item => item.reviewIssues || []).map(issue => [issue.id, issue])).values()];
     const continuityIssues = balanceContinuityIssues(accountTransactions);
     const hasDerivedIssues = accountTransactions.some(item => (item.extractionConfidence ?? 1) < 0.8
-      || item.amount <= 0 || !item.transactionDate || item.direction === 'UNKNOWN')
+      || (item.amount <= 0 && !isFeeWaiver(item)) || !item.transactionDate || item.direction === 'UNKNOWN')
       || continuityIssues.length > 0;
 
     const balanceAvailable = accountTransactions.some(item => item.balanceAvailable !== false);
