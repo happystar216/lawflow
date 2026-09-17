@@ -27,7 +27,7 @@ export const WorkflowStepper: React.FC<WorkflowStepperProps> = ({
     { id: 1 as WorkflowStep, name: '证据上传', icon: UploadCloud, desc: '多源流水智能入库' },
     { id: 2 as WorkflowStep, name: '证据确认', icon: CheckCheck, desc: '平账审计与纠偏' },
     { id: 3 as WorkflowStep, name: '前置标注', icon: CalendarClock, desc: '时间轴与账户矩阵' },
-    { id: 4 as WorkflowStep, name: '数据计算', icon: Cpu, desc: '11大算法引擎DAG' },
+    { id: 4 as WorkflowStep, name: '数据分析', icon: Cpu, desc: '资金流向与线索' },
     { id: 5 as WorkflowStep, name: '后标注研判', icon: UserCheck, desc: '人物命名与证据勾选' },
     { id: 6 as WorkflowStep, name: '成果导出', icon: FileCheck2, desc: '证据分析报告' },
   ];

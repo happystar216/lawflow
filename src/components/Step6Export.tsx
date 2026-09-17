@@ -21,6 +21,7 @@ export const Step6Export: React.FC<Step6Props> = ({ caseMeta, evaluationReport, 
   const [isExportingExcel, setIsExportingExcel] = useState(false);
   const [isExportingPdf, setIsExportingPdf] = useState(false);
   const [downloadSuccess, setDownloadSuccess] = useState(false);
+  const [exportError, setExportError] = useState('');
 
   const repaymentChecks = evaluationReport.matches.filter(match => match.ruleId === 'RULE_FABRICATED_REMARKS_BILATERAL');
   const pendingRepaymentChecks = repaymentChecks.filter(match => !match.verificationStatus || match.verificationStatus === 'PENDING');
@@ -30,11 +31,14 @@ export const Step6Export: React.FC<Step6Props> = ({ caseMeta, evaluationReport, 
 
   const handleExportWord = async () => {
     setIsExportingWord(true);
+    setExportError('');
+    setDownloadSuccess(false);
     try {
       await exportEvidenceAnalysisWord(caseMeta, evaluationReport, transactions, reviewedAccounts);
       setDownloadSuccess(true);
     } catch (error) {
       console.error('Word export error:', error);
+      setExportError('Word 报告生成失败，请稍后重试。');
     } finally {
       setIsExportingWord(false);
     }
@@ -42,11 +46,14 @@ export const Step6Export: React.FC<Step6Props> = ({ caseMeta, evaluationReport, 
 
   const handleExportExcel = async () => {
     setIsExportingExcel(true);
+    setExportError('');
+    setDownloadSuccess(false);
     try {
       await exportEvidenceAnalysisExcel(caseMeta, evaluationReport, transactions, reviewedAccounts);
       setDownloadSuccess(true);
     } catch (error) {
       console.error('Excel export error:', error);
+      setExportError('Excel 底表生成失败，请稍后重试。');
     } finally {
       setIsExportingExcel(false);
     }
@@ -54,11 +61,14 @@ export const Step6Export: React.FC<Step6Props> = ({ caseMeta, evaluationReport, 
 
   const handleExportPdf = async () => {
     setIsExportingPdf(true);
+    setExportError('');
+    setDownloadSuccess(false);
     try {
       await exportEvidencePdfBooklet(caseMeta, evaluationReport, transactions);
       setDownloadSuccess(true);
     } catch (error) {
       console.error('PDF export error:', error);
+      setExportError('PDF 证据册生成失败，请稍后重试。');
     } finally {
       setIsExportingPdf(false);
     }
@@ -138,7 +148,7 @@ export const Step6Export: React.FC<Step6Props> = ({ caseMeta, evaluationReport, 
               </div>
               <div>
                 <div className="font-bold text-xs text-slate-800">证据分析工作底表 (.xlsx)</div>
-                <div className="text-[11px] text-slate-400">结构化全量明细、线索清单与核销记录</div>
+                <div className="text-[11px] text-slate-400">结构化明细、线索清单与核销记录</div>
               </div>
             </div>
             <button
@@ -177,6 +187,11 @@ export const Step6Export: React.FC<Step6Props> = ({ caseMeta, evaluationReport, 
           <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-xs text-emerald-700 flex items-center space-x-2">
             <CheckCircle2 className="w-4 h-4 flex-shrink-0" />
             <span>文书已成功生成并下载至您的电脑。祝执行办案顺利！</span>
+          </div>
+        )}
+        {exportError && (
+          <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-700">
+            {exportError}
           </div>
         )}
       </div>

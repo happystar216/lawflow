@@ -84,3 +84,31 @@ test('Gemini parser uses each page header identity instead of a carried-over tra
     globalThis.fetch = originalFetch;
   }
 });
+
+test('Gemini parser preserves a visible account result when the document has no transactions', async () => {
+  const originalFetch = globalThis.fetch;
+  const modelJson = JSON.stringify({
+    totalExtracted: 0,
+    pagesCovered: [1, 2],
+    pageChecks: [
+      { pageNumber: 1, transactionCount: 0, pageType: 'ACCOUNT_INFO', bankName: '测试银行', accountName: '张三', accountNumber: '62220001' },
+      { pageNumber: 2, transactionCount: 0, pageType: 'BLANK', bankName: '', accountName: '', accountNumber: '' }
+    ],
+    transactions: []
+  });
+  globalThis.fetch = async () => new Response(`data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: modelJson }] } }] })}\n\n`);
+  try {
+    const result = await parsePdfWithGeminiStream(
+      new File(['pdf'], 'no-transactions.pdf', { type: 'application/pdf' }),
+      { GEMINI_API_KEY: 'test' }, undefined, undefined, { totalPages: 2 }
+    );
+    assert.equal(result.transactions.length, 0);
+    assert.equal(result.accounts.length, 1);
+    assert.equal(result.accounts[0].accountNumber, '62220001');
+    assert.equal(result.accounts[0].transactionCount, 0);
+    assert.equal(result.accounts[0].isBalanced, false);
+    assert.match(result.warnings.join('；'), /确无流水/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

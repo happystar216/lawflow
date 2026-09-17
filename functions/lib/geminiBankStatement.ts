@@ -39,6 +39,7 @@ function buildGeminiDirectPrompt(options?: GeminiParseOptions): string {
 7. 忠实还原数字原样：仔细核验千分位逗号与每位数字（例如 “-4,000.00” 是 4000.00，注意区分首位点阵字形），按印刷字面原样输出，严禁自行心算凑数或编造虚假数字。
 8. 信用卡与特殊账单：如遇到透支余额为负数、按月打印的周期性利息还款或免收年费（发生额印为 0.00），均如实按原件印刷数值记录。
 9. pageChecks 必须逐页列出原件的每一页，包括空白页和非交易文书页；transactions 数量必须等于各交易页 transactionCount 之和。每个交易页必须从该页页眉独立读取本方 bankName、accountName、accountNumber，不得沿用上一页或下一页账号；无法确认时留空，不得猜测。
+10. 点阵打印表中的日期必须逐位读取完整的 8 位数字；同一账号的日期通常按表格物理行顺序排列，如年份突然倒退数年必须回看原图复核。发生额明确印为 0.00 的“结息”行必须输出 amt: 0，不得当作缺失值；“销户/清户”行必须读取完整的带符号发生额，并用相邻余额差复核是否漏掉中间数字。
 
 【输出格式】：严格输出标准 JSON，字段精简以避免超限：
 {
@@ -74,18 +75,18 @@ export async function parsePdfWithGeminiStream(
   if (!apiKey) throw new Error('未配置 GEMINI_API_KEY');
   const model = env.GEMINI_MODEL || 'gemini-3.8-flash';
 
-  onProgress?.({ statusText: '正在将卷宗 PDF 进行 Base64 编码并直传 Gemini…', totalTransactions: 0, percent: 5 });
+  onProgress?.({ statusText: '正在安全读取卷宗文件…', totalTransactions: 0, percent: 5 });
 
   const arrayBuffer = await file.arrayBuffer();
-  let binary = '';
   const bytes = new Uint8Array(arrayBuffer);
-  const len = bytes.byteLength;
-  for (let i = 0; i < len; i++) {
-    binary += String.fromCharCode(bytes[i]);
+  const chunks: string[] = [];
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.byteLength; offset += chunkSize) {
+    chunks.push(String.fromCharCode(...bytes.subarray(offset, offset + chunkSize)));
   }
-  const base64Data = btoa(binary);
+  const base64Data = btoa(chunks.join(''));
 
-  onProgress?.({ statusText: '已完成 PDF 编码，正在向 Gemini 3.8 Flash 发起流式推理…', totalTransactions: 0, percent: 15 });
+  onProgress?.({ statusText: '文件读取完成，正在识别页面内容…', totalTransactions: 0, percent: 15 });
 
   const promptText = buildGeminiDirectPrompt(options);
 
@@ -164,7 +165,7 @@ export async function parsePdfWithGeminiStream(
             transactionMatchCount = currentCount;
             const dynamicPercent = Math.min(95, 20 + Math.floor((transactionMatchCount / 500) * 75));
             onProgress?.({
-              statusText: `正在提取【${lastCurrentBank}】流水明细，已实时捕获 ${transactionMatchCount} 笔…`,
+              statusText: `正在提取【${lastCurrentBank}】流水明细，已读取约 ${transactionMatchCount} 笔…`,
               totalTransactions: transactionMatchCount,
               percent: dynamicPercent,
               currentBank: lastCurrentBank
@@ -309,8 +310,16 @@ export async function parsePdfWithGeminiStream(
   const transactionPages = transactions.map((item: any) => item.rawPageNumber).filter((page: unknown): page is number => typeof page === 'number');
   const pagesCovered = [...new Set([...reportedPages, ...checkedPages, ...transactionPages])].sort((a, b) => a - b);
   const missingPages = Array.from({ length: expectedPages }, (_, index) => index + 1).filter(page => !pagesCovered.includes(page));
+  const pageChecks = Array.isArray(parsedResult.pageChecks) ? parsedResult.pageChecks : [];
+  const allCheckedPagesReportZero = pageChecks.length > 0
+    && pageChecks.every((item: any) => Number(item?.transactionCount) === 0);
   const warnings = [
-    'Gemini 直传结果未经独立二次清点，所有识别交易均需律师对照原件复核',
+    '智能识别结果须由律师对照原件复核',
+    ...(transactions.length === 0
+      ? [allCheckedPagesReportZero && missingPages.length === 0
+        ? '原件各页均未识别到交易明细；请确认所选查询期间是否确无流水'
+        : '未识别到流水明细，且页面覆盖可能不完整；请对照原件确认是否存在漏识别']
+      : []),
     ...(missingPages.length ? [`页面覆盖不完整，缺少第 ${missingPages.join('、')} 页的结构化确认`] : [])
   ];
 
@@ -350,17 +359,44 @@ export async function parsePdfWithGeminiStream(
     acc.endBalance = t.balance !== null ? t.balance : acc.endBalance;
   }
 
+  if (transactions.length === 0) {
+    for (const identity of pageIdentities.values()) {
+      if (!identity.bankName && !identity.accountName && !identity.accountNumber) continue;
+      const accountNumber = identity.accountNumber || '待核对账号';
+      const key = `${identity.bankName || '待核对银行'}_${accountNumber}`;
+      if (accountMap.has(key)) continue;
+      accountMap.set(key, {
+        accountNumber,
+        accountName: identity.accountName || expectedHolder || '待核对户名',
+        bankName: identity.bankName || '待核对银行',
+        ownerType: 'DEBTOR_MAIN',
+        fileName: file.name,
+        fileType: 'pdf',
+        totalIn: 0,
+        totalOut: 0,
+        transactionCount: 0,
+        startDate: '',
+        endDate: '',
+        startBalance: 0,
+        endBalance: 0,
+        isBalanced: false,
+        balanceDiff: 0,
+        balanceAvailable: false
+      });
+    }
+  }
+
   for (const acc of accountMap.values()) {
     const calculatedEndBalance = acc.startBalance + acc.totalIn - acc.totalOut;
     acc.balanceDiff = Math.abs(calculatedEndBalance - acc.endBalance);
-    acc.isBalanced = acc.balanceDiff < 1.0;
+    acc.isBalanced = acc.transactionCount > 0 && acc.balanceDiff < 1.0;
     acc.parseStatus = 'NEEDS_REVIEW';
     acc.parseWarnings = warnings;
     acc.coveredPages = pagesCovered;
     acc.totalPages = expectedPages;
   }
 
-  const accounts = Array.from(accountMap.values());
+  let accounts = Array.from(accountMap.values());
   const mainAccount = accounts[0] || {
     accountNumber: '综合汇总账户',
     accountName: expectedHolder || '被执行人',
@@ -383,6 +419,7 @@ export async function parsePdfWithGeminiStream(
     coveredPages: pagesCovered,
     totalPages: expectedPages
   };
+  if (accounts.length === 0) accounts = [mainAccount];
 
   return {
     account: mainAccount,

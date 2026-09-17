@@ -219,7 +219,7 @@ export const Step3PreAnnotation: React.FC<Step3Props> = ({
 
           <div>
             <label className="block text-xs font-semibold text-rose-700 mb-1">
-              T4 《报告财产令》送达日 ⭐⭐ (拒执关键)
+              T4 《报告财产令》送达日 ⭐⭐（重点核查节点）
             </label>
             <input
               type="date"
@@ -245,10 +245,10 @@ export const Step3PreAnnotation: React.FC<Step3Props> = ({
       <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm p-6 space-y-4">
         <h3 className="text-sm font-bold text-slate-800 flex items-center space-x-2">
           <FileText className="w-4 h-4 text-blue-600" />
-          <span>3. 被执行人《财产申报表》内容录入 (用于虚假报告交叉核验)</span>
+          <span>3. 被执行人《财产申报表》内容录入（用于申报差异核对）</span>
         </h3>
         <p className="text-xs text-slate-500">
-          将被执行人向法院申报的“无收入/无存款”内容录入，算法将自动与其银行流水实际入账与存款进行碰撞比对，输出《虚假报告差异报告》。
+          将被执行人向法院申报的“无收入/无存款”等内容录入，系统会与银行流水进行差异比对。是否属于虚假报告，仍需律师结合申报义务、时间范围和其他证据判断。
         </p>
 
         {/* Declared Assets List */}

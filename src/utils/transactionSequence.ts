@@ -18,6 +18,39 @@ export function isFeeWaiver(transaction: StandardTransaction): boolean {
 }
 
 /**
+ * Some bank ledgers print scheduled interest-settlement rows with an actual
+ * amount of 0.00. Treat them as valid only when an adjacent physical row for
+ * the same account has the same balance; this avoids accepting a missed amount
+ * merely because the summary contains “结息”.
+ */
+export function isBalanceConfirmedZeroSettlement(
+  transaction: StandardTransaction,
+  accountTransactions: StandardTransaction[]
+): boolean {
+  if (transaction.amount !== 0) return false;
+  if (isFeeWaiver(transaction)) return true;
+  const text = `${transaction.summary || ''} ${transaction.counterpartyName || ''} ${transaction.rawText || ''}`;
+  if (!/结息|利息结算|计息/.test(text)) return false;
+  if (transaction.balanceAvailable === false || transaction.balance == null) return false;
+
+  const sameAccount = accountTransactions
+    .filter(item => normalizedAccount(item.accountNumber) === normalizedAccount(transaction.accountNumber))
+    .sort(compareSourceOrder);
+  const index = sameAccount.findIndex(item => item.id === transaction.id);
+  if (index < 0) return false;
+  return [sameAccount[index - 1], sameAccount[index + 1]].some(neighbor => (
+    neighbor
+    && neighbor.balanceAvailable !== false
+    && neighbor.balance != null
+    && Math.abs(neighbor.balance - transaction.balance) < 0.005
+  ));
+}
+
+function normalizedAccount(value: string): string {
+  return String(value || '').replace(/[\s\-_—–·•]/g, '').toLowerCase();
+}
+
+/**
  * Credit-card histories may expose a shared outstanding balance rather than a
  * deposit-account balance that can be audited across every displayed card.
  */

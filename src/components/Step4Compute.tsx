@@ -43,6 +43,7 @@ export const Step4Compute: React.FC<Step4Props> = ({
   const [ruleList, setRuleList] = useState(engine.getRegistry().getAllRules());
 
   const handleRunCompute = () => {
+    if (transactions.length === 0) return;
     setIsCalculating(true);
     setTimeout(() => {
       const { report, processedTransactions } = engine.evaluateCase(
@@ -73,11 +74,11 @@ export const Step4Compute: React.FC<Step4Props> = ({
       <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm p-6 flex items-center justify-between flex-wrap gap-4">
         <div>
           <span className="text-xs font-semibold uppercase tracking-wider text-blue-600 bg-blue-50 px-2.5 py-1 rounded-md">
-            Step 4 / 6 数据计算 (核心算法引擎)
+            Step 4 / 6 数据分析
           </span>
-          <h2 className="text-xl font-bold text-slate-900 mt-2">11 大异常识别算法 DAG 矩阵运算</h2>
+          <h2 className="text-xl font-bold text-slate-900 mt-2">资金流向与待核查线索分析</h2>
           <p className="text-xs text-slate-500 mt-1">
-            多账户刚销、时间轴切片投影、双向净额汇总、可插拔异常检测。毫秒级生成全景资金画像。
+            核销本人账户之间的重复自转记录，并结合案件时间节点汇总资金流向和待核查线索。
           </p>
         </div>
 
@@ -87,13 +88,13 @@ export const Step4Compute: React.FC<Step4Props> = ({
             className="flex items-center space-x-1.5 px-3.5 py-2 rounded-xl border border-slate-300 hover:bg-slate-50 text-slate-700 text-xs font-medium transition"
           >
             <Sliders className="w-4 h-4 text-slate-500" />
-            <span>算法参数与开关抽屉</span>
+            <span>分析规则设置</span>
           </button>
 
           <button
             onClick={handleRunCompute}
-            disabled={isCalculating}
-            className="flex items-center space-x-2 px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-medium text-xs shadow-md shadow-blue-500/20 transition"
+            disabled={isCalculating || transactions.length === 0}
+            className="flex items-center space-x-2 px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white font-medium text-xs shadow-md shadow-blue-500/20 transition"
           >
             <Play className={`w-3.5 h-3.5 ${isCalculating ? 'animate-spin' : ''}`} />
             <span>{isCalculating ? '正在计算中...' : '重新执行计算'}</span>
@@ -113,7 +114,7 @@ export const Step4Compute: React.FC<Step4Props> = ({
           <div className="flex items-center justify-between border-b border-slate-800 pb-3">
             <div className="flex items-center space-x-2">
               <Settings2 className="w-4 h-4 text-blue-400" />
-              <h3 className="text-sm font-bold">可插拔规则算法库配置中枢 (11大算法)</h3>
+              <h3 className="text-sm font-bold">分析规则设置（共 11 项）</h3>
             </div>
             <span className="text-xs text-slate-400">支持独立开启/停用与阈值调优</span>
           </div>
@@ -156,7 +157,7 @@ export const Step4Compute: React.FC<Step4Props> = ({
                 ¥ {evaluationReport.internalTransferAmount.toLocaleString()}
               </div>
               <div className="text-[11px] text-emerald-600 font-medium">
-                成功刚销 {evaluationReport.internalTransferCount} 笔自转交易，还原净收支
+                已核销 {evaluationReport.internalTransferCount} 笔本人账户间自转记录
               </div>
             </div>
 
@@ -198,7 +199,7 @@ export const Step4Compute: React.FC<Step4Props> = ({
                 {evaluationReport.matches.length} 项
               </div>
               <div className="text-[11px] text-slate-500 font-medium">
-                L0红线: {evaluationReport.matches.filter(m => m.severity === 'L0').length}项 | L1重点: {evaluationReport.matches.filter(m => m.severity === 'L1').length}项
+                高优先级: {evaluationReport.matches.filter(m => m.severity === 'L0').length}项 | 重点关注: {evaluationReport.matches.filter(m => m.severity === 'L1').length}项
               </div>
             </div>
           </div>
@@ -265,7 +266,7 @@ export const Step4Compute: React.FC<Step4Props> = ({
                 {evaluationReport.postExecutionTransferAmount > 0 ? (
                   <>💡 <strong>核查提示</strong>：流水经内部对冲后，执行立案后存在 <strong>¥{evaluationReport.postExecutionTransferAmount.toLocaleString()} 元</strong> 对外支出，执行期间入账累计相当于执行标的的 <strong>{(evaluationReport.solvencyCoverageRate * 100).toFixed(0)}%</strong>。这仅表明存在资金活动，是否属于可供执行财产、正常经营周转或其他合法支出，仍需结合余额、款项性质和原始凭证核实。</>
                 ) : (
-                  <>💡 <strong>穿透结论</strong>：被执行人名下流水经内部对冲后，真实外部净流出达 <strong>¥{(evaluationReport.netExternalOut || evaluationReport.totalRawOut).toLocaleString()} 元</strong>；{evaluationReport.postExecutionTransferAmount === 0 ? '若尚未在前置标注中设定【执行立案日】，系统无法锁定立案后突击转移节点，建议返回设定时间坐标；若已设定，则表明立案后无新增大额流出。' : ''}</>
+                  <>💡 <strong>分析提示</strong>：被执行人名下流水经内部对冲后，外部净流出为 <strong>¥{(evaluationReport.netExternalOut || evaluationReport.totalRawOut).toLocaleString()} 元</strong>；{evaluationReport.postExecutionTransferAmount === 0 ? '若尚未设定【执行立案日】，系统无法区分立案前后的资金活动，建议返回补充时间节点；若已设定，则当前流水中未发现立案后新增对外支出。' : ''}</>
                 )}
               </div>
             </div>
@@ -308,7 +309,8 @@ export const Step4Compute: React.FC<Step4Props> = ({
 
         <button
           onClick={onNext}
-          className="flex items-center space-x-2 px-6 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-medium text-sm shadow-md shadow-blue-500/20 transition"
+          disabled={!evaluationReport}
+          className="flex items-center space-x-2 px-6 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white font-medium text-sm shadow-md shadow-blue-500/20 transition"
         >
           <span>进入步骤五：后标注研判与证据勾选</span>
           <ArrowRight className="w-4 h-4" />

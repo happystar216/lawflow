@@ -37,6 +37,13 @@ function createBlankCase(): CaseMetadata {
   };
 }
 
+function safeWorkflowStep(requested: unknown, transactionCount: number): WorkflowStep {
+  const parsed = Number(requested);
+  if (!Number.isInteger(parsed) || parsed < 0 || parsed > 6) return 0;
+  if (transactionCount === 0 && parsed > 1) return 1;
+  return parsed as WorkflowStep;
+}
+
 export const App: React.FC = () => {
   const engine = useMemo(() => new LawFlowEngine(), []);
 
@@ -80,8 +87,13 @@ export const App: React.FC = () => {
         setCaseMeta(active.metadata);
         setAccounts(normalized.accounts);
         setTransactions(normalized.transactions);
-        if (session?.currentStep !== undefined) setCurrentStep(session.currentStep);
-        if (session?.completedSteps) setCompletedSteps(new Set(session.completedSteps));
+        const restoredStep = safeWorkflowStep(session?.currentStep, normalized.transactions.length);
+        setCurrentStep(restoredStep);
+        if (session?.completedSteps) {
+          setCompletedSteps(new Set((session.completedSteps as WorkflowStep[]).filter(step => (
+            normalized.transactions.length > 0 || step <= 1
+          ))));
+        }
         if (normalized.transactions.length > 0) {
           const { report, processedTransactions } = engine.evaluateCase(
             active.metadata,
@@ -159,8 +171,10 @@ export const App: React.FC = () => {
     } else {
       setEvaluationReport(record.evaluationReport || null);
     }
-    setCurrentStep(record.transactions?.length > 0 ? 4 : 0);
-    setCompletedSteps(new Set([0, 1, 2, 3, 4, 5]));
+    const hasCaseIdentity = Boolean(record.metadata.respondentName?.trim() || record.metadata.caseNumber?.trim());
+    const hasTransactions = normalized.transactions.length > 0;
+    setCurrentStep(hasTransactions ? 4 : hasCaseIdentity || normalized.accounts.length > 0 ? 1 : 0);
+    setCompletedSteps(new Set(hasTransactions ? [0, 1, 2, 3, 4] : hasCaseIdentity ? [0] : []));
   };
 
   const handleLogout = () => {
@@ -180,7 +194,7 @@ export const App: React.FC = () => {
   };
 
   const goToStep = (step: WorkflowStep) => {
-    setCurrentStep(step);
+    setCurrentStep(safeWorkflowStep(step, transactions.length));
   };
 
   if (!currentUser) {

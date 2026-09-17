@@ -113,7 +113,7 @@ export const Step5PostAnnotation: React.FC<Step5Props> = ({
             }`}
           >
             <ShieldAlert className="w-3.5 h-3.5" />
-            <span>可疑证据清单 ({matches.length})</span>
+            <span>待核查线索清单 ({matches.length})</span>
           </button>
 
           <button

@@ -1,6 +1,6 @@
 import { BankAccount, StandardTransaction } from '../types/transaction';
 import { transactionBelongsToAccount } from '../utils/accountIdentity';
-import { chronologicalTransactions, isCreditCardStatement, isFeeWaiver } from '../utils/transactionSequence';
+import { chronologicalTransactions, isBalanceConfirmedZeroSettlement, isCreditCardStatement, isFeeWaiver } from '../utils/transactionSequence';
 
 export interface AuditReport {
   accountNumber: string;
@@ -40,7 +40,7 @@ export function auditAccountBalance(
       suspiciousRows.push({ transactionId: tx.id, reason: '收支方向待核对' });
     }
 
-    if (tx.amount <= 0 && !isFeeWaiver(tx)) {
+    if (tx.amount <= 0 && !isFeeWaiver(tx) && !isBalanceConfirmedZeroSettlement(tx, accountTx)) {
       suspiciousRows.push({
         transactionId: tx.id,
         reason: '交易金额为0或负数'

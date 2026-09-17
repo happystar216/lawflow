@@ -463,6 +463,36 @@ test('normalizer accepts a zero-amount fee waiver without leaving it pending', (
   assert.equal(normalized.transactions[0].extractionConfidence, 0.9);
 });
 
+test('zero-interest rows with unchanged balances are valid while a truncated closure amount is repaired', () => {
+  const accountNumber = '255301100006216';
+  const sourceAccount: BankAccount = {
+    ...account,
+    accountNumber,
+    bankName: '四川农信',
+    startBalance: 5455.35,
+    endBalance: 4.47,
+    transactionCount: 5
+  };
+  const rows: StandardTransaction[] = [
+    { ...makeTx('pre', 3, 1, '2024-12-21', '2024-12-21', 'IN', 1.38, 5456.73), accountNumber, bankName: '四川农信', summary: '结息' },
+    { ...makeTx('closure', 3, 2, '2025-02-25', '2025-02-25', 'OUT', 56, 3.47), accountNumber, bankName: '四川农信', summary: '销户', rawText: '2025-02-25 OUT 56 销户' },
+    { ...makeTx('interest', 3, 3, '2025-03-21', '2025-03-21', 'IN', 1, 4.47), accountNumber, bankName: '四川农信', summary: '结息' },
+    { ...makeTx('zero-1', 3, 4, '2021-03-21', '2021-03-21', 'IN', 0, 4.47), accountNumber, bankName: '四川农信', summary: '结息', extractionConfidence: 0.4, reviewStatus: 'PENDING', dataQualityIssues: ['INVALID_AMOUNT'] },
+    { ...makeTx('zero-2', 3, 5, '2020-12-21', '2020-12-21', 'IN', 0, 4.47), accountNumber, bankName: '四川农信', summary: '结息', extractionConfidence: 0.4, reviewStatus: 'PENDING', dataQualityIssues: ['INVALID_AMOUNT'] }
+  ];
+
+  const normalized = normalizeRecognizedData([sourceAccount], rows);
+  const closure = normalized.transactions.find(item => item.id === 'closure')!;
+  assert.equal(closure.amount, 5453.26);
+  assert.equal(closure.reviewStatus, 'CORRECTED');
+  assert.deepEqual(normalized.transactions.find(item => item.id === 'zero-1')!.dataQualityIssues, []);
+
+  const issues = buildEvidenceReviewIssues(normalized.accounts[0], normalized.transactions);
+  assert.equal(issues.some(issue => issue.category === 'INVALID_AMOUNT'), false);
+  const audit = auditAccountBalance(normalized.accounts[0], normalized.transactions);
+  assert.ok(audit.difference < 0.01);
+});
+
 test('normalizer restores legacy balance-derived amount changes on credit card statements', () => {
   const corrected: StandardTransaction = {
     ...makeTx('legacy-card-correction', 18, 4, '2024-02-17', '2024-02-17', 'OUT', 4250.59, -8704.58),
@@ -509,4 +539,3 @@ test('one isolated long-interval mismatch does not label a normal statement page
   assert.equal(issues.some(issue => /跨期离散账单/.test(issue.title)), false);
   assert.equal(issues.some(issue => issue.category === 'BALANCE_BREAK'), false);
 });
-

@@ -13,10 +13,7 @@ export const Step0CaseSetup: React.FC<Step0Props> = ({
   onChange,
   onNext
 }) => {
-  // Allow proceeding as long as user provides a case identifier or respondent name
-  const canProceed = Boolean(
-    caseMeta.respondentName?.trim() || caseMeta.caseNumber?.trim()
-  );
+  const canProceed = Boolean(caseMeta.respondentName?.trim());
 
   const handleChange = (field: keyof CaseMetadata, value: any) => {
     onChange({
@@ -154,7 +151,7 @@ export const Step0CaseSetup: React.FC<Step0Props> = ({
             </h3>
           </div>
           <p className="text-xs text-slate-500">
-            算法引擎将根据上述时间锚点，自动将流水划分为：立案前、立案后、财产令后及冻结后阶段，精准识别不同司法阶段的转移行为。
+            系统将根据上述时间节点，把流水划分为立案前、立案后、财产令后及冻结后阶段，便于核对不同司法阶段的资金变化。
           </p>
 
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
@@ -168,7 +165,7 @@ export const Step0CaseSetup: React.FC<Step0Props> = ({
                 onChange={e => handleTimelineChange('executionFilingDate', e.target.value)}
                 className="w-full px-3.5 py-2.5 text-xs rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500"
               />
-              <p className="text-[10px] text-slate-400 mt-1">立案后转出即构成转移嫌疑</p>
+              <p className="text-[10px] text-slate-400 mt-1">用于优先筛查立案后的对外支出</p>
             </div>
 
             <div>

@@ -1,6 +1,6 @@
 import { BankAccount, StandardTransaction } from '../types/transaction';
 import { accountIdentityKey, isReliableAccountNumber, normalizeAccountIdentityPart } from './accountIdentity';
-import { balanceContinuityIssues, chronologicalTransactions, isCreditCardStatement, isFeeWaiver } from './transactionSequence';
+import { balanceContinuityIssues, chronologicalTransactions, isBalanceConfirmedZeroSettlement, isCreditCardStatement, isFeeWaiver } from './transactionSequence';
 
 export interface NormalizedRecognizedData {
   accounts: BankAccount[];
@@ -10,15 +10,21 @@ export interface NormalizedRecognizedData {
 export function normalizeRecognizedData(
   inputAccounts: BankAccount[], inputTransactions: StandardTransaction[]
 ): NormalizedRecognizedData {
+  const publicAccounts = inputAccounts.map(account => ({
+    ...account,
+    parseWarnings: account.parseWarnings?.map(publicParserWarning)
+  }));
   const preparedTransactions = restoreUnsupportedBalanceCorrections(inputTransactions.map(upgradeLegacyGeminiReviewStatus));
   const stabilized = healSummaryOverriddenAmounts(stabilizePageAccountIdentities(preparedTransactions));
   const { transactions: deduped, mergedPagesByAccount } = deduplicateTransactions(stabilized);
   const calibrated = calibrateDirectionsByBalanceMath(deduped);
   const transactions = healOcrBalanceAndAmountDiscrepancies(calibrated);
   for (const transaction of transactions) {
-    if (isFeeWaiver(transaction) && transaction.dataQualityIssues) {
+    const isFeeWaiverRow = isFeeWaiver(transaction);
+    const isConfirmedZeroSettlement = isBalanceConfirmedZeroSettlement(transaction, transactions);
+    if ((isFeeWaiverRow || isConfirmedZeroSettlement) && transaction.dataQualityIssues) {
       transaction.dataQualityIssues = transaction.dataQualityIssues.filter(q => q !== 'INVALID_AMOUNT');
-      if (!transaction.dataQualityIssues.length && transaction.reviewStatus === 'PENDING') {
+      if (isFeeWaiverRow && !transaction.dataQualityIssues.length && transaction.reviewStatus === 'PENDING') {
         transaction.extractionConfidence = Math.max(transaction.extractionConfidence ?? 0, 0.9);
         transaction.reviewStatus = 'AUTO_PASSED';
       }
@@ -31,12 +37,12 @@ export function normalizeRecognizedData(
   }
 
   const sourceAccounts = new Map<string, BankAccount[]>();
-  for (const account of inputAccounts.filter(account => !isDocumentReviewAccount(account))) {
+  for (const account of publicAccounts.filter(account => !isDocumentReviewAccount(account))) {
     const key = accountIdentityKey(account);
     sourceAccounts.set(key, [...(sourceAccounts.get(key) || []), account]);
   }
 
-  const allWarnings = [...new Set(inputAccounts.flatMap(account => account.parseWarnings || []))]
+  const allWarnings = [...new Set(publicAccounts.flatMap(account => account.parseWarnings || []))]
     .filter(warning => !isLegacyDerivedWarning(warning));
   const pageWarnings = allWarnings.filter(warning => warningPage(warning));
   const unscopedWarnings = allWarnings.filter(warning => !warningPage(warning));
@@ -81,7 +87,8 @@ export function normalizeRecognizedData(
     const reviewIssues = [...new Map(originals.flatMap(item => item.reviewIssues || []).map(issue => [issue.id, issue])).values()];
     const continuityIssues = balanceContinuityIssues(accountTransactions);
     const hasDerivedIssues = accountTransactions.some(item => (item.extractionConfidence ?? 1) < 0.8
-      || (item.amount <= 0 && !isFeeWaiver(item)) || !item.transactionDate || item.direction === 'UNKNOWN')
+      || (item.amount <= 0 && !isFeeWaiver(item) && !isBalanceConfirmedZeroSettlement(item, accountTransactions))
+      || !item.transactionDate || item.direction === 'UNKNOWN')
       || continuityIssues.length > 0;
 
     const balanceAvailable = accountTransactions.some(item => item.balanceAvailable !== false);
@@ -124,6 +131,35 @@ export function normalizeRecognizedData(
     });
   }
 
+  // Keep a real, visible import record for files that contain account information
+  // but no transaction rows. Without this, normalization turns a legitimate
+  // zero-transaction result into a synthetic “待归属页面” account or drops it.
+  const transactionSourceFiles = new Set(transactions.map(item => item.rawSourceFile));
+  for (const original of publicAccounts) {
+    if (original.transactionCount !== 0 || isDocumentReviewAccount(original)) continue;
+    if (transactionSourceFiles.has(original.fileName)) continue;
+    const alreadyPreserved = accounts.some(account => (
+      account.fileName === original.fileName
+      && accountIdentityKey(account) === accountIdentityKey(original)
+    ));
+    if (alreadyPreserved) continue;
+    for (const warning of original.parseWarnings || []) {
+      if (warningPage(warning)) coveredWarningSet.add(warning);
+      else assignedUnscopedWarningSet.add(warning);
+    }
+    accounts.push({
+      ...original,
+      totalIn: 0,
+      totalOut: 0,
+      transactionCount: 0,
+      startDate: '',
+      endDate: '',
+      isBalanced: false,
+      balanceAvailable: false,
+      parseStatus: 'NEEDS_REVIEW'
+    });
+  }
+
   const orphanWarnings = pageWarnings.filter(warning => !coveredWarningSet.has(warning));
   let unassignedUnscopedWarnings = unscopedWarnings.filter(warning => !assignedUnscopedWarningSet.has(warning));
   // Previously normalized browser data may already contain file-level warnings on a
@@ -131,7 +167,7 @@ export function normalizeRecognizedData(
   // same source file so refreshing an existing import also removes the stale card.
   if (accounts.length && unassignedUnscopedWarnings.length) {
     for (const warning of unassignedUnscopedWarnings) {
-      const sourceFile = inputAccounts.find(account => account.parseWarnings?.includes(warning))?.fileName;
+      const sourceFile = publicAccounts.find(account => account.parseWarnings?.includes(warning))?.fileName;
       const target = accounts.find(account => sourceFile && account.fileName === sourceFile) || accounts[0];
       target.parseWarnings = [...new Set([...(target.parseWarnings || []), warning])];
       target.parseStatus = 'NEEDS_REVIEW';
@@ -141,8 +177,8 @@ export function normalizeRecognizedData(
   }
   const documentWarnings = [...new Set([...unassignedUnscopedWarnings, ...orphanWarnings])];
   if (documentWarnings.length) {
-    const existing = inputAccounts.find(isDocumentReviewAccount);
-    const sourceFile = existing?.fileName || transactions[0]?.rawSourceFile || inputAccounts[0]?.fileName || '';
+    const existing = publicAccounts.find(isDocumentReviewAccount);
+    const sourceFile = existing?.fileName || transactions[0]?.rawSourceFile || publicAccounts[0]?.fileName || '';
     accounts.push({
       ...(existing || minimalDocumentAccount(sourceFile)),
       accountNumber: `待归属页面-${sourceFile}`, accountName: '待归属页面', bankName: '待核对', ownerType: 'UNKNOWN',
@@ -317,6 +353,13 @@ function isLegacyDerivedWarning(warning: string): boolean {
   return /第\s*\d+\s*页第\s*\d+\s*笔交易余额不连续/.test(warning)
     || /识别置信度低于\s*80%/.test(warning)
     || /第\s*\d+\s*页第\s*\d+\s*笔(?:收支方向|交易金额)无法确认/.test(warning);
+}
+
+function publicParserWarning(warning: string): string {
+  return warning
+    .replace(/Gemini(?:\s*3\.8\s*Flash)?/gi, '智能识别')
+    .replace(/Qwen/gi, '智能识别')
+    .replace(/智能识别\s*直传/g, '智能识别');
 }
 
 function warningPage(warning: string): number | undefined {
@@ -803,11 +846,17 @@ export function healOcrBalanceAndAmountDiscrepancies(transactions: StandardTrans
         if (impliedAmt > 0) {
           const impliedStr = impliedAmt.toFixed(2);
           const currAmtStr = curr.amount.toFixed(2);
+          const transactionText = `${curr.summary || ''} ${curr.counterpartyName || ''} ${curr.rawText || ''}`;
+          const isAccountClosureSettlement = curr.direction === 'OUT'
+            && /销户|清户|销账|结清/.test(transactionText)
+            && impliedAmt >= curr.amount
+            && diff >= 1;
 
           if (
             isOcrDigitVariant(currAmtStr, impliedStr) ||
             (curr.rawText && (curr.rawText.includes(impliedStr) || curr.rawText.includes(String(impliedAmt)))) ||
-            (curr.summary && (curr.summary.includes(impliedStr) || curr.summary.includes(String(impliedAmt))))
+            (curr.summary && (curr.summary.includes(impliedStr) || curr.summary.includes(String(impliedAmt)))) ||
+            isAccountClosureSettlement
           ) {
             recordCorrection(curr, '系统依据相邻余额关系提出金额修正');
             curr.amount = impliedAmt;

@@ -69,6 +69,36 @@ export async function deleteSourceDocument(caseId: string, fileName: string): Pr
   }
 }
 
+export async function deleteSourceDocumentsForCase(caseId: string): Promise<void> {
+  try {
+    const db = await openDb();
+    const transaction = db.transaction(STORE_NAME, 'readwrite');
+    const store = transaction.objectStore(STORE_NAME);
+    const userId = getCurrentSessionUser()?.id || 'DEFAULT_USER';
+    const done = transactionDone(transaction);
+    const request = store.openCursor();
+    await new Promise<void>((resolve, reject) => {
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (!cursor) {
+          resolve();
+          return;
+        }
+        const record = cursor.value as StoredSourceDocument;
+        if (record.caseId === caseId && record.id.startsWith(`${userId}|`)) {
+          cursor.delete();
+        }
+        cursor.continue();
+      };
+      request.onerror = () => reject(request.error);
+    });
+    await done;
+    db.close();
+  } catch {
+    // Case deletion should still succeed when optional source storage is unavailable.
+  }
+}
+
 function documentId(userId: string, caseId: string, fileName: string): string {
   return `${userId}|${caseId}|${fileName}`;
 }

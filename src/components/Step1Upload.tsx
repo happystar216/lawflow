@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { UploadCloud, FileSpreadsheet, FileText, FileImage, CheckCircle2, ArrowRight, ArrowLeft, Trash2, PlusCircle, AlertCircle, ShieldCheck, Sparkles, StopCircle } from 'lucide-react';
 import { BankAccount, StandardTransaction } from '../types/transaction';
 import { parseExcelBankStatement } from '../parsers/excelParser';
@@ -30,20 +30,37 @@ export const Step1Upload: React.FC<Step1Props> = ({
   const [progressInfo, setProgressInfo] = useState<GeminiProgressInfo | null>(null);
   const [statusText, setStatusText] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [isCancellable, setIsCancellable] = useState(false);
 
   const abortControllerRef = useRef<AbortController | null>(null);
+  const zeroTransactionFiles = [...new Set(accounts
+    .filter(account => account.transactionCount === 0)
+    .map(account => account.fileName))];
+  const hasTransactions = transactions.length > 0;
+
+  useEffect(() => {
+    if (!isProcessing) return;
+    const warnBeforeLeaving = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', warnBeforeLeaving);
+    return () => window.removeEventListener('beforeunload', warnBeforeLeaving);
+  }, [isProcessing]);
 
   const handleCancelProcessing = () => {
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
     }
-    setIsProcessing(false);
-    setProgressInfo(null);
-    setStatusText('已手动停止当前文件解析');
+    setStatusText('正在停止当前文件解析…');
   };
 
   const handleFiles = async (files: FileList | File[]) => {
+    if (isProcessing) {
+      setErrorMessage('当前文件仍在处理中，请等待完成或停止后再添加文件。');
+      return;
+    }
     const fileList = Array.from(files);
     if (fileList.length === 0) return;
 
@@ -54,6 +71,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
 
     const newAccounts = [...accounts];
     const newTransactions = [...transactions];
+    let wasCancelled = false;
 
     for (let i = 0; i < fileList.length; i++) {
       const file = fileList[i];
@@ -74,14 +92,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
         } else if (name.endsWith('.pdf')) {
           const controller = new AbortController();
           abortControllerRef.current = controller;
-          let sourceStored = true;
-          try {
-            await saveSourceDocument(caseId, file);
-          } catch (storageError) {
-            sourceStored = false;
-            console.warn('Source document storage unavailable; continuing recognition', storageError);
-          }
-
+          setIsCancellable(true);
           const { accounts: parsedAccounts, transactions: parsedTx } = await parsePdfWithGemini(
             file,
             (info: GeminiProgressInfo) => {
@@ -93,6 +104,15 @@ export const Step1Upload: React.FC<Step1Props> = ({
               respondentName: caseRespondentName
             }
           );
+          let sourceStored = true;
+          try {
+            // Replace the retained original only after recognition succeeds, so a
+            // failed same-name retry cannot leave old rows pointing at a new PDF.
+            await saveSourceDocument(caseId, file);
+          } catch (storageError) {
+            sourceStored = false;
+            console.warn('Source document storage unavailable; continuing recognition', storageError);
+          }
           const oldAccountIndexes = newAccounts
             .map((account, index) => account.fileName === file.name ? index : -1)
             .filter(index => index >= 0)
@@ -113,25 +133,30 @@ export const Step1Upload: React.FC<Step1Props> = ({
       } catch (err: any) {
         if (err.name === 'AbortError' || err.message?.includes('停止')) {
           console.log('User cancelled parsing:', file.name);
-          setStatusText('已取消解析');
+          wasCancelled = true;
           break;
         }
         console.error('Error processing file:', file.name, err);
         setErrorMessage(`解析文件 ${file.name} 失败: ${err.message || '文件格式无法识别或内容损坏'}`);
       } finally {
         abortControllerRef.current = null;
+        setIsCancellable(false);
       }
     }
 
     setIsProcessing(false);
     setProgressInfo(null);
-    setStatusText(null);
+    setStatusText(wasCancelled ? '已停止解析，未完成的文件没有导入。' : null);
     onDataUpdated(newAccounts, newTransactions);
   };
 
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
+    if (isProcessing) {
+      setErrorMessage('当前文件仍在处理中，请等待完成或停止后再添加文件。');
+      return;
+    }
     if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
       handleFiles(Array.from(e.dataTransfer.files));
     }
@@ -164,7 +189,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
           <div className="flex items-center space-x-2">
             <span className="inline-flex items-center space-x-1.5 px-3 py-1 rounded-full bg-blue-50 text-blue-700 border border-blue-200 text-xs font-medium">
               <Sparkles className="w-3.5 h-3.5 text-blue-600" />
-              <span>Gemini 3.8 Flash 司法大模型极速直传</span>
+              <span>智能识别与结构化提取</span>
             </span>
 
             <span className="inline-flex items-center space-x-1 px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 text-[11px] font-medium">
@@ -178,7 +203,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
           上传银行流水证据文件
         </h1>
         <p className="text-sm text-slate-500 mt-1">
-          支持各大商业银行导出的 Excel/CSV 电子流水及多页长卷 PDF 扫描件。卷宗 PDF 直传云端 Gemini 3.8 Flash 超长上下文引擎，零卡顿实时流式提取全量交易明细。
+          支持各大商业银行导出的 Excel/CSV 电子流水及多页 PDF 扫描件。文件将通过已配置的云端识别服务提取交易明细，完成后请对照原件复核。
         </p>
       </div>
 
@@ -198,7 +223,13 @@ export const Step1Upload: React.FC<Step1Props> = ({
           id="file-upload"
           multiple
           accept=".xlsx,.xls,.csv,.pdf"
-          onChange={(e) => e.target.files && handleFiles(e.target.files)}
+          onChange={(event) => {
+            const selectedFiles = event.currentTarget.files
+              ? Array.from(event.currentTarget.files)
+              : [];
+            event.currentTarget.value = '';
+            if (selectedFiles.length) handleFiles(selectedFiles);
+          }}
           className="hidden"
           disabled={isProcessing}
         />
@@ -217,7 +248,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
             </label>
             <span className="text-slate-600 text-base"> 或直接拖拽文件到这里</span>
             <p className="text-xs text-slate-400 mt-1">
-              支持格式：.xlsx, .xls, .csv, .pdf（支持长篇 PDF 分页解析与失败页自动复核）
+              支持格式：.xlsx、.xls、.csv、.pdf（识别完成后可按原件页码核对）
             </p>
           </div>
 
@@ -226,7 +257,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
               <div className="flex items-center justify-between text-blue-900 font-semibold text-sm">
                 <div className="flex items-center space-x-2">
                   <div className="w-4 h-4 border-2 border-blue-600 border-t-transparent rounded-full animate-spin flex-shrink-0" />
-                  <span className="truncate">{statusText || '正在初始化智能识别引擎...'}</span>
+                  <span className="truncate">{statusText || '正在准备识别文件...'}</span>
                 </div>
                 <div className="flex items-center space-x-2">
                   {progressInfo && (
@@ -234,15 +265,17 @@ export const Step1Upload: React.FC<Step1Props> = ({
                       {progressInfo.percent}%
                     </span>
                   )}
-                  <button
-                    type="button"
-                    onClick={handleCancelProcessing}
-                    className="inline-flex items-center space-x-1 px-2.5 py-1 rounded-lg border border-red-200 bg-white hover:bg-red-50 text-red-600 text-xs font-medium transition shadow-xs"
-                    title="中止当前识别任务"
-                  >
-                    <StopCircle className="w-3.5 h-3.5" />
-                    <span>停止</span>
-                  </button>
+                  {isCancellable && (
+                    <button
+                      type="button"
+                      onClick={handleCancelProcessing}
+                      className="inline-flex items-center space-x-1 px-2.5 py-1 rounded-lg border border-red-200 bg-white hover:bg-red-50 text-red-600 text-xs font-medium transition shadow-xs"
+                      title="中止当前识别任务"
+                    >
+                      <StopCircle className="w-3.5 h-3.5" />
+                      <span>停止</span>
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -258,7 +291,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
                   <div className="flex justify-between items-center text-[11px] text-slate-600 font-medium pt-0.5">
                     <div className="flex items-center space-x-1.5">
                       <span className="inline-block w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-                      <span>引擎：<strong>Gemini 3.8 Flash 全卷流式直传</strong></span>
+                      <span><strong>正在识别文件内容</strong></span>
                       {progressInfo.currentBank && (
                         <span className="ml-1 px-1.5 py-0.5 rounded bg-blue-100 text-blue-800 text-[10px] font-semibold">
                           {progressInfo.currentBank}
@@ -266,7 +299,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
                       )}
                     </div>
                     <span>
-                      已流式识别明细：<strong className="text-emerald-700 text-xs">{progressInfo.totalTransactions}</strong> 笔
+                      当前已读取约：<strong className="text-emerald-700 text-xs">{progressInfo.totalTransactions}</strong> 笔
                     </span>
                   </div>
                 </div>
@@ -283,6 +316,23 @@ export const Step1Upload: React.FC<Step1Props> = ({
         </div>
       </div>
 
+      {zeroTransactionFiles.length > 0 && (
+        <div className="flex items-start gap-3 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-amber-950">
+          <AlertCircle className="w-5 h-5 flex-shrink-0 mt-0.5" />
+          <div>
+            <div className="text-sm font-semibold">
+              {zeroTransactionFiles.length} 个文件未识别到流水明细
+            </div>
+            <p className="text-xs mt-1 leading-relaxed">
+              可能是查询期间确无流水，也可能是原件仅含账户信息、空白表格或页面未完整识别。请打开原件确认；这些文件已保留，但不会计入后续资金分析。
+            </p>
+            <p className="text-[11px] mt-2 text-amber-800 break-all">
+              {zeroTransactionFiles.join('、')}
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Uploaded Accounts List */}
       {accounts.length > 0 && (
         <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm p-6 space-y-4">
@@ -290,11 +340,11 @@ export const Step1Upload: React.FC<Step1Props> = ({
             <div className="flex items-center space-x-2">
               <CheckCircle2 className="w-5 h-5 text-emerald-500" />
               <h2 className="text-base font-semibold text-slate-900">
-                已成功导入账户 ({accounts.length})
+                已导入账户 ({accounts.length})
               </h2>
             </div>
             <span className="text-xs text-slate-500">
-              共计 {transactions.length} 笔流水记录 · 浏览器已自动保存
+              共计 {transactions.length} 笔流水记录 · 数据保存在当前浏览器
             </span>
           </div>
 
@@ -368,14 +418,15 @@ export const Step1Upload: React.FC<Step1Props> = ({
 
         <button
           onClick={onNext}
-          disabled={accounts.length === 0 || isProcessing}
+          disabled={!hasTransactions || isProcessing}
           className={`inline-flex items-center space-x-2 px-6 py-2.5 rounded-xl text-sm font-medium transition shadow-sm ${
-            accounts.length > 0 && !isProcessing
+            hasTransactions && !isProcessing
               ? 'bg-blue-600 hover:bg-blue-700 text-white shadow-blue-500/20'
               : 'bg-slate-200 text-slate-400 cursor-not-allowed'
           }`}
+          title={!hasTransactions && accounts.length > 0 ? '当前文件没有可分析的流水明细，请继续添加文件或核对原件' : undefined}
         >
-          <span>下一步：账户主体归属确认</span>
+          <span>{!hasTransactions && accounts.length > 0 ? '请先添加含流水明细的文件' : '下一步：核对原件'}</span>
           <ArrowRight className="w-4 h-4" />
         </button>
       </div>

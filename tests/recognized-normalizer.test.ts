@@ -77,7 +77,7 @@ test('normalizer migrates a cached file-level warning off a legacy review accoun
   );
   assert.equal(result.accounts.length, 1);
   assert.equal(result.accounts[0].accountNumber, '6214663610258281');
-  assert.deepEqual(result.accounts[0].parseWarnings, [warning]);
+  assert.deepEqual(result.accounts[0].parseWarnings, ['智能识别结果未经独立二次清点，所有识别交易均需律师对照原件复核']);
   assert.equal(result.accounts[0].parseStatus, 'NEEDS_REVIEW');
 });
 
@@ -94,4 +94,22 @@ test('normalizer auto-passes legacy Gemini rows that were blanket-marked pending
   assert.equal(result.transactions[0].extractionConfidence, 0.9);
   assert.equal(result.transactions[0].reviewStatus, 'AUTO_PASSED');
   assert.equal(buildEvidenceReviewIssues(result.accounts[0], result.transactions).some(issue => issue.category === 'LOW_CONFIDENCE'), false);
+});
+
+test('normalizer preserves a real zero-transaction account instead of replacing it with a review placeholder', () => {
+  const emptyAccount = {
+    ...account('6222000000000001', 'DEBTOR_MAIN', 0, ['原件各页均未识别到交易明细；请确认所选查询期间是否确无流水']),
+    bankName: '测试银行',
+    accountName: '张三',
+    fileName: '无流水证明.pdf',
+    transactionCount: 0,
+    totalIn: 0,
+    totalOut: 0
+  };
+  const result = normalizeRecognizedData([emptyAccount], []);
+  assert.equal(result.accounts.length, 1);
+  assert.equal(result.accounts[0].accountNumber, '6222000000000001');
+  assert.equal(result.accounts[0].accountName, '张三');
+  assert.equal(result.accounts[0].transactionCount, 0);
+  assert.equal(result.accounts[0].ownerType, 'DEBTOR_MAIN');
 });

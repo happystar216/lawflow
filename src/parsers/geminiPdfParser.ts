@@ -22,17 +22,17 @@ export async function parsePdfWithGemini(
 ): Promise<{ account: BankAccount; accounts: BankAccount[]; transactions: StandardTransaction[] }> {
   const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
   if (!isPdf) {
-    throw new Error('仅支持 PDF 格式文件直传 Gemini 解析');
+    throw new Error('当前识别方式仅支持 PDF 文件');
   }
 
   // 校验文件体积（Cloudflare 单次请求推荐 75MB 以内）
   const maxBytes = 75 * 1024 * 1024;
   if (file.size > maxBytes) {
-    throw new Error(`当前 PDF 文件体积约为 ${(file.size / (1024 * 1024)).toFixed(1)}MB，超过云端单次直传安全阈值 (75MB)。建议将扫描件适度压缩分辨率或拆分为上下分册后分别上传。`);
+    throw new Error(`当前 PDF 文件体积约为 ${(file.size / (1024 * 1024)).toFixed(1)}MB，超过单次上传限制（75MB）。建议适度压缩扫描件，或拆分为上下分册后分别上传。`);
   }
 
   onProgress?.({
-    statusText: '⚡️ 正在直传卷宗 PDF 至 Gemini 3.8 Flash 引擎…',
+    statusText: '正在安全上传卷宗文件…',
     totalTransactions: 0,
     percent: 5,
     isStreaming: true
@@ -62,12 +62,12 @@ export async function parsePdfWithGemini(
     if (signal?.aborted) {
       throw new Error('用户已手动停止解析');
     }
-    throw new Error(`连接云端 Gemini 3.8 Flash 服务异常: ${netErr.message || '网络连接失败'}`);
+    throw new Error(`连接云端识别服务失败：${netErr.message || '网络连接异常'}`);
   }
 
   if (!response.ok) {
     const errorText = await response.text().catch(() => '');
-    throw new Error(`Gemini 3.8 Flash 解析服务响应异常 (${response.status}): ${errorText.slice(0, 200)}`);
+    throw new Error(`智能识别服务响应异常（${response.status}）：${errorText.slice(0, 200)}`);
   }
 
   if (!response.body) {
@@ -100,8 +100,8 @@ export async function parsePdfWithGemini(
         }
         onProgress?.({
           statusText: payload.statusText || (lastCapturedCount > 0 
-            ? `Gemini 3.8 Flash 正在提取流水明细，已实时捕获 ${lastCapturedCount} 笔…`
-            : 'Gemini 3.8 Flash 正在全量深度审查卷宗…'),
+            ? `正在提取流水明细，已读取约 ${lastCapturedCount} 笔…`
+            : '正在逐页识别卷宗内容…'),
           totalTransactions: payload.totalTransactions || lastCapturedCount,
           percent: lastPercent,
           currentBank: payload.currentBank,
@@ -114,8 +114,8 @@ export async function parsePdfWithGemini(
         }
         // 如果已经捕获到交易明细，提示文案保留提取状态，不被保活心跳覆盖倒退
         const displayStatus = lastCapturedCount > 0
-          ? `Gemini 3.8 Flash 正在提取流水明细，已实时捕获 ${lastCapturedCount} 笔 (耗时 ${payload.secondsElapsed || 0}s)…`
-          : (payload.statusText || `Gemini 3.8 Flash 正在全量深度审查卷宗 (已耗时 ${payload.secondsElapsed || 0}s)…`);
+          ? `正在提取流水明细，已读取约 ${lastCapturedCount} 笔（已用时 ${payload.secondsElapsed || 0} 秒）…`
+          : (payload.statusText || `正在逐页识别卷宗内容（已用时 ${payload.secondsElapsed || 0} 秒）…`);
 
         onProgress?.({
           statusText: displayStatus,
@@ -133,7 +133,7 @@ export async function parsePdfWithGemini(
         });
         completeResult = payload;
       } else if (payload.type === 'error') {
-        serverError = payload.message || 'Gemini 解析服务返回异常';
+        serverError = payload.message || '智能识别服务返回异常';
       }
     } catch {
       // 容错单个 SSE 帧格式波动
@@ -165,7 +165,7 @@ export async function parsePdfWithGemini(
   }
 
   if (!completeResult || !Array.isArray(completeResult.transactions)) {
-    throw new Error('Gemini 3.8 Flash 未能返回有效结构化流水数据，请检查文档是否清晰或重新上传');
+    throw new Error('智能识别服务未返回有效的结构化结果，请检查文档是否清晰后重试');
   }
 
   return {

@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { CaseRecord, listSavedCases, saveCaseRecord, deleteCaseRecord, exportCaseBackupJson, importCaseBackupJson } from '../store/caseStore';
+import { deleteSourceDocumentsForCase } from '../store/sourceDocumentStore';
 import { 
   FolderPlus, 
   Search, 
@@ -59,6 +60,12 @@ export const CaseManagerModal: React.FC<CaseManagerModalProps> = ({
     e.stopPropagation();
     if (window.confirm('确定要删除该案件及全部流水记录吗？此操作无法撤销。')) {
       await deleteCaseRecord(caseId);
+      await deleteSourceDocumentsForCase(caseId);
+      if (caseId === currentCaseId) {
+        onNewCase();
+        onClose();
+        return;
+      }
       await loadCases();
     }
   };
@@ -101,7 +108,7 @@ export const CaseManagerModal: React.FC<CaseManagerModalProps> = ({
             </div>
             <div>
               <h2 className="text-lg font-bold text-slate-900">案件工作台管理中心</h2>
-              <p className="text-xs text-slate-400">本地持久化存储，支持多案件切换与备份导出</p>
+              <p className="text-xs text-slate-400">本地持久化存储；JSON 备份不包含原始 PDF，请另行保管原件</p>
             </div>
           </div>
 
@@ -217,7 +224,7 @@ export const CaseManagerModal: React.FC<CaseManagerModalProps> = ({
                     <button
                       onClick={e => handleExportBackup(e, c)}
                       className="p-2 rounded-xl text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition"
-                      title="导出此案件备份 JSON"
+                      title="导出案件数据备份（不含原始 PDF）"
                     >
                       <Download className="w-4 h-4" />
                     </button>

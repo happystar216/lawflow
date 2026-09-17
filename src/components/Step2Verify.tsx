@@ -132,9 +132,13 @@ export const Step2Verify: React.FC<Step2Props> = ({
     [accounts, transactions],
   );
   const pageLevelIssueGroups = reviewQueueGroups.filter((group) =>
-    Boolean(group.pageNumber) && group.issues.some((issue) => !isTransactionLevelIssue(issue)),
+    Boolean(group.pageNumber) && group.issues.some((issue) => issue.severity === "REQUIRED"),
   );
-  const documentAdvisoryGroups = reviewQueueGroups.filter((group) => !group.pageNumber);
+  const documentAdvisoryGroups = reviewQueueGroups.filter((group) => (
+    !group.pageNumber
+    || (group.issues.some(issue => issue.severity === "ADVISORY")
+      && !group.issues.some(issue => issue.severity === "REQUIRED"))
+  ));
   const pendingReviewGroups = reviewQueueGroups.filter((group) =>
     group.issues.some(isOutstandingRequired),
   );
@@ -560,6 +564,8 @@ export const Step2Verify: React.FC<Step2Props> = ({
           </div>
           <div className="flex gap-2 overflow-x-auto mt-3 pb-1">
             {pageLevelIssueGroups.map((group) => {
+              const requiredIssueCount = group.issues.filter(issue => issue.severity === "REQUIRED").length;
+              const advisoryIssueCount = group.issues.filter(issue => issue.severity === "ADVISORY").length;
               const pendingIssue =
                 group.issues.find(
                   (issue) =>
@@ -581,7 +587,8 @@ export const Step2Verify: React.FC<Step2Props> = ({
                     </span>
                   </div>
                   <div className="text-xs font-semibold text-slate-800 mt-1">
-                    本页共 {group.issues.length} 个核对问题
+                    本页共 {requiredIssueCount} 个核对问题
+                    {advisoryIssueCount > 0 ? ` · ${advisoryIssueCount} 项参考提示` : ""}
                   </div>
                   <div className="text-[11px] text-slate-500 mt-1 line-clamp-2">
                     {group.issues.map((issue) => issue.title).join("；")}
@@ -1418,7 +1425,9 @@ function isTransactionLevelIssue(issue: EvidenceReviewIssue): boolean {
   return (
     issue.category === "LOW_CONFIDENCE" ||
     issue.category === "BALANCE_BREAK" ||
-    issue.category === "INVALID_AMOUNT"
+    issue.category === "INVALID_AMOUNT" ||
+    issue.category === "INVALID_DATE" ||
+    issue.category === "INVALID_DIRECTION"
   );
 }
 
@@ -1478,11 +1487,13 @@ function buildReviewGroups(
 }
 
 function reviewGroupStatus(group: EvidenceReviewGroup): ReviewIssueStatus {
-  if (group.issues.some((issue) => issue.status === "PENDING"))
+  const requiredIssues = group.issues.filter(issue => issue.severity === "REQUIRED");
+  const statusIssues = requiredIssues.length ? requiredIssues : group.issues;
+  if (statusIssues.some((issue) => issue.status === "PENDING"))
     return "PENDING";
-  if (group.issues.some((issue) => issue.status === "UNRESOLVED"))
+  if (statusIssues.some((issue) => issue.status === "UNRESOLVED"))
     return "UNRESOLVED";
-  if (group.issues.some((issue) => issue.status === "CORRECTED"))
+  if (statusIssues.some((issue) => issue.status === "CORRECTED"))
     return "CORRECTED";
   return "CONFIRMED";
 }
