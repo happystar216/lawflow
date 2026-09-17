@@ -39,13 +39,13 @@ function buildGeminiDirectPrompt(options?: GeminiParseOptions): string {
 7. 忠实还原数字原样：仔细核验千分位逗号与每位数字（例如 “-4,000.00” 是 4000.00，注意区分首位点阵字形），按印刷字面原样输出，严禁自行心算凑数或编造虚假数字。
 8. 信用卡与特殊账单：如遇到透支余额为负数、按月打印的周期性利息还款或免收年费（发生额印为 0.00），均如实按原件印刷数值记录。
 9. pageChecks 必须逐页列出原件的每一页，包括空白页和非交易文书页；transactions 数量必须等于各交易页 transactionCount 之和。每个交易页必须从该页页眉独立读取本方 bankName、accountName、accountNumber，不得沿用上一页或下一页账号；无法确认时留空，不得猜测。同一页若表格逐行列出多个不同账号，pageChecks.accountNumber 留空，每笔 transactions.ac 必须填写该行自身账号，严禁用页级账号覆盖整页。
-10. 点阵打印表中的日期必须逐位读取完整的 8 位数字；同一账号的日期通常按表格物理行顺序排列，如年份突然倒退数年必须回看原图复核。发生额明确印为 0.00 的“结息”行必须输出 amt: 0，不得当作缺失值；“销户/清户”行必须读取完整的带符号发生额，并用相邻余额差复核是否漏掉中间数字。
+10. 点阵打印表中的日期必须逐位读取完整的 8 位数字；同一账号的日期通常按表格物理行顺序排列，如年份突然倒退数年必须回看原图复核。发生额明确印为 0.00 的“结息”行必须输出 amt: 0，不得当作缺失值；“销户/清户/冻结扣划/司法扣划”行必须读取完整的带符号发生额，并用相邻余额差复核是否漏掉中间数字。
 
 【输出格式】：严格输出标准 JSON，字段精简以避免超限：
 {
   "totalExtracted": 0,
   "pagesCovered": [],
-  "pageChecks": [{"pageNumber": 1, "transactionCount": 0, "pageType": "TRANSACTIONS|ACCOUNT_INFO|DOCUMENT|BLANK|UNKNOWN", "bankName": "该页页眉银行", "accountName": "该页页眉户名", "accountNumber": "该页页眉本方账号"}],
+  "pageChecks": [{"pageNumber": 1, "transactionCount": 0, "pageType": "TRANSACTIONS|ACCOUNT_INFO|DOCUMENT|BLANK|UNKNOWN", "bankName": "该页页眉银行", "accountName": "该页页眉户名", "accountNumber": "单一账号页的本方账号，多账号页留空", "accountNumbers": ["按页面物理顺序列出本页全部本方账号"]}],
   "transactions": [
     {
       "p": 原件页码数字,
@@ -245,14 +245,17 @@ export async function parsePdfWithGeminiStream(
   }
 
   const expectedHolder = options?.respondentName?.trim() || '';
-  const pageIdentities = new Map<number, { bankName: string; accountName: string; accountNumber: string }>();
+  const pageIdentities = new Map<number, { bankName: string; accountName: string; accountNumber: string; accountNumbers: string[] }>();
   for (const check of Array.isArray(parsedResult.pageChecks) ? parsedResult.pageChecks : []) {
     const pageNumber = Number(check?.pageNumber);
     if (!Number.isInteger(pageNumber) || pageNumber < 1) continue;
     pageIdentities.set(pageNumber, {
       bankName: String(check?.bankName || '').trim(),
       accountName: String(check?.accountName || '').trim(),
-      accountNumber: String(check?.accountNumber || '').replace(/\s+/g, '')
+      accountNumber: normalizeExtractedAccountNumber(check?.accountNumber),
+      accountNumbers: [...new Set<string>((Array.isArray(check?.accountNumbers) ? check.accountNumbers as unknown[] : [])
+        .map((value: unknown) => normalizeExtractedAccountNumber(value))
+        .filter(isReliableExtractedAccountNumber))]
     });
   }
 
@@ -269,6 +272,7 @@ export async function parsePdfWithGeminiStream(
     accounts.add(accountNumber);
     transactionAccountsByPage.set(pageNumber, accounts);
   }
+  const consolidatedPageResolution = resolveConsolidatedPageAccounts(rawTxList, pageIdentities);
 
   const rawTransactions = rawTxList.map((tx: any, idx: number) => {
     const rawHolder = String(tx.holder || '').trim();
@@ -283,9 +287,10 @@ export async function parsePdfWithGeminiStream(
     const pageIdentity = pageIdentities.get(rawPageNumber);
     const rowAccountNumber = normalizeExtractedAccountNumber(tx.ac);
     const isMultiAccountPage = (transactionAccountsByPage.get(rawPageNumber)?.size || 0) > 1;
-    const resolvedAccountNumber = isMultiAccountPage && isReliableExtractedAccountNumber(rowAccountNumber)
-      ? rowAccountNumber
-      : pageIdentity?.accountNumber || rowAccountNumber;
+    const resolvedAccountNumber = consolidatedPageResolution.accountByTransactionIndex.get(idx)
+      || (isMultiAccountPage && isReliableExtractedAccountNumber(rowAccountNumber)
+        ? rowAccountNumber
+        : pageIdentity?.accountNumber || rowAccountNumber);
     const dataQualityIssues: Array<'INVALID_DATE' | 'INVALID_AMOUNT' | 'UNKNOWN_DIRECTION'> = [];
     if (!transactionTime) dataQualityIssues.push('INVALID_DATE');
     if (!Number.isFinite(rawAmount) || amount <= 0) dataQualityIssues.push('INVALID_AMOUNT');
@@ -334,6 +339,7 @@ export async function parsePdfWithGeminiStream(
     && pageChecks.every((item: any) => Number(item?.transactionCount) === 0);
   const warnings = [
     '智能识别结果须由律师对照原件复核',
+    ...consolidatedPageResolution.warnings,
     ...(transactions.length === 0
       ? [allCheckedPagesReportZero && missingPages.length === 0
         ? '原件各页均未识别到交易明细；请确认所选查询期间是否确无流水'
@@ -453,6 +459,72 @@ export async function parsePdfWithGeminiStream(
 
 function normalizeExtractedAccountNumber(value: unknown): string {
   return String(value || '').replace(/[\s\-_—–·•]/g, '');
+}
+
+function resolveConsolidatedPageAccounts(
+  rawTransactions: any[],
+  pageIdentities: Map<number, { accountNumber: string; accountNumbers: string[] }>
+): { accountByTransactionIndex: Map<number, string>; warnings: string[] } {
+  const accountByTransactionIndex = new Map<number, string>();
+  const warnings: string[] = [];
+  const byPage = new Map<number, Array<{ transaction: any; index: number }>>();
+  rawTransactions.forEach((transaction, index) => {
+    const pageNumber = Number.parseInt(String(transaction?.p || ''), 10);
+    if (!Number.isInteger(pageNumber) || pageNumber < 1) return;
+    byPage.set(pageNumber, [...(byPage.get(pageNumber) || []), { transaction, index }]);
+  });
+
+  for (const [pageNumber, entries] of byPage) {
+    const rowAccounts = [...new Set(entries
+      .map(entry => normalizeExtractedAccountNumber(entry.transaction?.ac))
+      .filter(isReliableExtractedAccountNumber))];
+    if (rowAccounts.length > 1) continue;
+
+    const segments: Array<typeof entries> = [];
+    let current: typeof entries = [];
+    for (const entry of entries) {
+      if (current.length && isLikelyConsolidatedAccountBoundary(current[current.length - 1].transaction, entry.transaction)) {
+        segments.push(current);
+        current = [];
+      }
+      current.push(entry);
+    }
+    if (current.length) segments.push(current);
+    if (segments.length <= 1) continue;
+
+    const identity = pageIdentities.get(pageNumber);
+    const candidates = [...new Set([
+      ...(identity?.accountNumbers || []),
+      ...(isReliableExtractedAccountNumber(identity?.accountNumber || '') ? [identity!.accountNumber] : [])
+    ])];
+    const hasCompleteAccountList = candidates.length === segments.length;
+    segments.forEach((segment, segmentIndex) => {
+      const accountNumber = hasCompleteAccountList
+        ? candidates[segmentIndex]
+        : segmentIndex === 0 && rowAccounts[0]
+          ? rowAccounts[0]
+          : `待核对账号-第${pageNumber}页-分组${segmentIndex + 1}`;
+      segment.forEach(entry => accountByTransactionIndex.set(entry.index, accountNumber));
+    });
+    if (!hasCompleteAccountList) {
+      warnings.push(`第 ${pageNumber} 页检测到 ${segments.length} 组余额彼此不连续的账号段，逐笔账号未可靠读取；系统已分组保留，请对照原件核对账号`);
+    }
+  }
+
+  return { accountByTransactionIndex, warnings };
+}
+
+function isLikelyConsolidatedAccountBoundary(previous: any, current: any): boolean {
+  const previousBalance = Number(previous?.bal);
+  const currentBalance = Number(current?.bal);
+  const amount = Math.abs(Number(current?.amt));
+  const direction = normalizeGeminiDirection(current?.dir);
+  if (![previousBalance, currentBalance, amount].every(Number.isFinite) || direction === 'UNKNOWN') return false;
+  const text = `${previous?.sm || ''} ${current?.sm || ''}`;
+  if (!/结息|利息结算|计息/.test(text)) return false;
+  const expectedBalance = previousBalance + (direction === 'IN' ? amount : -amount);
+  const gap = Math.abs(expectedBalance - currentBalance);
+  return gap >= Math.max(1000, amount * 20);
 }
 
 function isReliableExtractedAccountNumber(value: string): boolean {

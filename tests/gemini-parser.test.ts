@@ -114,6 +114,48 @@ test('Gemini parser preserves row accounts on a consolidated page containing mul
   }
 });
 
+test('Gemini parser splits consolidated balance groups when the model repeats one account', async () => {
+  const originalFetch = globalThis.fetch;
+  const repeatedAccount = '255301100017262';
+  const modelJson = JSON.stringify({
+    totalExtracted: 6,
+    pagesCovered: [3],
+    pageChecks: [{
+      pageNumber: 3,
+      transactionCount: 6,
+      pageType: 'TRANSACTIONS',
+      bankName: '四川农信',
+      accountName: '胡艳红',
+      accountNumber: '',
+      accountNumbers: ['255301100017262', '240101100859012', '255301100006216']
+    }],
+    transactions: [
+      { p: 3, bk: '四川农信', ac: repeatedAccount, tm: '2023-06-21', dir: 'IN', amt: 0.03, bal: 57.48, sm: '结息' },
+      { p: 3, bk: '四川农信', ac: repeatedAccount, tm: '2023-09-21', dir: 'IN', amt: 0.03, bal: 57.51, sm: '结息' },
+      { p: 3, bk: '四川农信', ac: repeatedAccount, tm: '2023-06-21', dir: 'IN', amt: 16.08, bal: 31477.52, sm: '结息' },
+      { p: 3, bk: '四川农信', ac: repeatedAccount, tm: '2023-09-21', dir: 'IN', amt: 15.92, bal: 31493.44, sm: '结息' },
+      { p: 3, bk: '四川农信', ac: repeatedAccount, tm: '2023-06-21', dir: 'IN', amt: 2.76, bal: 5440, sm: '结息' },
+      { p: 3, bk: '四川农信', ac: repeatedAccount, tm: '2023-09-21', dir: 'IN', amt: 2.75, bal: 5442.75, sm: '结息' }
+    ]
+  });
+  globalThis.fetch = async () => new Response(`data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: modelJson }] } }] })}\n\n`);
+  try {
+    const result = await parsePdfWithGeminiStream(
+      new File(['pdf'], 'repeated-account.pdf', { type: 'application/pdf' }),
+      { GEMINI_API_KEY: 'test' }, undefined, undefined, { totalPages: 3 }
+    );
+    assert.deepEqual(result.transactions.map(transaction => transaction.accountNumber), [
+      '255301100017262', '255301100017262',
+      '240101100859012', '240101100859012',
+      '255301100006216', '255301100006216'
+    ]);
+    assert.equal(result.accounts.length, 3);
+    assert.equal(result.warnings.some(warning => /逐笔账号未可靠读取/.test(warning)), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('Gemini parser preserves a visible account result when the document has no transactions', async () => {
   const originalFetch = globalThis.fetch;
   const modelJson = JSON.stringify({

@@ -495,6 +495,42 @@ test('zero-interest rows with unchanged balances are valid while a truncated clo
   assert.ok(audit.difference < 0.01);
 });
 
+test('normalizer repairs a misread judicial freeze deduction from adjacent balances', () => {
+  const accountNumber = '255301100006216';
+  const rows: StandardTransaction[] = [
+    {
+      ...makeTx('before-freeze', 3, 1, '2024-12-21', '2024-12-21', 'IN', 1.38, 5456.73),
+      accountNumber, bankName: '四川农信', summary: '结息'
+    },
+    {
+      ...makeTx('freeze-deduction', 3, 2, '2025-02-25', '2025-02-25', 'OUT', 197.97, 3.47),
+      accountNumber, bankName: '四川农信', summary: '冻结扣划',
+      rawText: '2025-02-25 OUT 197.97 冻结扣划'
+    },
+    {
+      ...makeTx('after-freeze', 3, 3, '2025-03-21', '2025-03-21', 'IN', 1, 4.47),
+      accountNumber, bankName: '四川农信', summary: '结息'
+    }
+  ];
+
+  const normalized = normalizeRecognizedData([{
+    ...account,
+    accountNumber,
+    bankName: '四川农信',
+    startBalance: 5455.35,
+    endBalance: 4.47,
+    parseWarnings: []
+  }], rows);
+  const deduction = normalized.transactions.find(transaction => transaction.id === 'freeze-deduction')!;
+
+  assert.equal(deduction.originalAmount, 197.97);
+  assert.equal(deduction.amount, 5453.26);
+  assert.equal(deduction.reviewStatus, 'CORRECTED');
+  assert.match(deduction.correctionReason || '', /相邻余额关系/);
+  const audit = auditAccountBalance(normalized.accounts[0], normalized.transactions);
+  assert.ok(audit.difference < 0.01);
+});
+
 test('normalizer restores omitted settlement amounts and obvious OCR years from physical ledger order', () => {
   const accountNumber = '255301100006216';
   const settlement = (

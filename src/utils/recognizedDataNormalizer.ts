@@ -220,11 +220,14 @@ function repairPeriodicSettlementRows(transactions: StandardTransaction[]): Stan
 
     for (let index = 0; index < ordered.length; index++) {
       const transaction = ordered[index];
+      const previous = ordered[index - 1];
+      if (previous && isLikelyConsolidatedAccountBoundary(previous, transaction)) {
+        previousDated = undefined;
+      }
       if (isPeriodicSettlement(transaction) && previousDated && dateDirection !== 0) {
         repairSettlementYear(transaction, previousDated, dateDirection);
       }
 
-      const previous = ordered[index - 1];
       if (previous && isPeriodicSettlement(transaction)) {
         repairSettlementAmount(transaction, previous);
       }
@@ -239,6 +242,18 @@ function repairPeriodicSettlementRows(transactions: StandardTransaction[]): Stan
 function isPeriodicSettlement(transaction: StandardTransaction): boolean {
   const text = `${transaction.summary || ''} ${transaction.counterpartyName || ''} ${transaction.rawText || ''}`;
   return /结息|利息结算|计息/.test(text);
+}
+
+function isLikelyConsolidatedAccountBoundary(
+  previous: StandardTransaction,
+  current: StandardTransaction
+): boolean {
+  if (!isPeriodicSettlement(previous) || !isPeriodicSettlement(current)) return false;
+  if (previous.balanceAvailable === false || current.balanceAvailable === false) return false;
+  if (previous.balance == null || current.balance == null || current.direction === 'UNKNOWN') return false;
+  const expectedBalance = previous.balance + (current.direction === 'IN' ? current.amount : -current.amount);
+  const gap = Math.abs(expectedBalance - current.balance);
+  return gap >= Math.max(1000, Math.abs(current.amount) * 20);
 }
 
 function inferPhysicalDateDirection(transactions: StandardTransaction[]): -1 | 0 | 1 {
@@ -995,7 +1010,7 @@ export function healOcrBalanceAndAmountDiscrepancies(transactions: StandardTrans
           const currAmtStr = curr.amount.toFixed(2);
           const transactionText = `${curr.summary || ''} ${curr.counterpartyName || ''} ${curr.rawText || ''}`;
           const isAccountClosureSettlement = curr.direction === 'OUT'
-            && /销户|清户|销账|结清/.test(transactionText)
+            && /销户|清户|销账|结清|冻结扣划|司法扣划|法院扣划/.test(transactionText)
             && impliedAmt >= curr.amount
             && diff >= 1;
 
