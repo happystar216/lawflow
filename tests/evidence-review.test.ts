@@ -486,11 +486,62 @@ test('zero-interest rows with unchanged balances are valid while a truncated clo
   assert.equal(closure.amount, 5453.26);
   assert.equal(closure.reviewStatus, 'CORRECTED');
   assert.deepEqual(normalized.transactions.find(item => item.id === 'zero-1')!.dataQualityIssues, []);
+  assert.equal(normalized.transactions.find(item => item.id === 'zero-1')!.reviewStatus, 'AUTO_PASSED');
+  assert.equal(normalized.transactions.find(item => item.id === 'zero-2')!.reviewStatus, 'AUTO_PASSED');
 
   const issues = buildEvidenceReviewIssues(normalized.accounts[0], normalized.transactions);
   assert.equal(issues.some(issue => issue.category === 'INVALID_AMOUNT'), false);
   const audit = auditAccountBalance(normalized.accounts[0], normalized.transactions);
   assert.ok(audit.difference < 0.01);
+});
+
+test('normalizer restores omitted settlement amounts and obvious OCR years from physical ledger order', () => {
+  const accountNumber = '255301100006216';
+  const settlement = (
+    id: string, row: number, date: string, amount: number, balance: number,
+    issues: StandardTransaction['dataQualityIssues'] = []
+  ): StandardTransaction => ({
+    ...makeTx(id, 3, row, date, date, 'IN', amount, balance),
+    accountNumber,
+    bankName: '四川农信',
+    summary: '结息',
+    rawText: `${date.replace(/-/g, '')} IN ${amount || ''} 结息`,
+    extractionConfidence: issues.length ? 0.4 : 0.9,
+    reviewStatus: issues.length ? 'PENDING' : 'AUTO_PASSED',
+    dataQualityIssues: issues
+  });
+  const rows = [
+    settlement('q1', 1, '2023-06-21', 2, 100),
+    settlement('q2', 2, '2023-09-21', 2, 102),
+    settlement('q3', 3, '2023-12-21', 2, 104),
+    settlement('q4', 4, '2024-03-21', 2, 106),
+    settlement('bad-year-1', 5, '2021-06-21', 0, 108, ['INVALID_AMOUNT']),
+    settlement('bad-year-2', 6, '2020-09-21', 0, 110, ['INVALID_AMOUNT']),
+    settlement('bad-year-zero', 7, '2020-12-21', 0, 110, ['INVALID_AMOUNT'])
+  ];
+
+  const normalized = normalizeRecognizedData([{
+    ...account,
+    accountNumber,
+    bankName: '四川农信',
+    parseWarnings: []
+  }], rows);
+  const byId = new Map(normalized.transactions.map(transaction => [transaction.id, transaction]));
+
+  assert.equal(byId.get('bad-year-1')?.transactionDate, '2024-06-21');
+  assert.equal(byId.get('bad-year-2')?.transactionDate, '2024-09-21');
+  assert.equal(byId.get('bad-year-zero')?.transactionDate, '2024-12-21');
+  assert.equal(byId.get('bad-year-1')?.amount, 2);
+  assert.equal(byId.get('bad-year-2')?.amount, 2);
+  assert.equal(byId.get('bad-year-zero')?.amount, 0);
+  assert.equal(byId.get('bad-year-1')?.reviewStatus, 'AUTO_PASSED');
+  assert.equal(byId.get('bad-year-2')?.reviewStatus, 'AUTO_PASSED');
+  assert.equal(byId.get('bad-year-zero')?.reviewStatus, 'AUTO_PASSED');
+  assert.deepEqual(byId.get('bad-year-1')?.dataQualityIssues, []);
+
+  const issues = buildEvidenceReviewIssues(normalized.accounts[0], normalized.transactions);
+  assert.equal(issues.some(issue => issue.category === 'LOW_CONFIDENCE'), false);
+  assert.equal(issues.some(issue => issue.category === 'INVALID_AMOUNT'), false);
 });
 
 test('normalizer restores legacy balance-derived amount changes on credit card statements', () => {

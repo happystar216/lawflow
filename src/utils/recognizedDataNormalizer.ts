@@ -17,14 +17,15 @@ export function normalizeRecognizedData(
   const preparedTransactions = restoreUnsupportedBalanceCorrections(inputTransactions.map(upgradeLegacyGeminiReviewStatus));
   const stabilized = healSummaryOverriddenAmounts(stabilizePageAccountIdentities(preparedTransactions));
   const { transactions: deduped, mergedPagesByAccount } = deduplicateTransactions(stabilized);
-  const calibrated = calibrateDirectionsByBalanceMath(deduped);
+  const settlementRepaired = repairPeriodicSettlementRows(deduped);
+  const calibrated = calibrateDirectionsByBalanceMath(settlementRepaired);
   const transactions = healOcrBalanceAndAmountDiscrepancies(calibrated);
   for (const transaction of transactions) {
     const isFeeWaiverRow = isFeeWaiver(transaction);
     const isConfirmedZeroSettlement = isBalanceConfirmedZeroSettlement(transaction, transactions);
     if ((isFeeWaiverRow || isConfirmedZeroSettlement) && transaction.dataQualityIssues) {
       transaction.dataQualityIssues = transaction.dataQualityIssues.filter(q => q !== 'INVALID_AMOUNT');
-      if (isFeeWaiverRow && !transaction.dataQualityIssues.length && transaction.reviewStatus === 'PENDING') {
+      if (!transaction.dataQualityIssues.length && transaction.reviewStatus === 'PENDING') {
         transaction.extractionConfidence = Math.max(transaction.extractionConfidence ?? 0, 0.9);
         transaction.reviewStatus = 'AUTO_PASSED';
       }
@@ -188,6 +189,152 @@ export function normalizeRecognizedData(
     });
   }
   return { accounts, transactions };
+}
+
+/**
+ * Repairs highly constrained interest-settlement OCR failures without relying on
+ * bank names or document-specific row numbers:
+ *
+ * 1. A syntactically valid but out-of-sequence year is repaired only when the
+ *    statement has a clear physical date direction and the same month/day can
+ *    be moved into that direction by changing the year alone.
+ * 2. A missing settlement amount is restored only when two adjacent physical
+ *    rows for the same account expose balances whose exact delta agrees with
+ *    the extracted IN/OUT direction.
+ *
+ * The original OCR text remains in rawText and the correction reason is kept
+ * for traceability, while deterministic rows no longer create blanket review
+ * tasks merely because the amount field was blank.
+ */
+function repairPeriodicSettlementRows(transactions: StandardTransaction[]): StandardTransaction[] {
+  const byAccount = new Map<string, StandardTransaction[]>();
+  for (const transaction of transactions) {
+    const key = accountIdentityKey(transaction);
+    byAccount.set(key, [...(byAccount.get(key) || []), transaction]);
+  }
+
+  for (const accountTransactions of byAccount.values()) {
+    const ordered = [...accountTransactions].sort(compareSourceOrder);
+    const dateDirection = inferPhysicalDateDirection(ordered);
+    let previousDated: StandardTransaction | undefined;
+
+    for (let index = 0; index < ordered.length; index++) {
+      const transaction = ordered[index];
+      if (isPeriodicSettlement(transaction) && previousDated && dateDirection !== 0) {
+        repairSettlementYear(transaction, previousDated, dateDirection);
+      }
+
+      const previous = ordered[index - 1];
+      if (previous && isPeriodicSettlement(transaction)) {
+        repairSettlementAmount(transaction, previous);
+      }
+
+      if (parseIsoDate(transaction.transactionDate)) previousDated = transaction;
+    }
+  }
+
+  return transactions;
+}
+
+function isPeriodicSettlement(transaction: StandardTransaction): boolean {
+  const text = `${transaction.summary || ''} ${transaction.counterpartyName || ''} ${transaction.rawText || ''}`;
+  return /结息|利息结算|计息/.test(text);
+}
+
+function inferPhysicalDateDirection(transactions: StandardTransaction[]): -1 | 0 | 1 {
+  let forward = 0;
+  let reverse = 0;
+  for (let index = 1; index < transactions.length; index++) {
+    const previous = parseIsoDate(transactions[index - 1].transactionDate);
+    const current = parseIsoDate(transactions[index].transactionDate);
+    if (!previous || !current) continue;
+    const yearGap = Math.abs(current.getUTCFullYear() - previous.getUTCFullYear());
+    if (yearGap >= 2) continue; // likely OCR year damage; do not let it vote on orientation
+    if (current.getTime() > previous.getTime()) forward++;
+    else if (current.getTime() < previous.getTime()) reverse++;
+  }
+  if (forward >= reverse + 2) return 1;
+  if (reverse >= forward + 2) return -1;
+  return 0;
+}
+
+function repairSettlementYear(
+  transaction: StandardTransaction,
+  previous: StandardTransaction,
+  direction: -1 | 1
+): void {
+  const currentDate = parseIsoDate(transaction.transactionDate);
+  const previousDate = parseIsoDate(previous.transactionDate);
+  if (!currentDate || !previousDate) return;
+  const alreadyOrdered = direction === 1
+    ? currentDate.getTime() > previousDate.getTime()
+    : currentDate.getTime() < previousDate.getTime();
+  if (alreadyOrdered) return;
+  if (Math.abs(currentDate.getUTCFullYear() - previousDate.getUTCFullYear()) < 2) return;
+
+  const month = currentDate.getUTCMonth();
+  const day = currentDate.getUTCDate();
+  let candidateYear = previousDate.getUTCFullYear();
+  let candidate = new Date(Date.UTC(candidateYear, month, day));
+  if (direction === 1 && candidate.getTime() <= previousDate.getTime()) {
+    candidateYear++;
+    candidate = new Date(Date.UTC(candidateYear, month, day));
+  } else if (direction === -1 && candidate.getTime() >= previousDate.getTime()) {
+    candidateYear--;
+    candidate = new Date(Date.UTC(candidateYear, month, day));
+  }
+  if (candidate.getUTCMonth() !== month || candidate.getUTCDate() !== day) return;
+  if (Math.abs(candidateYear - currentDate.getUTCFullYear()) < 2) return;
+
+  const repairedDate = isoDate(candidate);
+  const timeSuffix = transaction.transactionTime.match(/(?:T|\s)(\d{2}:\d{2}(?::\d{2})?)$/)?.[1];
+  transaction.transactionDate = repairedDate;
+  transaction.transactionTime = timeSuffix ? `${repairedDate} ${timeSuffix}` : repairedDate;
+  transaction.correctionReason = appendCorrectionReason(
+    transaction.correctionReason,
+    '系统依据同账户原始行日期顺序修正结息年份'
+  );
+}
+
+function repairSettlementAmount(transaction: StandardTransaction, previous: StandardTransaction): void {
+  const hasInvalidAmount = transaction.amount <= 0
+    || Boolean(transaction.dataQualityIssues?.includes('INVALID_AMOUNT'));
+  if (!hasInvalidAmount || transaction.direction === 'UNKNOWN') return;
+  if (transaction.balanceAvailable === false || previous.balanceAvailable === false) return;
+  if (transaction.balance == null || previous.balance == null) return;
+
+  const signedDelta = Math.round((transaction.balance - previous.balance) * 100) / 100;
+  const directionMatches = transaction.direction === 'IN' ? signedDelta > 0 : signedDelta < 0;
+  if (!directionMatches) return;
+  const impliedAmount = Math.abs(signedDelta);
+  if (!Number.isFinite(impliedAmount) || impliedAmount <= 0) return;
+
+  if (transaction.originalAmount === undefined) transaction.originalAmount = transaction.amount;
+  transaction.amount = impliedAmount;
+  transaction.dataQualityIssues = (transaction.dataQualityIssues || []).filter(issue => issue !== 'INVALID_AMOUNT');
+  transaction.correctionReason = appendCorrectionReason(
+    transaction.correctionReason,
+    '系统依据同账户相邻原始行余额精确恢复结息金额'
+  );
+  if (!transaction.dataQualityIssues.length) {
+    transaction.extractionConfidence = Math.max(transaction.extractionConfidence ?? 0, 0.9);
+    transaction.reviewStatus = 'AUTO_PASSED';
+  }
+}
+
+function parseIsoDate(value?: string): Date | undefined {
+  if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return undefined;
+  const parsed = new Date(`${value}T00:00:00Z`);
+  return Number.isNaN(parsed.getTime()) || isoDate(parsed) !== value ? undefined : parsed;
+}
+
+function isoDate(value: Date): string {
+  return value.toISOString().slice(0, 10);
+}
+
+function appendCorrectionReason(current: string | undefined, reason: string): string {
+  if (!current) return reason;
+  return current.includes(reason) ? current : `${current}；${reason}`;
 }
 
 export function cleanAccountHolderName(value: string): string {
