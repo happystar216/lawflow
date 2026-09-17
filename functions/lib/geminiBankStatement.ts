@@ -38,7 +38,7 @@ function buildGeminiDirectPrompt(options?: GeminiParseOptions): string {
 6. 严格按物理列位对齐提取：摘要栏经常包含合同还款额或代扣协议文本（例如包含 "@2640.00@6@1@" 等），严禁提取摘要中的文本数值代替实际发生额！必须严格提取表格中【交易金额】一列印刷的真实发生额数值。
 7. 忠实还原数字原样：仔细核验千分位逗号与每位数字（例如 “-4,000.00” 是 4000.00，注意区分首位点阵字形），按印刷字面原样输出，严禁自行心算凑数或编造虚假数字。
 8. 信用卡与特殊账单：如遇到透支余额为负数、按月打印的周期性利息还款或免收年费（发生额印为 0.00），均如实按原件印刷数值记录。
-9. pageChecks 必须逐页列出原件的每一页，包括空白页和非交易文书页；transactions 数量必须等于各交易页 transactionCount 之和。每个交易页必须从该页页眉独立读取本方 bankName、accountName、accountNumber，不得沿用上一页或下一页账号；无法确认时留空，不得猜测。
+9. pageChecks 必须逐页列出原件的每一页，包括空白页和非交易文书页；transactions 数量必须等于各交易页 transactionCount 之和。每个交易页必须从该页页眉独立读取本方 bankName、accountName、accountNumber，不得沿用上一页或下一页账号；无法确认时留空，不得猜测。同一页若表格逐行列出多个不同账号，pageChecks.accountNumber 留空，每笔 transactions.ac 必须填写该行自身账号，严禁用页级账号覆盖整页。
 10. 点阵打印表中的日期必须逐位读取完整的 8 位数字；同一账号的日期通常按表格物理行顺序排列，如年份突然倒退数年必须回看原图复核。发生额明确印为 0.00 的“结息”行必须输出 amt: 0，不得当作缺失值；“销户/清户”行必须读取完整的带符号发生额，并用相邻余额差复核是否漏掉中间数字。
 
 【输出格式】：严格输出标准 JSON，字段精简以避免超限：
@@ -256,6 +256,20 @@ export async function parsePdfWithGeminiStream(
     });
   }
 
+  // A page-level identity is useful for ordinary single-account statements and
+  // protects against a model carrying the previous page's account forward. It
+  // must not overwrite row-level accounts on consolidated ledgers where one
+  // physical page contains several distinct accounts.
+  const transactionAccountsByPage = new Map<number, Set<string>>();
+  for (const tx of rawTxList) {
+    const pageNumber = Number.parseInt(String(tx?.p || ''), 10);
+    const accountNumber = normalizeExtractedAccountNumber(tx?.ac);
+    if (!Number.isInteger(pageNumber) || pageNumber < 1 || !isReliableExtractedAccountNumber(accountNumber)) continue;
+    const accounts = transactionAccountsByPage.get(pageNumber) || new Set<string>();
+    accounts.add(accountNumber);
+    transactionAccountsByPage.set(pageNumber, accounts);
+  }
+
   const rawTransactions = rawTxList.map((tx: any, idx: number) => {
     const rawHolder = String(tx.holder || '').trim();
     const resolvedAccountName = rawHolder || expectedHolder || '被执行人';
@@ -267,13 +281,18 @@ export async function parsePdfWithGeminiStream(
     const balance = rawBalance !== null && Number.isFinite(rawBalance) ? rawBalance : null;
     const rawPageNumber = Number.parseInt(String(tx.p || ''), 10);
     const pageIdentity = pageIdentities.get(rawPageNumber);
+    const rowAccountNumber = normalizeExtractedAccountNumber(tx.ac);
+    const isMultiAccountPage = (transactionAccountsByPage.get(rawPageNumber)?.size || 0) > 1;
+    const resolvedAccountNumber = isMultiAccountPage && isReliableExtractedAccountNumber(rowAccountNumber)
+      ? rowAccountNumber
+      : pageIdentity?.accountNumber || rowAccountNumber;
     const dataQualityIssues: Array<'INVALID_DATE' | 'INVALID_AMOUNT' | 'UNKNOWN_DIRECTION'> = [];
     if (!transactionTime) dataQualityIssues.push('INVALID_DATE');
     if (!Number.isFinite(rawAmount) || amount <= 0) dataQualityIssues.push('INVALID_AMOUNT');
     if (direction === 'UNKNOWN') dataQualityIssues.push('UNKNOWN_DIRECTION');
     return {
       id: `TX_GEMINI_${idx + 1}`,
-      accountNumber: pageIdentity?.accountNumber || String(tx.ac || '').replace(/\s+/g, ''),
+      accountNumber: resolvedAccountNumber,
       accountName: pageIdentity?.accountName || resolvedAccountName,
       bankName: pageIdentity?.bankName || String(tx.bk || '商业银行'),
       transactionTime,
@@ -430,6 +449,14 @@ export async function parsePdfWithGeminiStream(
     warnings,
     countComplete: missingPages.length === 0 && pagesCovered.length === expectedPages
   };
+}
+
+function normalizeExtractedAccountNumber(value: unknown): string {
+  return String(value || '').replace(/[\s\-_—–·•]/g, '');
+}
+
+function isReliableExtractedAccountNumber(value: string): boolean {
+  return value.length >= 6 && !/未知|待核对|待确认|无账号/i.test(value);
 }
 
 function normalizeGeminiDirection(value: unknown): 'IN' | 'OUT' | 'UNKNOWN' {
