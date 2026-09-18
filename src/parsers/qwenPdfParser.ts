@@ -690,7 +690,7 @@ async function parsePdfDirectStream(
     totalPages: 128,
     percent: 5,
     totalTransactions: 0,
-    statusText: '正在连接智能解析云端引擎，准备直接流式提取…'
+    statusText: '正在连接识别服务，准备读取流水…'
   });
 
   const response = await fetch('/api/parse-bank-statement-stream', {

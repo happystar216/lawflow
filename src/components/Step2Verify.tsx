@@ -90,6 +90,9 @@ export const Step2Verify: React.FC<Step2Props> = ({
   const [selectedTransactionId, setSelectedTransactionId] = useState("");
   const [isReviewOpen, setIsReviewOpen] = useState(false);
   const [selectedRemovalIds, setSelectedRemovalIds] = useState<string[]>([]);
+  const [confirmationChecks, setConfirmationChecks] = useState<string[]>([]);
+  const [hasEditedReview, setHasEditedReview] = useState(false);
+  const [reviewedRowIds, setReviewedRowIds] = useState<string[]>([]);
 
   const selectedAccount =
     accounts.find(
@@ -115,6 +118,10 @@ export const Step2Verify: React.FC<Step2Props> = ({
   const affectedTransactions = affectedTransactionIds
     .map((id) => transactions.find((transaction) => transaction.id === id))
     .filter(Boolean) as StandardTransaction[];
+  const fieldIssueTransactionIds = new Set(selectedIssueGroup
+    .filter(issue => issue.severity === "REQUIRED" && isTransactionLevelIssue(issue))
+    .flatMap(issue => issue.transactionIds));
+  const fieldIssueTransactions = affectedTransactions.filter(transaction => fieldIssueTransactionIds.has(transaction.id));
   const allAccountIssues = useMemo(
     () =>
       accounts.flatMap((account) =>
@@ -143,6 +150,13 @@ export const Step2Verify: React.FC<Step2Props> = ({
     group.issues.some(isOutstandingRequired),
   );
   const pendingReviewCount = pendingReviewGroups.length;
+  const accountAuditMap = useMemo(() => new Map(
+    accounts.map(account => [accountIdentityKey(account), auditAccountBalance(account, transactions)]),
+  ), [accounts, transactions]);
+  const unbalancedAccounts = accounts.filter(account => {
+    const audit = accountAuditMap.get(accountIdentityKey(account));
+    return Boolean(audit?.isAuditable && !audit.isBalanced);
+  });
   const issuesByTransaction = useMemo(() => {
     const result = new Map<string, EvidenceReviewIssue[]>();
     for (const issue of allAccountIssues.filter(isTransactionLevelIssue))
@@ -164,6 +178,10 @@ export const Step2Verify: React.FC<Step2Props> = ({
     (selectedCountComparison
       ? Boolean(selectedIssue.pageNumber && affectedTransactions.length > 0)
       : Boolean(selectedIssue.pageNumber || selectedTransaction));
+  const confirmationItems = pageConfirmationItems(selectedIssueGroup, fieldIssueTransactions.length > 0);
+  const rowReviewComplete = fieldIssueTransactions.every(transaction => reviewedRowIds.includes(transaction.id));
+  const confirmationComplete = rowReviewComplete
+    && confirmationItems.every(item => confirmationChecks.includes(item));
 
   useEffect(() => {
     let cancelled = false;
@@ -188,6 +206,9 @@ export const Step2Verify: React.FC<Step2Props> = ({
     setShowAddForm(false);
     setDraft(emptyDraft());
     setSelectedRemovalIds([]);
+    setConfirmationChecks([]);
+    setHasEditedReview(false);
+    setReviewedRowIds([]);
   }, [selectedIssue?.id]);
 
   const displayedTransactions = transactions
@@ -309,6 +330,7 @@ export const Step2Verify: React.FC<Step2Props> = ({
         accountIdentityKey(account) === accountIdentityKey(selectedAccount)
           ? {
               ...account,
+              reviewIssues: preserveReviewIssues(account.reviewIssues || [], selectedIssueGroup),
               transactionCount: accountTransactions.length,
               totalIn: accountTransactions
                 .filter((transaction) => transaction.direction === "IN")
@@ -421,6 +443,7 @@ export const Step2Verify: React.FC<Step2Props> = ({
         ...transaction,
         [field]: value,
         reviewStatus: "CORRECTED" as const,
+        reviewedBy: "律师人工核对",
         reviewedAt: new Date().toISOString(),
       };
       if (field === "transactionTime")
@@ -436,13 +459,27 @@ export const Step2Verify: React.FC<Step2Props> = ({
       return next;
     });
     commitTransactions(updated);
-    if (selectedIssue && affectedTransactionIds.includes(transactionId))
-      saveIssueStatus(
-        selectedIssue,
-        "CORRECTED",
-        "已根据原始流水修正本页结构化数据",
-        updated,
-      );
+    if (selectedIssue && affectedTransactionIds.includes(transactionId)) {
+      setHasEditedReview(true);
+      setReviewedRowIds(current => current.filter(id => id !== transactionId));
+    }
+  };
+
+  const openFirstBalanceCheck = () => {
+    const priorityIssue = issues.find(issue => issue.category === "BALANCE_BREAK" && isOutstandingRequired(issue))
+      || issues.find(isOutstandingRequired);
+    if (priorityIssue && selectedAccount) {
+      openIssueReview(selectedAccount, priorityIssue);
+      return;
+    }
+    const suspiciousId = auditReport?.suspiciousRows[0]?.transactionId;
+    const suspiciousTransaction = transactions.find(transaction => transaction.id === suspiciousId);
+    if (suspiciousTransaction) {
+      openTransactionReview(suspiciousTransaction);
+      return;
+    }
+    setTransactionFilter("ALL");
+    document.getElementById("transaction-detail-table")?.scrollIntoView({ behavior: "smooth", block: "start" });
   };
 
   const addMissingTransaction = () => {
@@ -479,6 +516,7 @@ export const Step2Verify: React.FC<Step2Props> = ({
       extractionMethod: "MANUAL",
       extractionConfidence: 1,
       reviewStatus: "CORRECTED",
+      reviewedBy: "律师人工核对",
       reviewedAt: new Date().toISOString(),
       lawyerNote: "律师根据原始流水补录",
     };
@@ -496,13 +534,12 @@ export const Step2Verify: React.FC<Step2Props> = ({
   };
 
   const continueToNext = () => {
-    if (
-      allRequiredOutstanding.length > 0 &&
-      !window.confirm(
-        `仍有 ${pendingReviewGroups.length} 页尚未核对。继续后，这些问题会作为证据限制保留在分析中。是否继续？`,
-      )
-    )
-      return;
+    const outstanding: string[] = [];
+    if (allRequiredOutstanding.length > 0) outstanding.push(`${pendingReviewGroups.length} 页尚未人工核对`);
+    if (unbalancedAccounts.length > 0) outstanding.push(`${unbalancedAccounts.length} 个账户尚未平账`);
+    if (outstanding.length && !window.confirm(
+      `当前仍有${outstanding.join('，')}。继续后，这些事项会作为数据限制保留在分析和导出报告中。是否继续？`,
+    )) return;
     onNext();
   };
 
@@ -525,6 +562,21 @@ export const Step2Verify: React.FC<Step2Props> = ({
                 group.issues.some(isOutstandingRequired),
             ).length;
             const identity = accountIdentityKey(account);
+            const accountAudit = accountAuditMap.get(identity);
+            const isUnbalanced = Boolean(accountAudit?.isAuditable && !accountAudit.isBalanced);
+            const hasUnknownAccount = /待核对账号|待归属|未知账号/.test(account.accountNumber);
+            const badgeLabel = pending
+              ? `待核对 ${pending} 页`
+              : hasUnknownAccount
+                ? '账号待核对'
+                : isUnbalanced
+                  ? '未平账'
+                  : '人工核对完成';
+            const badgeClass = pending
+              ? 'bg-amber-400 text-amber-950'
+              : hasUnknownAccount || isUnbalanced
+                ? 'bg-rose-400 text-rose-950'
+                : 'bg-emerald-400 text-emerald-950';
             return (
               <button
                 key={identity}
@@ -539,9 +591,9 @@ export const Step2Verify: React.FC<Step2Props> = ({
                   {account.bankName}（{account.accountNumber.slice(-4)}）
                 </span>
                 <span
-                  className={`px-1.5 py-0.5 rounded-full text-[10px] ${pending ? "bg-amber-400 text-amber-950" : "bg-emerald-400 text-emerald-950"}`}
+                  className={`px-1.5 py-0.5 rounded-full text-[10px] ${badgeClass}`}
                 >
-                  {pending || "已核对"}
+                  {badgeLabel}
                 </span>
               </button>
             );
@@ -587,11 +639,11 @@ export const Step2Verify: React.FC<Step2Props> = ({
                     </span>
                   </div>
                   <div className="text-xs font-semibold text-slate-800 mt-1">
-                    本页共 {requiredIssueCount} 个核对问题
+                    本页需处理 {requiredIssueCount} 类问题
                     {advisoryIssueCount > 0 ? ` · ${advisoryIssueCount} 项参考提示` : ""}
                   </div>
                   <div className="text-[11px] text-slate-500 mt-1 line-clamp-2">
-                    {group.issues.map((issue) => issue.title).join("；")}
+                    {group.issues.map(plainIssueName).join("；")}
                   </div>
                 </button>
               );
@@ -614,36 +666,88 @@ export const Step2Verify: React.FC<Step2Props> = ({
       )}
 
       {selectedAccount && auditReport && (
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-          <AuditCard
-            title="平账审计状态"
-            value={
-              !auditReport.isAuditable
-                ? auditReport.unavailableReason === "CREDIT_CARD_STATEMENT"
-                  ? "信用卡账单，不适用储蓄卡逐笔平账"
-                  : "缺少余额，无法自动平账"
-                : auditReport.isBalanced
-                  ? "借贷平衡"
-                  : `差额 ¥${auditReport.difference.toFixed(2)}`
-            }
-            alert={auditReport.isAuditable && !auditReport.isBalanced}
-          />
-          <AuditCard
-            title="账户收入总计"
-            value={`¥ ${auditReport.totalIncome.toLocaleString()}`}
-          />
-          <AuditCard
-            title="账户支出总计"
-            value={`¥ ${auditReport.totalExpense.toLocaleString()}`}
-          />
-          <AuditCard
-            title="流水时间跨度"
-            value={`${selectedAccount.startDate || "待核对"} ～ ${selectedAccount.endDate || "待核对"}`}
-          />
+        <div className="space-y-3">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+            <AuditCard
+              title="账户平账检查"
+              value={
+                !auditReport.isAuditable
+                  ? auditReport.unavailableReason === "CREDIT_CARD_STATEMENT"
+                    ? "信用卡账单，不适用储蓄卡逐笔平账"
+                    : "缺少余额，无法计算"
+                  : auditReport.isBalanced
+                    ? "已平账"
+                    : `未平账 · 相差 ¥${auditReport.difference.toFixed(2)}`
+              }
+              alert={auditReport.isAuditable && !auditReport.isBalanced}
+            />
+            <AuditCard
+              title="账户收入总计"
+              value={`¥ ${auditReport.totalIncome.toLocaleString()}`}
+            />
+            <AuditCard
+              title="账户支出总计"
+              value={`¥ ${auditReport.totalExpense.toLocaleString()}`}
+            />
+            <AuditCard
+              title="流水时间跨度"
+              value={`${selectedAccount.startDate || "待核对"} ～ ${selectedAccount.endDate || "待核对"}`}
+            />
+          </div>
+          {auditReport.isAuditable && !auditReport.isBalanced && (
+            <div role="alert" className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-xs text-rose-900 space-y-3">
+              <div>
+                <div className="font-semibold text-sm">该账户没有平上，需要查出差额来源</div>
+                <p className="mt-1 leading-relaxed text-rose-800">
+                  “相差 ¥{auditReport.difference.toFixed(2)}”不是指某一笔交易，而是当前提取结果计算出的期末余额与原件期末余额不一致。
+                </p>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-[1fr_auto_1fr_auto_1fr_auto_1fr] items-center gap-2 rounded-xl border border-rose-200 bg-white/70 p-3 text-center">
+                <BalanceFormulaItem label="原件期初余额" value={selectedAccount.startBalance} />
+                <span className="text-rose-400">＋</span>
+                <BalanceFormulaItem label="已提取收入" value={auditReport.totalIncome} />
+                <span className="text-rose-400">－</span>
+                <BalanceFormulaItem label="已提取支出" value={auditReport.totalExpense} />
+                <span className="text-rose-400">＝</span>
+                <BalanceFormulaItem label="系统算出的期末" value={auditReport.calculatedEndBalance} />
+              </div>
+              <div className="rounded-xl border border-rose-200 bg-white/70 p-3">
+                <div className="font-semibold">原件期末余额：¥{auditReport.statedEndBalance.toLocaleString()}</div>
+                <div className="mt-2 grid grid-cols-1 md:grid-cols-2 gap-3 text-[11px] text-slate-700">
+                  <div>
+                    <div className="font-semibold text-slate-800">通常可能是</div>
+                    <ul className="list-disc pl-4 mt-1 space-y-1">
+                      <li>漏识别或重复识别了一笔流水</li>
+                      <li>某笔金额、收支方向或交易后余额读错</li>
+                      <li>期初／期末余额读取错误，或不同账号混在一起</li>
+                    </ul>
+                  </div>
+                  <div>
+                    <div className="font-semibold text-slate-800">建议按这个顺序确认</div>
+                    <ol className="list-decimal pl-4 mt-1 space-y-1">
+                      <li>核对原件首页期初余额和末页期末余额</li>
+                      <li>处理系统标出的待核对流水和余额断点</li>
+                      <li>逐页清点原件行数，确认没有漏行、重复行或串账号</li>
+                    </ol>
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={openFirstBalanceCheck}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-rose-700 px-3 py-2 text-[11px] font-semibold text-white hover:bg-rose-800"
+              >
+                <Search className="w-3.5 h-3.5" />
+                {issues.some(isOutstandingRequired) || auditReport.suspiciousRows.length
+                  ? "从最需要核对的流水开始"
+                  : "查看全部流水并逐页核对"}
+              </button>
+            </div>
+          )}
         </div>
       )}
 
-      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+      <div id="transaction-detail-table" className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
         <div className="p-4 border-b space-y-3">
           <div className="flex items-center justify-between gap-3 flex-wrap">
             <div>
@@ -671,7 +775,7 @@ export const Step2Verify: React.FC<Step2Props> = ({
                 ["PENDING", "待核对", statusCounts.PENDING],
                 ["VERIFIED", "已确认", statusCounts.VERIFIED],
                 ["CORRECTED", "已修正", statusCounts.CORRECTED],
-                ["AUTO", "自动通过", statusCounts.AUTO],
+                ["AUTO", "系统校验通过", statusCounts.AUTO],
               ] as const
             ).map(([value, label, count]) => (
               <button
@@ -698,7 +802,7 @@ export const Step2Verify: React.FC<Step2Props> = ({
             </span>
             <span className="flex items-center gap-1">
               <i className="w-2.5 h-2.5 rounded-sm bg-white border" />
-              自动通过
+              系统校验通过
             </span>
           </div>
         </div>
@@ -797,19 +901,20 @@ export const Step2Verify: React.FC<Step2Props> = ({
                                   : "自动检查未发现明确问题"}
                               </div>
                               {transactionIssues.length ? (
-                                <ul className="space-y-1">
+                                <div className="space-y-2">
                                   {transactionIssues.map((issue) => (
-                                    <li
+                                    <div
                                       key={issue.id}
-                                      className="text-[11px] text-slate-600"
+                                      className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-slate-700"
                                     >
-                                      • {issue.title}：{issue.description}
-                                    </li>
+                                      <div className="font-semibold text-amber-900">{plainIssueName(issue)}</div>
+                                      <div className="mt-1">需要确认：{reviewIssueExplanation(issue, [transaction]).confirm.join("、")}。</div>
+                                    </div>
                                   ))}
-                                </ul>
+                                </div>
                               ) : (
                                 <p className="text-[11px] text-slate-500">
-                                  仍可抽查原始页面；自动通过不代表交易用途或法律事实已经证实。
+                                  仍可抽查原始页面；系统校验通过只表示字段与账面关系未发现明显异常，不代表已经完成人工核对，也不证明交易用途或法律事实。
                                 </p>
                               )}
                               {transaction.rawText && (
@@ -858,10 +963,12 @@ export const Step2Verify: React.FC<Step2Props> = ({
             返回上传
           </button>
           <div className="flex items-center gap-3">
-            {pendingReviewGroups.length > 0 && (
+            {(pendingReviewGroups.length > 0 || unbalancedAccounts.length > 0) && (
               <span className="text-xs text-amber-700 flex items-center gap-1">
                 <CircleHelp className="w-4 h-4" />
-                全部账户仍有 {pendingReviewGroups.length} 页待核对
+                {pendingReviewGroups.length > 0 ? `${pendingReviewGroups.length} 页待核对` : ''}
+                {pendingReviewGroups.length > 0 && unbalancedAccounts.length > 0 ? '，' : ''}
+                {unbalancedAccounts.length > 0 ? `${unbalancedAccounts.length} 个账户未平账` : ''}
               </span>
             )}
             <button
@@ -869,8 +976,8 @@ export const Step2Verify: React.FC<Step2Props> = ({
               className="flex items-center gap-2 px-6 py-2.5 rounded-xl bg-blue-600 text-white text-sm font-medium"
             >
               <Check className="w-4 h-4" />
-              {pendingReviewGroups.length
-                ? "保留未核对页并继续"
+              {pendingReviewGroups.length || unbalancedAccounts.length
+                ? "保留未处理事项并继续"
                 : "完成核对，进入下一步"}
               <ArrowRight className="w-4 h-4" />
             </button>
@@ -958,23 +1065,24 @@ export const Step2Verify: React.FC<Step2Props> = ({
                       <div className="flex items-center gap-2">
                         <ShieldAlert className="w-4 h-4 text-amber-600" />
                         <h3 className="font-bold text-sm text-slate-900">
-                          本页共 {selectedIssueGroup.length} 个核对问题
+                          本页有 {selectedIssueGroup.length} 类问题，涉及 {affectedTransactions.length} 笔流水
                         </h3>
                       </div>
                       <div className="mt-2 space-y-2">
-                        {selectedIssueGroup.map((issue, index) => (
-                          <div
-                            key={issue.id}
-                            className="border border-slate-200 rounded-xl p-3"
-                          >
-                            <div className="text-xs font-semibold text-slate-800">
-                              {index + 1}. {issue.title}
+                        {selectedIssueGroup.map((issue, index) => {
+                          const issueTransactions = affectedTransactions.filter(transaction => issue.transactionIds.includes(transaction.id));
+                          const explanation = reviewIssueExplanation(issue, issueTransactions);
+                          return (
+                            <div key={issue.id} className="border border-slate-200 rounded-xl p-3 space-y-2">
+                              <div className="text-xs font-semibold text-slate-900">
+                                {index + 1}. {plainIssueName(issue)}
+                              </div>
+                              <ReviewExplanationRow label="系统发现" text={explanation.detected} tone="rose" />
+                              <ReviewExplanationRow label="可能原因" text={explanation.possible.join("；")} tone="amber" />
+                              <ReviewExplanationRow label="请确认" text={explanation.confirm.join("；")} tone="blue" />
                             </div>
-                            <p className="text-[11px] text-slate-600 mt-1 leading-relaxed">
-                              {issue.description}
-                            </p>
-                          </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     </div>
                     {selectedCountComparison && (
@@ -991,9 +1099,7 @@ export const Step2Verify: React.FC<Step2Props> = ({
                       </div>
                     )}
                     <div className="bg-blue-50 border border-blue-100 rounded-xl p-3">
-                      <div className="text-xs font-semibold text-blue-900">
-                        本页请统一核对
-                      </div>
+                      <div className="text-xs font-semibold text-blue-900">处理方法</div>
                       <ol className="list-decimal pl-4 mt-2 space-y-1 text-[11px] text-blue-800">
                         {[
                           ...new Set(
@@ -1032,16 +1138,26 @@ export const Step2Verify: React.FC<Step2Props> = ({
                       </>
                     ) : (
                       <>
-                        {selectedIssueGroup.every(isTransactionLevelIssue) ? (
-                          affectedTransactions
-                            .slice(0, 3)
-                            .map((transaction) => (
-                              <TransactionEditor
+                        {fieldIssueTransactions.length > 0 ? (
+                          <div className="space-y-2">
+                            <div className="rounded-xl border border-blue-200 bg-blue-50 p-3 text-[11px] text-blue-900">
+                              <div className="font-semibold">请按顺序完成 {fieldIssueTransactions.length} 个逐行任务</div>
+                              <div className="mt-1">每张卡片对应原件中的一行。只需核对卡片中标出的字段；有误就直接填写正确内容，无误就点击“这行与原件一致”。</div>
+                            </div>
+                            {fieldIssueTransactions.map((transaction, index) => (
+                              <TransactionReviewTask
                                 key={transaction.id}
+                                taskNumber={index + 1}
                                 transaction={transaction}
+                                issues={selectedIssueGroup.filter(issue => issue.transactionIds.includes(transaction.id))}
                                 onEdit={handleCellEdit}
+                                reviewed={reviewedRowIds.includes(transaction.id)}
+                                onConfirm={() => setReviewedRowIds(current => current.includes(transaction.id)
+                                  ? current
+                                  : [...current, transaction.id])}
                               />
-                            ))
+                            ))}
+                          </div>
                         ) : (
                           <PageTransactionSelector
                             transactions={affectedTransactions}
@@ -1088,6 +1204,31 @@ export const Step2Verify: React.FC<Step2Props> = ({
                             className="mt-1 w-full min-h-16 border rounded-xl p-2 text-xs"
                           />
                         </label>
+                        {confirmationItems.length > 0 && (
+                          <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                            <div className="text-xs font-semibold text-slate-800">页面完整性确认</div>
+                            <div className="mt-2 space-y-2">
+                              {confirmationItems.map(item => (
+                                <label key={item} className="flex items-start gap-2 text-[11px] text-slate-700 cursor-pointer">
+                                  <input
+                                    type="checkbox"
+                                    checked={confirmationChecks.includes(item)}
+                                    onChange={() => setConfirmationChecks(current => current.includes(item)
+                                      ? current.filter(value => value !== item)
+                                      : [...current, item])}
+                                    className="mt-0.5"
+                                  />
+                                  <span>{item}</span>
+                                </label>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                        {fieldIssueTransactions.length > 0 && !rowReviewComplete && (
+                          <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-900">
+                            还有 {fieldIssueTransactions.length - reviewedRowIds.filter(id => fieldIssueTransactionIds.has(id)).length} 行没有确认。请处理完每张任务卡再完成本页。
+                          </div>
+                        )}
                         <div className="grid grid-cols-1 gap-2">
                           <button
                             onClick={() =>
@@ -1099,11 +1240,12 @@ export const Step2Verify: React.FC<Step2Props> = ({
                                   : "已对照原件确认本页记录正确",
                               )
                             }
-                            className="bg-emerald-600 text-white rounded-xl py-2 text-xs font-medium"
+                            disabled={!confirmationComplete || hasEditedReview}
+                            className="bg-emerald-600 text-white rounded-xl py-2 text-xs font-medium disabled:opacity-40 disabled:cursor-not-allowed"
                           >
                             {selectedCountComparison
                               ? `原件确有 ${selectedCountComparison.detailCount} 笔，本页全部确认`
-                              : "与原件一致，本页全部确认"}
+                              : "已逐项核对，与原件一致"}
                           </button>
                           <button
                             onClick={() =>
@@ -1113,10 +1255,17 @@ export const Step2Verify: React.FC<Step2Props> = ({
                                 "已根据原件完成本页全部修正",
                               )
                             }
-                            className="bg-blue-600 text-white rounded-xl py-2 text-xs font-medium"
+                            disabled={!confirmationComplete || !hasEditedReview}
+                            className="bg-blue-600 text-white rounded-xl py-2 text-xs font-medium disabled:opacity-40 disabled:cursor-not-allowed"
                           >
-                            本页已完成修正
+                            已完成修改并复查，保存本页
                           </button>
+                          {!confirmationComplete && (
+                            <p className="text-center text-[10px] text-slate-500">完成上方所有逐行任务和页面确认后，才能完成本页。</p>
+                          )}
+                          {confirmationComplete && !hasEditedReview && (
+                            <p className="text-center text-[10px] text-slate-500">如未修改任何字段，请选择“与原件一致”；修改后再使用蓝色按钮。</p>
+                          )}
                           <button
                             onClick={() =>
                               resolveIssueAndAdvance(
@@ -1143,14 +1292,120 @@ export const Step2Verify: React.FC<Step2Props> = ({
   );
 };
 
+type ReviewField = "transactionTime" | "direction" | "amount" | "balance" | "counterpartyName" | "summary";
+
+const TransactionReviewTask: React.FC<{
+  taskNumber: number;
+  transaction: StandardTransaction;
+  issues: EvidenceReviewIssue[];
+  reviewed: boolean;
+  onEdit: (id: string, field: keyof StandardTransaction, value: any) => void;
+  onConfirm: () => void;
+}> = ({ taskNumber, transaction, issues, reviewed, onEdit, onConfirm }) => {
+  const fields = reviewFieldsForTransaction(transaction, issues);
+  const reason = transactionReviewReason(transaction, issues);
+  return (
+    <div className={`rounded-xl border p-3 space-y-3 ${reviewed ? "border-emerald-300 bg-emerald-50/50" : "border-amber-300 bg-white"}`}>
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div className="text-xs font-bold text-slate-900">
+            任务 {taskNumber} · 第 {transaction.rawPageNumber || "?"} 页第 {transaction.rawRowIndex || "?"} 行
+          </div>
+          <div className="mt-1 text-[11px] text-amber-900">
+            <span className="font-semibold">需要你做：</span>{reviewTaskInstruction(fields)}
+          </div>
+        </div>
+        <span className={`flex-shrink-0 rounded-full px-2 py-1 text-[10px] font-semibold ${reviewed ? "bg-emerald-100 text-emerald-800" : "bg-amber-100 text-amber-800"}`}>
+          {reviewed ? "本行已确认" : "等待确认"}
+        </span>
+      </div>
+      <div className="rounded-lg bg-slate-900 px-3 py-2 text-[11px] leading-relaxed text-slate-100">
+        <div className="mb-1 text-[10px] text-slate-400">原始识别文字</div>
+        {transaction.rawText || "没有可显示的识别文字，请直接查看左侧原件对应行。"}
+      </div>
+      <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-900">
+        <span className="font-semibold">为什么列出这一行：</span>{reason}
+      </div>
+      <div className="space-y-2">
+        {fields.map(field => (
+          <ReviewFieldInput
+            key={field}
+            field={field}
+            transaction={transaction}
+            onEdit={onEdit}
+          />
+        ))}
+      </div>
+      <button
+        type="button"
+        onClick={onConfirm}
+        disabled={reviewed}
+        className="w-full rounded-lg bg-emerald-600 py-2 text-xs font-semibold text-white hover:bg-emerald-700 disabled:bg-emerald-100 disabled:text-emerald-700"
+      >
+        {reviewed ? "这行已经核对完成" : "以上字段与原件一致，确认这一行"}
+      </button>
+      <p className="text-[10px] text-slate-500">如果数值不对，直接在上面改成原件中的内容；修改后再点击确认。</p>
+    </div>
+  );
+};
+
+const ReviewFieldInput: React.FC<{
+  field: ReviewField;
+  transaction: StandardTransaction;
+  onEdit: (id: string, field: keyof StandardTransaction, value: any) => void;
+}> = ({ field, transaction, onEdit }) => {
+  const label = reviewFieldLabel(field);
+  const hint = reviewFieldHint(field);
+  if (field === "direction") {
+    return (
+      <label className="block rounded-lg border border-blue-200 bg-blue-50/50 p-2.5">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-[11px] font-semibold text-blue-950">{label}</span>
+          <span className="text-[10px] text-blue-700">{hint}</span>
+        </div>
+        <select
+          value={transaction.direction}
+          onChange={event => onEdit(transaction.id, "direction", event.target.value)}
+          className="mt-1.5 w-full rounded-lg border border-blue-300 bg-white px-2 py-2 text-xs text-slate-900"
+        >
+          <option value="UNKNOWN">请选择</option>
+          <option value="IN">收入／贷方</option>
+          <option value="OUT">支出／借方</option>
+        </select>
+      </label>
+    );
+  }
+  const numeric = field === "amount" || field === "balance";
+  return (
+    <label className="block rounded-lg border border-blue-200 bg-blue-50/50 p-2.5">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-[11px] font-semibold text-blue-950">{label}</span>
+        <span className="text-[10px] text-blue-700">{hint}</span>
+      </div>
+      <input
+        type={numeric ? "number" : "text"}
+        value={field === "amount" && transaction.amount === 0 ? "" : String(transaction[field] ?? "")}
+        onChange={event => onEdit(transaction.id, field, numeric ? Number(event.target.value) : event.target.value)}
+        className="mt-1.5 w-full rounded-lg border border-blue-300 bg-white px-2 py-2 text-xs font-semibold text-slate-900"
+      />
+    </label>
+  );
+};
+
 const TransactionEditor: React.FC<{
   transaction: StandardTransaction;
   onEdit: (id: string, field: keyof StandardTransaction, value: any) => void;
-}> = ({ transaction, onEdit }) => (
+  reason?: string;
+}> = ({ transaction, onEdit, reason }) => (
   <div className="border border-slate-200 rounded-xl p-3 text-xs space-y-2">
     <div className="font-semibold text-slate-800">
       第 {transaction.rawRowIndex || "?"} 笔 · {transaction.transactionTime}
     </div>
+    {reason && (
+      <div className="rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-2 text-[11px] text-amber-900">
+        <span className="font-semibold">为什么要核对：</span>{reason}
+      </div>
+    )}
     <label className="block text-[11px] text-slate-500">
       日期时间
       <input
@@ -1376,6 +1631,208 @@ const AuditCard: React.FC<{
   </div>
 );
 
+const BalanceFormulaItem: React.FC<{ label: string; value: number }> = ({ label, value }) => (
+  <div>
+    <div className="text-[10px] text-slate-500">{label}</div>
+    <div className="mt-0.5 font-mono font-semibold text-slate-900">¥{value.toLocaleString()}</div>
+  </div>
+);
+
+const ReviewExplanationRow: React.FC<{
+  label: string;
+  text: string;
+  tone: "rose" | "amber" | "blue";
+}> = ({ label, text, tone }) => {
+  const colors = tone === "rose"
+    ? "bg-rose-50 text-rose-900"
+    : tone === "amber"
+      ? "bg-amber-50 text-amber-900"
+      : "bg-blue-50 text-blue-900";
+  return (
+    <div className={`rounded-lg px-2.5 py-2 text-[11px] leading-relaxed ${colors}`}>
+      <span className="font-semibold">{label}：</span>{text}
+    </div>
+  );
+};
+
+interface ReviewIssueExplanation {
+  detected: string;
+  possible: string[];
+  confirm: string[];
+}
+
+function plainIssueName(issue: EvidenceReviewIssue): string {
+  const count = issue.transactionIds.length;
+  switch (issue.category) {
+    case "LOW_CONFIDENCE": return `${count} 笔流水的字段需要确认`;
+    case "BALANCE_BREAK": return `${count} 笔相关流水的余额接不上`;
+    case "INVALID_AMOUNT": return `${count} 笔流水的金额缺失或异常`;
+    case "INVALID_DATE": return `${count} 笔流水的日期不确定`;
+    case "INVALID_DIRECTION": return `${count} 笔流水的收入／支出方向不确定`;
+    case "PAGE_INTEGRITY": return "该页可能有漏行、重复行或页数不完整";
+    case "BLANK_PAGE": return "该页可能是空白页，也可能没有识别到内容";
+    default: return issue.title;
+  }
+}
+
+function reviewIssueExplanation(
+  issue: EvidenceReviewIssue,
+  affected: StandardTransaction[],
+): ReviewIssueExplanation {
+  switch (issue.category) {
+    case "LOW_CONFIDENCE": {
+      const corrected = affected.filter(transaction => transaction.correctionReason).length;
+      const lowConfidence = affected.filter(transaction => (transaction.extractionConfidence ?? 1) < 0.8).length;
+      return {
+        detected: `${affected.length || issue.transactionIds.length} 笔流水中，${lowConfidence ? `${lowConfidence} 笔读取把握较低` : "部分字段读取把握较低"}${corrected ? `，${corrected} 笔曾按余额关系提出修正` : ""}。`,
+        possible: ["扫描模糊或文字重叠", "金额与余额列位置接近", "原件字段之间存在歧义"],
+        confirm: ["日期和时间", "收入或支出方向", "交易金额", "交易后余额", "对手方和摘要"],
+      };
+    }
+    case "BALANCE_BREAK":
+      return {
+        detected: "按上一笔交易后余额，加上收入或减去支出后，得不到下一笔显示的余额。",
+        possible: ["当前笔或上一笔金额读错", "收支方向读反", "两笔之间漏了一行", "流水顺序或账号归属错误"],
+        confirm: ["同时查看前后两笔", "核对金额、方向和交易后余额", "确认两笔之间没有遗漏流水"],
+      };
+    case "INVALID_AMOUNT":
+      return {
+        detected: "交易金额为空、为零，或没有足够信息确认金额。",
+        possible: ["金额没有识别出来", "该行其实是标题或说明", "确为零金额的结息／减免记录"],
+        confirm: ["该行是否为真实交易", "原件发生额是多少", "如确为零金额，余额是否保持不变"],
+      };
+    case "INVALID_DATE":
+      return {
+        detected: "交易日期缺失或不是有效日期。",
+        possible: ["年份或月份被遮挡", "日期跨页", "数字字符读取错误"],
+        confirm: ["完整日期", "如原件有时间则一并确认", "该行是否属于本页交易"],
+      };
+    case "INVALID_DIRECTION":
+      return {
+        detected: "系统无法判断该笔应计为收入还是支出，因此尚未计入收支汇总。",
+        possible: ["借贷标识模糊", "金额落在错误列", "信用卡和储蓄卡的记账口径不同"],
+        confirm: ["查看原件借／贷、收入／支出栏", "结合交易前后余额判断方向", "选择收入或支出"],
+      };
+    case "PAGE_INTEGRITY":
+      return {
+        detected: issue.description,
+        possible: ["页面识别中断", "表头或分页导致漏行", "同一行被重复提取"],
+        confirm: ["原件实际交易行数", "系统明细是否逐行对应", "是否需要删除重复项或补录遗漏项"],
+      };
+    case "BLANK_PAGE":
+      return {
+        detected: "该页没有提取到交易内容。",
+        possible: ["原件确实为空白", "只有账户说明没有流水", "页面方向、清晰度或扫描质量影响读取"],
+        confirm: ["原件是否存在交易行", "如有交易则补录或重新上传清晰文件", "如确为空白可直接确认"],
+      };
+    default:
+      return {
+        detected: issue.description,
+        possible: ["原件版式或内容需要人工判断"],
+        confirm: issue.instructions.length ? issue.instructions : ["对照原件确认提示内容"],
+      };
+  }
+}
+
+function transactionReviewReason(
+  transaction: StandardTransaction,
+  issues: EvidenceReviewIssue[],
+): string {
+  const reasons: string[] = [];
+  if ((transaction.extractionConfidence ?? 1) < 0.8) reasons.push("这笔的字段读取把握较低");
+  if (transaction.correctionReason) reasons.push(transaction.correctionReason);
+  if (transaction.dataQualityIssues?.includes("INVALID_AMOUNT")) reasons.push("金额未能可靠读取");
+  if (transaction.dataQualityIssues?.includes("INVALID_DATE")) reasons.push("日期未能可靠读取");
+  if (transaction.dataQualityIssues?.includes("UNKNOWN_DIRECTION") || transaction.direction === "UNKNOWN") reasons.push("收支方向尚未确认");
+  if (issues.some(issue => issue.category === "BALANCE_BREAK" && issue.transactionIds.includes(transaction.id))) reasons.push("这笔与相邻流水的余额关系不一致");
+  return [...new Set(reasons)].join("；") || "这笔属于当前页面的问题范围，请对照原件逐字段确认";
+}
+
+function pageConfirmationItems(
+  issues: EvidenceReviewIssue[],
+  hasRowTasks: boolean,
+): string[] {
+  if (!issues.length) return [];
+  const items = new Set<string>();
+  if (issues.some(issue => issue.category === "PAGE_INTEGRITY" || issue.category === "BLANK_PAGE"))
+    items.add("我已清点原件交易行数，并确认系统没有漏行或重复行");
+  if (!hasRowTasks && !items.size) items.add("我已按上方要求对照原件完成核对");
+  return [...items];
+}
+
+function reviewFieldsForTransaction(
+  transaction: StandardTransaction,
+  issues: EvidenceReviewIssue[],
+): ReviewField[] {
+  const fields = new Set<ReviewField>();
+  if (transaction.dataQualityIssues?.includes("INVALID_DATE") || issues.some(issue => issue.category === "INVALID_DATE"))
+    fields.add("transactionTime");
+  if (transaction.dataQualityIssues?.includes("UNKNOWN_DIRECTION") || transaction.direction === "UNKNOWN" || issues.some(issue => issue.category === "INVALID_DIRECTION"))
+    fields.add("direction");
+  if (transaction.dataQualityIssues?.includes("INVALID_AMOUNT") || transaction.amount <= 0 || issues.some(issue => issue.category === "INVALID_AMOUNT"))
+    fields.add("amount");
+
+  const correction = transaction.correctionReason || "";
+  if (/日期|年份|时间/.test(correction)) fields.add("transactionTime");
+  if (/方向|借贷|收支/.test(correction)) fields.add("direction");
+  if (/金额|发生额/.test(correction) || transaction.originalAmount !== undefined) fields.add("amount");
+  if (/余额/.test(correction) || transaction.originalBalance !== undefined) fields.add("balance");
+  if (transaction.originalDirection !== undefined) fields.add("direction");
+
+  if (issues.some(issue => issue.category === "BALANCE_BREAK")) {
+    fields.add("direction");
+    fields.add("amount");
+    fields.add("balance");
+  }
+  if (issues.some(issue => issue.category === "LOW_CONFIDENCE") && fields.size === 0) {
+    fields.add("transactionTime");
+    fields.add("direction");
+    fields.add("amount");
+    fields.add("balance");
+    fields.add("counterpartyName");
+    fields.add("summary");
+  }
+  if (fields.size === 0) {
+    fields.add("amount");
+    fields.add("balance");
+  }
+  return [...fields];
+}
+
+function reviewFieldLabel(field: ReviewField): string {
+  return field === "transactionTime" ? "交易日期／时间"
+    : field === "direction" ? "收入还是支出"
+      : field === "amount" ? "交易金额"
+        : field === "balance" ? "交易后余额"
+          : field === "counterpartyName" ? "对手方"
+            : "摘要／附言";
+}
+
+function reviewFieldHint(field: ReviewField): string {
+  return field === "transactionTime" ? "填写原件中的完整日期"
+    : field === "direction" ? "按借／贷或收／支栏选择"
+      : field === "amount" ? "填写原件发生额"
+        : field === "balance" ? "填写这一行交易后的余额"
+          : field === "counterpartyName" ? "看不清可保持原样并在说明中注明"
+            : "按原件填写，不要根据含义猜测";
+}
+
+function reviewTaskInstruction(fields: ReviewField[]): string {
+  return `对照左侧原件，确认${fields.map(reviewFieldLabel).join("、")}；有误就直接改成原件内容。`;
+}
+
+function preserveReviewIssues(
+  saved: EvidenceReviewIssue[],
+  active: EvidenceReviewIssue[],
+): EvidenceReviewIssue[] {
+  const merged = new Map(saved.map(issue => [issue.id, issue]));
+  for (const issue of active) {
+    const previous = merged.get(issue.id);
+    merged.set(issue.id, previous ? { ...issue, ...previous } : issue);
+  }
+  return [...merged.values()];
+}
+
 function statusLabel(status: ReviewIssueStatus): string {
   return status === "CONFIRMED"
     ? "已确认"
@@ -1505,7 +1962,7 @@ function transactionStateLabel(state: TransactionReviewState): string {
       ? "已修正"
       : state === "VERIFIED"
         ? "已确认"
-        : "自动通过";
+        : "系统校验通过";
 }
 
 function rowBackground(state: TransactionReviewState): string {

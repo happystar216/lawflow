@@ -60,6 +60,8 @@ export const App: React.FC = () => {
   const [completedSteps, setCompletedSteps] = useState<Set<WorkflowStep>>(new Set());
   const [isCaseManagerOpen, setIsCaseManagerOpen] = useState(false);
   const [hydratedUserId, setHydratedUserId] = useState<string | null>(null);
+  const [persistenceError, setPersistenceError] = useState<string | null>(null);
+  const [saveRetryToken, setSaveRetryToken] = useState(0);
   const activeCaseStorageKey = currentUser ? `LAWFLOW_ACTIVE_CASE_DATA_v2_${currentUser.id}` : '';
 
   // IndexedDB is authoritative for large evidence sets. localStorage keeps only small UI/session metadata.
@@ -133,6 +135,7 @@ export const App: React.FC = () => {
       localStorage.setItem(activeCaseStorageKey, JSON.stringify(payload));
     } catch (e) {
       console.warn('Failed to save to localStorage:', e);
+      setPersistenceError('当前案件的页面位置未能保存，但案件数据仍会继续尝试保存。');
     }
 
     if (caseMeta && caseMeta.id && (caseMeta.caseNumber || caseMeta.respondentName || transactions.length > 0)) {
@@ -144,9 +147,14 @@ export const App: React.FC = () => {
         userId: currentUser.id,
         updatedAt: new Date().toISOString()
       };
-      saveCaseRecord(record).catch(err => console.warn('Auto-save error', err));
+      saveCaseRecord(record)
+        .then(() => setPersistenceError(null))
+        .catch(err => {
+          console.warn('Auto-save error', err);
+          setPersistenceError('当前案件的最新修改尚未保存。请保持页面打开并点击“重新保存”。');
+        });
     }
-  }, [caseMeta, accounts, transactions, currentStep, completedSteps, evaluationReport, currentUser, hydratedUserId, activeCaseStorageKey]);
+  }, [caseMeta, accounts, transactions, currentStep, completedSteps, evaluationReport, currentUser, hydratedUserId, activeCaseStorageKey, saveRetryToken]);
 
   const handleNewCase = () => {
     const blankCase = createBlankCase();
@@ -218,6 +226,23 @@ export const App: React.FC = () => {
       />
 
       <main className="flex-1 pb-16">
+        {persistenceError && (
+          <div role="alert" className="max-w-5xl mx-auto mt-5 px-4 sm:px-6">
+            <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 flex items-center justify-between gap-4 text-xs text-rose-900">
+              <div>
+                <div className="font-semibold">案件尚未保存</div>
+                <div className="mt-0.5 text-rose-800">{persistenceError}</div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSaveRetryToken(value => value + 1)}
+                className="px-3 py-1.5 rounded-lg border border-rose-300 bg-white hover:bg-rose-100 font-medium flex-shrink-0"
+              >
+                重新保存
+              </button>
+            </div>
+          </div>
+        )}
         <Suspense fallback={<div className="max-w-5xl mx-auto p-8 text-sm text-slate-500">正在加载当前工作步骤…</div>}>
         {currentStep === 0 && (
           <Step0CaseSetup
@@ -330,7 +355,7 @@ export const App: React.FC = () => {
       </main>
 
       <footer className="bg-white border-t border-slate-200 py-4 text-center text-xs text-slate-400">
-        © 执析宝 (LawFlow) · 执行律师银行流水智能穿透与司法取证系统 · AI 结果须经律师结合原件复核
+        © 执析宝 (LawFlow) · 执行律师银行流水智能穿透与司法取证系统 · 系统识别结果须经律师结合原件复核
       </footer>
 
       {/* Case Manager Modal */}

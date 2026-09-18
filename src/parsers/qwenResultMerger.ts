@@ -104,7 +104,7 @@ function reconcileGlobalTransactions(input: StandardTransaction[]): { transactio
           transaction.reviewStatus = 'PENDING';
           transaction.extractionConfidence = Math.min(transaction.extractionConfidence ?? 0.95, 0.4);
         }
-        warnings.push(`第 ${page} 页疑似发生额与余额列整体错位，系统未将该页标记为自动通过`);
+        warnings.push(`第 ${page} 页疑似发生额与余额列整体错位，系统已将该页列为待核对`);
       }
     }
   }

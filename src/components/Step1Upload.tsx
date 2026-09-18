@@ -1,10 +1,11 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { UploadCloud, FileSpreadsheet, FileText, FileImage, CheckCircle2, ArrowRight, ArrowLeft, Trash2, PlusCircle, AlertCircle, ShieldCheck, Sparkles, StopCircle } from 'lucide-react';
+import { UploadCloud, FileSpreadsheet, FileText, FileImage, CheckCircle2, ArrowRight, ArrowLeft, Trash2, PlusCircle, AlertCircle, ShieldCheck, Sparkles, StopCircle, RotateCcw, CircleSlash2 } from 'lucide-react';
 import { BankAccount, StandardTransaction } from '../types/transaction';
 import { parseExcelBankStatement } from '../parsers/excelParser';
 import { parsePdfWithGemini, GeminiProgressInfo } from '../parsers/geminiPdfParser';
 import { deleteSourceDocument, saveSourceDocument } from '../store/sourceDocumentStore';
 import { accountIdentityKey, transactionBelongsToAccount } from '../utils/accountIdentity';
+import { importErrorForUser } from '../utils/userFacingError';
 
 interface Step1Props {
   caseId: string;
@@ -14,6 +15,25 @@ interface Step1Props {
   onDataUpdated: (accounts: BankAccount[], transactions: StandardTransaction[]) => void;
   onNext: () => void;
   onPrev: () => void;
+}
+
+type ImportTaskStatus = 'QUEUED' | 'PROCESSING' | 'SUCCESS' | 'WARNING' | 'EMPTY' | 'ERROR' | 'CANCELLED';
+
+interface ImportTask {
+  id: string;
+  file: File;
+  status: ImportTaskStatus;
+  title: string;
+  message?: string;
+  impact?: string;
+  details?: string;
+  retryable?: boolean;
+  transactionCount?: number;
+  accountCount?: number;
+}
+
+function importTaskId(file: File): string {
+  return `${file.name}:${file.size}:${file.lastModified}`;
 }
 
 export const Step1Upload: React.FC<Step1Props> = ({
@@ -31,12 +51,17 @@ export const Step1Upload: React.FC<Step1Props> = ({
   const [statusText, setStatusText] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isCancellable, setIsCancellable] = useState(false);
+  const [importTasks, setImportTasks] = useState<ImportTask[]>([]);
 
   const abortControllerRef = useRef<AbortController | null>(null);
   const zeroTransactionFiles = [...new Set(accounts
     .filter(account => account.transactionCount === 0)
     .map(account => account.fileName))];
   const hasTransactions = transactions.length > 0;
+
+  const updateImportTask = (id: string, patch: Partial<ImportTask>) => {
+    setImportTasks(current => current.map(task => task.id === id ? { ...task, ...patch } : task));
+  };
 
   useEffect(() => {
     if (!isProcessing) return;
@@ -64,6 +89,15 @@ export const Step1Upload: React.FC<Step1Props> = ({
     const fileList = Array.from(files);
     if (fileList.length === 0) return;
 
+    setImportTasks(current => {
+      const next = new Map(current.map(task => [task.id, task]));
+      for (const file of fileList) {
+        const id = importTaskId(file);
+        next.set(id, { id, file, status: 'QUEUED', title: `等待识别“${file.name}”` });
+      }
+      return [...next.values()];
+    });
+
     setIsProcessing(true);
     setErrorMessage(null);
     setProgressInfo(null);
@@ -76,10 +110,22 @@ export const Step1Upload: React.FC<Step1Props> = ({
     for (let i = 0; i < fileList.length; i++) {
       const file = fileList[i];
       const name = file.name.toLowerCase();
+      const taskId = importTaskId(file);
+      updateImportTask(taskId, {
+        status: 'PROCESSING',
+        title: `正在识别“${file.name}”`,
+        message: '识别完成前请保持当前页面打开。',
+        impact: undefined,
+        details: undefined,
+        retryable: undefined
+      });
 
       try {
+        let importedTransactionCount = 0;
+        let importedAccountCount = 0;
+        let sourceStorageWarning = false;
         if (name.endsWith('.xlsx') || name.endsWith('.xls') || name.endsWith('.csv')) {
-          setStatusText(`正在解析结构化电子流水: ${file.name}...`);
+          setStatusText(`正在读取电子流水“${file.name}”…`);
           const { account, transactions: parsedTx } = await parseExcelBankStatement(file);
           for (let index = newAccounts.length - 1; index >= 0; index -= 1) {
             if (newAccounts[index].fileName === file.name) newAccounts.splice(index, 1);
@@ -89,6 +135,8 @@ export const Step1Upload: React.FC<Step1Props> = ({
           }
           newAccounts.push(account);
           newTransactions.push(...parsedTx);
+          importedTransactionCount = parsedTx.length;
+          importedAccountCount = 1;
         } else if (name.endsWith('.pdf')) {
           const controller = new AbortController();
           abortControllerRef.current = controller;
@@ -111,6 +159,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
             await saveSourceDocument(caseId, file);
           } catch (storageError) {
             sourceStored = false;
+            sourceStorageWarning = true;
             console.warn('Source document storage unavailable; continuing recognition', storageError);
           }
           const oldAccountIndexes = newAccounts
@@ -127,17 +176,64 @@ export const Step1Upload: React.FC<Step1Props> = ({
             parseWarnings: [...new Set([...(account.parseWarnings || []), '原始文件未能持久保存，请在本次会话中完成原件核对或重新上传'])]
           }));
           newTransactions.push(...parsedTx);
+          importedTransactionCount = parsedTx.length;
+          importedAccountCount = parsedAccounts.length;
         } else {
-          setErrorMessage(`不支持的文件格式: ${file.name}，请上传 Excel、CSV 或 PDF。图片请先合并或转换为 PDF。`);
+          throw new Error('不支持的文件格式');
         }
+        updateImportTask(taskId, importedTransactionCount === 0 ? {
+          status: 'EMPTY',
+          title: `“${file.name}”未发现流水`,
+          message: '请确认原件是否确实没有交易明细，或检查页面方向和清晰度后重新识别。',
+          impact: '文件中的账户信息已保留，但不会计入后续资金分析。',
+          retryable: true,
+          transactionCount: 0,
+          accountCount: importedAccountCount
+        } : sourceStorageWarning ? {
+          status: 'WARNING',
+          title: `“${file.name}”已导入，但原件未保存`,
+          message: `已读取 ${importedTransactionCount} 笔流水，但浏览器未能保存原始 PDF。`,
+          impact: '交易可以继续分析，但刷新页面后可能无法打开原件对照。建议释放浏览器存储空间后重新上传。',
+          retryable: true,
+          transactionCount: importedTransactionCount,
+          accountCount: importedAccountCount
+        } : {
+          status: 'SUCCESS',
+          title: `“${file.name}”已导入`,
+          message: `共读取 ${importedTransactionCount} 笔流水，识别出 ${importedAccountCount} 个账户。`,
+          transactionCount: importedTransactionCount,
+          accountCount: importedAccountCount
+        });
       } catch (err: any) {
         if (err.name === 'AbortError' || err.message?.includes('停止')) {
           console.log('User cancelled parsing:', file.name);
+          updateImportTask(taskId, {
+            status: 'CANCELLED',
+            title: `已停止识别“${file.name}”`,
+            message: '该文件没有导入，案件中原有数据未受影响。',
+            retryable: true
+          });
+          for (const unprocessed of fileList.slice(i + 1)) {
+            updateImportTask(importTaskId(unprocessed), {
+              status: 'CANCELLED',
+              title: `尚未识别“${unprocessed.name}”`,
+              message: '本批次已停止，可以单独重新识别该文件。',
+              retryable: true
+            });
+          }
           wasCancelled = true;
           break;
         }
         console.error('Error processing file:', file.name, err);
-        setErrorMessage(`解析文件 ${file.name} 失败: ${err.message || '文件格式无法识别或内容损坏'}`);
+        const friendly = importErrorForUser(err, file.name);
+        updateImportTask(taskId, {
+          status: 'ERROR',
+          title: friendly.title,
+          message: friendly.message,
+          impact: friendly.impact,
+          details: friendly.details,
+          retryable: friendly.retryable
+        });
       } finally {
         abortControllerRef.current = null;
         setIsCancellable(false);
@@ -308,7 +404,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
           )}
 
           {errorMessage && (
-            <div className="flex items-center space-x-2 text-red-600 bg-red-50 border border-red-200 px-4 py-2 rounded-xl text-xs mt-2">
+            <div role="status" className="flex items-center space-x-2 text-amber-800 bg-amber-50 border border-amber-200 px-4 py-2 rounded-xl text-xs mt-2">
               <AlertCircle className="w-4 h-4 flex-shrink-0" />
               <span>{errorMessage}</span>
             </div>
@@ -324,11 +420,70 @@ export const Step1Upload: React.FC<Step1Props> = ({
               {zeroTransactionFiles.length} 个文件未识别到流水明细
             </div>
             <p className="text-xs mt-1 leading-relaxed">
-              可能是查询期间确无流水，也可能是原件仅含账户信息、空白表格或页面未完整识别。请打开原件确认；这些文件已保留，但不会计入后续资金分析。
+              这些文件已保留，但不会计入后续资金分析，也不能单独进入下一步。请确认原件是否确实无交易；如有流水，请点击下方“重新识别”，或删除后上传更清晰的文件。
             </p>
             <p className="text-[11px] mt-2 text-amber-800 break-all">
               {zeroTransactionFiles.join('、')}
             </p>
+          </div>
+        </div>
+      )}
+
+      {importTasks.length > 0 && (
+        <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm p-5 space-y-3">
+          <div>
+            <h2 className="text-sm font-semibold text-slate-900">本次文件处理结果</h2>
+            <p className="text-[11px] text-slate-500 mt-1">每个文件单独处理；某个文件失败不会影响其他文件或案件中已有数据。</p>
+          </div>
+          <div className="space-y-2">
+            {importTasks.map(task => {
+              const isFailure = task.status === 'ERROR';
+              const isWarning = task.status === 'WARNING' || task.status === 'EMPTY';
+              const isActive = task.status === 'PROCESSING' || task.status === 'QUEUED';
+              return (
+                <div
+                  key={task.id}
+                  role={isFailure ? 'alert' : undefined}
+                  className={`rounded-xl border p-3 ${isFailure ? 'border-rose-200 bg-rose-50' : isWarning ? 'border-amber-200 bg-amber-50' : task.status === 'SUCCESS' ? 'border-emerald-200 bg-emerald-50' : 'border-slate-200 bg-slate-50'}`}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex items-start gap-2 min-w-0">
+                      {isActive ? (
+                        <span className="mt-0.5 w-4 h-4 border-2 border-blue-600 border-t-transparent rounded-full animate-spin flex-shrink-0" />
+                      ) : task.status === 'SUCCESS' ? (
+                        <CheckCircle2 className="w-4 h-4 mt-0.5 text-emerald-600 flex-shrink-0" />
+                      ) : task.status === 'CANCELLED' ? (
+                        <CircleSlash2 className="w-4 h-4 mt-0.5 text-slate-500 flex-shrink-0" />
+                      ) : (
+                        <AlertCircle className={`w-4 h-4 mt-0.5 flex-shrink-0 ${isFailure ? 'text-rose-600' : 'text-amber-600'}`} />
+                      )}
+                      <div className="min-w-0">
+                        <div className="text-xs font-semibold text-slate-900 break-all">{task.title}</div>
+                        {task.message && <p className="text-[11px] text-slate-700 mt-1 leading-relaxed">{task.message}</p>}
+                        {task.impact && <p className="text-[11px] text-slate-500 mt-1 leading-relaxed">{task.impact}</p>}
+                        {task.details && (
+                          <details className="mt-2 text-[10px] text-slate-500">
+                            <summary className="cursor-pointer select-none">查看错误详情</summary>
+                            <div className="mt-1 rounded-lg bg-white/70 border border-slate-200 p-2 break-all font-mono">{task.details}</div>
+                          </details>
+                        )}
+                      </div>
+                    </div>
+                    {task.retryable && !isActive && (
+                      <button
+                        type="button"
+                        onClick={() => handleFiles([task.file])}
+                        disabled={isProcessing}
+                        className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-slate-300 bg-white text-slate-700 hover:bg-slate-50 text-[11px] font-medium disabled:opacity-50 flex-shrink-0"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5" />
+                        重新识别
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </div>
       )}

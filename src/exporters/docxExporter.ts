@@ -138,7 +138,7 @@ function reviewIssuesTable(accounts: BankAccount[]): Table {
   ]));
   return simpleTable(
     ['账户', '原件位置', '核对事项', '处理状态', '律师说明／核对要求'],
-    rows.length ? rows : [['—', '—', '未发现需要人工复核的原始数据问题', '自动通过', '仍应按需抽查原件']],
+    rows.length ? rows : [['—', '—', '未发现需要人工复核的原始数据问题', '系统校验通过', '仍应按需抽查原件']],
     [16, 12, 24, 14, 34]
   );
 }

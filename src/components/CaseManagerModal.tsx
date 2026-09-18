@@ -32,6 +32,7 @@ export const CaseManagerModal: React.FC<CaseManagerModalProps> = ({
   const [cases, setCases] = useState<CaseRecord[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [actionError, setActionError] = useState('');
 
   const loadCases = async () => {
     setIsLoading(true);
@@ -59,14 +60,19 @@ export const CaseManagerModal: React.FC<CaseManagerModalProps> = ({
   const handleDelete = async (e: React.MouseEvent, caseId: string) => {
     e.stopPropagation();
     if (window.confirm('确定要删除该案件及全部流水记录吗？此操作无法撤销。')) {
-      await deleteCaseRecord(caseId);
-      await deleteSourceDocumentsForCase(caseId);
-      if (caseId === currentCaseId) {
-        onNewCase();
-        onClose();
-        return;
+      setActionError('');
+      try {
+        await deleteCaseRecord(caseId);
+        await deleteSourceDocumentsForCase(caseId);
+        if (caseId === currentCaseId) {
+          onNewCase();
+          onClose();
+          return;
+        }
+        await loadCases();
+      } catch {
+        setActionError('案件未能删除，原有数据仍然保留。请关闭案件库后重新打开再试。');
       }
-      await loadCases();
     }
   };
 
@@ -78,6 +84,8 @@ export const CaseManagerModal: React.FC<CaseManagerModalProps> = ({
   const handleImportBackup = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    const input = e.currentTarget;
+    setActionError('');
 
     const reader = new FileReader();
     reader.onload = async (event) => {
@@ -89,7 +97,10 @@ export const CaseManagerModal: React.FC<CaseManagerModalProps> = ({
         onSelectCase(record);
         onClose();
       } catch (err: any) {
-        alert('导入失败: ' + err.message);
+        console.warn('Case backup import failed', err);
+        setActionError('备份文件未能导入，现有案件未受影响。请确认这是由本系统导出的 JSON 备份文件。');
+      } finally {
+        input.value = '';
       }
     };
     reader.readAsText(file);
@@ -138,6 +149,13 @@ export const CaseManagerModal: React.FC<CaseManagerModalProps> = ({
             </button>
           </div>
         </div>
+
+        {actionError && (
+          <div role="alert" className="mx-6 mt-4 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs text-rose-900">
+            <div className="font-semibold">操作未完成</div>
+            <div className="mt-1 text-rose-800">{actionError}</div>
+          </div>
+        )}
 
         {/* Search Bar */}
         <div className="p-4 border-b border-slate-100 bg-slate-50/50">

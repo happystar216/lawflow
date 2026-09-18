@@ -38,7 +38,7 @@ export const Step6Export: React.FC<Step6Props> = ({ caseMeta, evaluationReport, 
       setDownloadSuccess(true);
     } catch (error) {
       console.error('Word export error:', error);
-      setExportError('Word 报告生成失败，请稍后重试。');
+      setExportError('Word 报告未生成，现有案件数据不受影响。请再次点击“下载 Word 报告”；如果仍然失败，请先导出 Excel 底表作为备份。');
     } finally {
       setIsExportingWord(false);
     }
@@ -53,7 +53,7 @@ export const Step6Export: React.FC<Step6Props> = ({ caseMeta, evaluationReport, 
       setDownloadSuccess(true);
     } catch (error) {
       console.error('Excel export error:', error);
-      setExportError('Excel 底表生成失败，请稍后重试。');
+      setExportError('Excel 底表未生成，现有案件数据不受影响。请再次点击“下载 Excel 底表”重试。');
     } finally {
       setIsExportingExcel(false);
     }
@@ -68,7 +68,7 @@ export const Step6Export: React.FC<Step6Props> = ({ caseMeta, evaluationReport, 
       setDownloadSuccess(true);
     } catch (error) {
       console.error('PDF export error:', error);
-      setExportError('PDF 证据册生成失败，请稍后重试。');
+      setExportError('PDF 证据册未生成，现有案件数据不受影响。请确认原始 PDF 仍可打开，然后再次重试。');
     } finally {
       setIsExportingPdf(false);
     }
@@ -186,11 +186,11 @@ export const Step6Export: React.FC<Step6Props> = ({ caseMeta, evaluationReport, 
         {downloadSuccess && (
           <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-xs text-emerald-700 flex items-center space-x-2">
             <CheckCircle2 className="w-4 h-4 flex-shrink-0" />
-            <span>文书已成功生成并下载至您的电脑。祝执行办案顺利！</span>
+            <span>文件已生成，浏览器已开始下载。</span>
           </div>
         )}
         {exportError && (
-          <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-700">
+          <div role="alert" className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-700">
             {exportError}
           </div>
         )}

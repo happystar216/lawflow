@@ -46,6 +46,36 @@ test('preserves a lawyer resolution when the task list is regenerated', () => {
   assert.equal(rebuilt.find(issue => issue.id === resolved.id)?.resolutionNote, '已核对原件');
 });
 
+test('keeps an active review task visible while the user is correcting its fields', () => {
+  const invalid: StandardTransaction = {
+    ...transactions[0],
+    id: 'editing-amount',
+    amount: 0,
+    extractionConfidence: 0.95,
+    dataQualityIssues: ['INVALID_AMOUNT'],
+    reviewStatus: 'PENDING'
+  };
+  const initial = buildEvidenceReviewIssues({ ...account, parseWarnings: [] }, [invalid]);
+  const amountIssue = initial.find(issue => issue.category === 'INVALID_AMOUNT');
+  assert.ok(amountIssue);
+
+  const corrected = {
+    ...invalid,
+    amount: 100,
+    dataQualityIssues: [],
+    reviewStatus: 'CORRECTED' as const,
+    reviewedBy: '律师人工核对'
+  };
+  const rebuilt = buildEvidenceReviewIssues({
+    ...account,
+    parseWarnings: [],
+    reviewIssues: [amountIssue!]
+  }, [corrected]);
+
+  assert.equal(rebuilt.find(issue => issue.id === amountIssue!.id)?.status, 'PENDING');
+  assert.equal(rebuilt.some(issue => issue.category === 'LOW_CONFIDENCE'), false);
+});
+
 test('infers the page for an old count warning when exactly one page has the extracted count', () => {
   const oldAccount: BankAccount = {
     ...account,
