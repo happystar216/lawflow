@@ -3,15 +3,19 @@ import { randomUUID } from 'node:crypto';
 import { access, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { Readable } from 'node:stream';
 import { basename, join, resolve } from 'node:path';
-import { Browser, chromium, Page } from 'playwright-core';
+import { BrowserContext, chromium, Page } from 'playwright-core';
 
 const HOST = '127.0.0.1';
 const PORT = positiveInteger(process.env.LAWFLOW_DEBUG_PORT, 4318);
 const DEFAULT_TARGET = process.env.LAWFLOW_DEBUG_TARGET || 'https://lawtool.cocoaiagent.com/';
 const OUTPUT_ROOT = resolve(process.env.LAWFLOW_DEBUG_OUTPUT || 'tmp/online-debug-runs');
+const BROWSER_PROFILE_ROOT = resolve(process.env.LAWFLOW_DEBUG_PROFILE || 'tmp/online-debug-profile');
 const MAX_FILE_BYTES = positiveInteger(process.env.LAWFLOW_DEBUG_MAX_FILE_MB, 75) * 1024 * 1024;
 const MAX_TOTAL_BYTES = positiveInteger(process.env.LAWFLOW_DEBUG_MAX_TOTAL_MB, 250) * 1024 * 1024;
-const RUN_TIMEOUT_MS = positiveInteger(process.env.LAWFLOW_DEBUG_TIMEOUT_MINUTES, 60) * 60_000;
+// Large bank bundles can legitimately exceed an hour when several dense pages
+// need focused re-reading. Keep the limit configurable, but do not let the
+// automation harness terminate a healthy production import prematurely.
+const RUN_TIMEOUT_MS = positiveInteger(process.env.LAWFLOW_DEBUG_TIMEOUT_MINUTES, 180) * 60_000;
 const RETENTION_MS = positiveInteger(process.env.LAWFLOW_DEBUG_RETENTION_HOURS, 24) * 60 * 60_000;
 const TERMINAL_TASK_STATUSES = new Set(['SUCCESS', 'WARNING', 'EMPTY', 'ERROR', 'CANCELLED']);
 const SUPPORTED_EXTENSIONS = new Set(['.pdf', '.xlsx', '.xls', '.csv']);
@@ -50,6 +54,7 @@ let queueActive = false;
 
 async function main(): Promise<void> {
   await mkdir(OUTPUT_ROOT, { recursive: true });
+  await mkdir(BROWSER_PROFILE_ROOT, { recursive: true });
   await cleanupExpiredRuns();
   const server = createServer((request, response) => {
     handleRequest(request, response).catch(error => {
@@ -193,19 +198,19 @@ async function executeRun(run: DebugRun): Promise<void> {
   run.status = 'RUNNING';
   run.startedAt = new Date().toISOString();
   await persistRun(run);
-  let browser: Browser | undefined;
+  let context: BrowserContext | undefined;
   let activePage: Page | undefined;
   let monitor: NodeJS.Timeout | undefined;
   const diagnostics: BrowserDiagnostic[] = [];
   try {
     const executablePath = await findChromeExecutable();
-    browser = await chromium.launch({
+    context = await chromium.launchPersistentContext(BROWSER_PROFILE_ROOT, {
       executablePath,
       headless: process.env.LAWFLOW_DEBUG_HEADFUL === '1' ? false : true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+      viewport: { width: 1440, height: 1000 }
     });
-    const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
-    const page = await context.newPage();
+    const page = context.pages()[0] || await context.newPage();
     activePage = page;
     installDiagnostics(page, diagnostics);
     await seedAutomationUser(page, run.id);
@@ -319,7 +324,7 @@ async function executeRun(run: DebugRun): Promise<void> {
     await writeFile(join(run.outputDir, 'error.json'), `${JSON.stringify({ error: run.error, diagnostics }, null, 2)}\n`, 'utf8');
   } finally {
     if (monitor) clearInterval(monitor);
-    await browser?.close().catch(() => undefined);
+    await context?.close().catch(() => undefined);
     await persistRun(run);
   }
 }

@@ -15,6 +15,7 @@ const DENSE_PAGE_BAND_SCALE = 3;
 const DENSE_PAGE_BAND_COUNT = 4;
 const PAGE_MAP_BATCH_SIZE = 8;
 const THUMBNAIL_SCALE = 0.42;
+const MAX_GLOBAL_AUDIT_PAGES = 20;
 
 type PageMapType = 'TRANSACTIONS' | 'ACCOUNT_INFO' | 'DOCUMENT' | 'BLANK' | 'UNKNOWN';
 interface PageMapItem {
@@ -346,10 +347,15 @@ async function parsePageWithFallback(
         if (bandCandidate && (!bestCandidate || qualityScore(bandCandidate) > qualityScore(bestCandidate))) {
           bestCandidate = bandCandidate;
         }
-        if (bandCandidate?.countComplete) {
+        if (bandCandidate) {
           permit.success(bandCandidate.usageTokens || 0);
           permit = undefined;
-          return bandCandidate;
+          // A dense page has already had one full-page extraction plus one
+          // independent band-by-band extraction. Repeating both operations at
+          // other scales/rotations can multiply the request count without
+          // resolving an OCR count disagreement. Preserve the strongest result
+          // and surface the mismatch for focused human review instead.
+          return finalizeBandResult(bestCandidate || bandCandidate, pageNumber);
         }
       }
       const complete = requireCompleteCount(candidate);
@@ -381,6 +387,24 @@ async function parsePageWithFallback(
 
   const message = lastError instanceof Error ? lastError.message : String(lastError || '页面无法识别');
   return failedPageResult(pageNumber, totalPages, sourceFileName, message);
+}
+
+export function finalizeBandResult(result: ChunkParseResult, pageNumber: number): ChunkParseResult {
+  if (result.countComplete) return result;
+  const expected = result.expectedTransactionCount ?? result.pageQuality?.[0]?.expectedCount;
+  const countText = expected === undefined
+    ? `已分段提取 ${result.transactions.length} 笔`
+    : `独立清点为 ${expected} 笔，分段提取为 ${result.transactions.length} 笔`;
+  const warning = `第 ${pageNumber} 页${countText}，一次完整读取和一次分段补读后仍不一致；已保留现有明细，请对照原件补充缺失行`;
+  return {
+    ...result,
+    countComplete: false,
+    warnings: [...new Set([...(result.warnings || []), warning])],
+    transactions: result.transactions.map(transaction => ({ ...transaction, reviewStatus: 'PENDING' as const })),
+    pageQuality: (result.pageQuality || []).map(item => item.page === pageNumber
+      ? { ...item, status: 'NEEDS_REVIEW' as const }
+      : item)
+  };
 }
 
 function shouldUsePageBands(result: ChunkParseResult): boolean {
@@ -649,9 +673,12 @@ async function auditSuspiciousPages(
 ): Promise<ChunkParseResult[]> {
   const sorted = [...input].sort((a, b) => a.pageStart - b.pageStart);
   const scored = suspiciousPageScores(sorted)
-    .filter(item => item.score > 0)
+    // A count-only mismatch has already had a full-page read and a focused
+    // band read. Keep it visible for manual completion, but reserve another
+    // model call for stronger field, direction, balance or missing-page clues.
+    .filter(item => item.score >= 8)
     .sort((a, b) => b.score - a.score || a.page - b.page)
-    .slice(0, Math.min(80, totalPages));
+    .slice(0, Math.min(MAX_GLOBAL_AUDIT_PAGES, Math.max(4, Math.ceil(totalPages * 0.15))));
   if (!scored.length) return sorted;
 
   report(`全局校验发现 ${scored.length} 个异常页面，正在结合相邻页复核…`);
