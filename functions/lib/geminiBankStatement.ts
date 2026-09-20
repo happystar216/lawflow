@@ -1,3 +1,5 @@
+import { normalizeSourceBox } from './sourceRegion';
+
 export interface GeminiEnvironment {
   GEMINI_API_KEY?: string;
   GEMINI_MODEL?: string;
@@ -49,6 +51,7 @@ function buildGeminiDirectPrompt(options?: GeminiParseOptions): string {
   "transactions": [
     {
       "p": 原件页码数字,
+      "r": 本页交易明细中从1开始的物理行序号,
       "bk": "银行名称",
       "ac": "账号或卡号",
       "holder": "户名(若未体现则留空)",
@@ -58,7 +61,8 @@ function buildGeminiDirectPrompt(options?: GeminiParseOptions): string {
       "bal": 余额数值(无法识别填null),
       "cp": "对方户名",
       "ca": "对方账号",
-      "sm": "摘要及备注"
+      "sm": "摘要及备注",
+      "box": [该交易整行的上边界, 左边界, 下边界, 右边界，按页面左上角为原点的0至1000整数坐标；无法定位填null]
     }
   ]
 }`;
@@ -258,10 +262,7 @@ export async function parsePdfWithGeminiStream(
         .filter(isReliableExtractedAccountNumber))]
     });
   }
-  const documentAccountNumbers = [...new Set([...pageIdentities.values()].flatMap(identity => [
-    ...identity.accountNumbers,
-    ...(isReliableExtractedAccountNumber(identity.accountNumber) ? [identity.accountNumber] : [])
-  ]))];
+  const documentAccountNumbers = [...new Set([...pageIdentities.values()].flatMap(listedIdentityAccountNumbers))];
 
   // A page-level identity is useful for ordinary single-account statements and
   // protects against a model carrying the previous page's account forward. It
@@ -277,6 +278,7 @@ export async function parsePdfWithGeminiStream(
     transactionAccountsByPage.set(pageNumber, accounts);
   }
   const consolidatedPageResolution = resolveConsolidatedPageAccounts(rawTxList, pageIdentities);
+  const rowCountByPage = new Map<number, number>();
 
   const rawTransactions = rawTxList.map((tx: any, idx: number) => {
     const rawHolder = String(tx.holder || '').trim();
@@ -288,6 +290,9 @@ export async function parsePdfWithGeminiStream(
     const rawBalance = tx.bal === null || tx.bal === undefined || tx.bal === '' ? null : Number(tx.bal);
     const balance = rawBalance !== null && Number.isFinite(rawBalance) ? rawBalance : null;
     const rawPageNumber = Number.parseInt(String(tx.p || ''), 10);
+    const inferredRowIndex = (rowCountByPage.get(rawPageNumber) || 0) + 1;
+    rowCountByPage.set(rawPageNumber, inferredRowIndex);
+    const reportedRowIndex = Number.parseInt(String(tx.r || ''), 10);
     const pageIdentity = pageIdentities.get(rawPageNumber);
     const rowAccountNumber = normalizeExtractedAccountNumber(tx.ac);
     const isMultiAccountPage = (transactionAccountsByPage.get(rawPageNumber)?.size || 0) > 1;
@@ -318,8 +323,9 @@ export async function parsePdfWithGeminiStream(
       summary: String(tx.sm || ''),
       rawSourceFile: file.name,
       rawPageNumber: Number.isInteger(rawPageNumber) && rawPageNumber > 0 ? rawPageNumber : undefined,
-      rawRowIndex: idx + 1,
+      rawRowIndex: Number.isInteger(reportedRowIndex) && reportedRowIndex > 0 ? reportedRowIndex : inferredRowIndex,
       rawText: `${tx.tm || ''} ${tx.dir || ''} ${tx.amt || ''} ${tx.sm || ''}`,
+      sourceRegion: normalizeSourceBox(tx.box),
       balanceAvailable: balance !== null,
       extractionMethod: 'GEMINI_DIRECT_PDF',
       extractionConfidence: dataQualityIssues.length ? 0.4 : 0.9,
@@ -396,10 +402,7 @@ export async function parsePdfWithGeminiStream(
   // document. Short detail-page numbers are reconciled to a unique longer
   // account-list number above, so the three active accounts are not duplicated.
   for (const identity of pageIdentities.values()) {
-    const listed = [...new Set([
-      ...identity.accountNumbers,
-      ...(isReliableExtractedAccountNumber(identity.accountNumber) ? [identity.accountNumber] : [])
-    ])];
+    const listed = listedIdentityAccountNumbers(identity);
     for (const listedNumber of listed) {
       const accountNumber = canonicalDocumentAccountNumber(listedNumber, documentAccountNumbers);
       if (!isReliableExtractedAccountNumber(accountNumber)) continue;
@@ -509,6 +512,14 @@ function normalizeExtractedAccountNumber(value: unknown): string {
   return String(value || '').replace(/[\s\-_—–·•]/g, '');
 }
 
+function listedIdentityAccountNumbers(identity: { accountNumber: string; accountNumbers: string[] }): string[] {
+  // On an account-list page, the plural field is the authoritative physical
+  // list. The singular field is only a fallback for ordinary one-account pages;
+  // models sometimes put a customer number or a shortened duplicate there.
+  if (identity.accountNumbers.length > 0) return [...new Set(identity.accountNumbers)];
+  return isReliableExtractedAccountNumber(identity.accountNumber) ? [identity.accountNumber] : [];
+}
+
 function canonicalDocumentAccountNumber(value: string, candidates: string[]): string {
   const normalized = normalizeExtractedAccountNumber(value);
   if (!isReliableExtractedAccountNumber(normalized)) return normalized;
@@ -565,10 +576,7 @@ function resolveConsolidatedPageAccounts(
     if (segments.length <= 1) continue;
 
     const identity = pageIdentities.get(pageNumber);
-    const candidates = [...new Set([
-      ...(identity?.accountNumbers || []),
-      ...(isReliableExtractedAccountNumber(identity?.accountNumber || '') ? [identity!.accountNumber] : [])
-    ])];
+    const candidates = identity ? listedIdentityAccountNumbers(identity) : [];
     const hasCompleteAccountList = candidates.length === segments.length;
     segments.forEach((segment, segmentIndex) => {
       const accountNumber = hasCompleteAccountList

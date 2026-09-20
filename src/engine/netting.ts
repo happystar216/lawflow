@@ -23,7 +23,14 @@ export function calculateInternalNetting(
     if (acc.accountName) ownedAccountNames.add(acc.accountName.trim());
   });
 
-  const txList = [...transactions];
+  // Derived flags must never leak from a previous calculation. Work on fresh
+  // objects so the canonical evidence rows remain immutable.
+  const txList = transactions.map(transaction => {
+    const clone = { ...transaction };
+    delete clone.isInternalTransfer;
+    delete clone.internalTransferPairId;
+    return clone;
+  });
   let internalCount = 0;
   let internalTotalAmount = 0;
 

@@ -55,6 +55,13 @@ export const App: React.FC = () => {
   const [accounts, setAccounts] = useState<BankAccount[]>([]);
   const [transactions, setTransactions] = useState<StandardTransaction[]>([]);
   const [evaluationReport, setEvaluationReport] = useState<CaseEvaluationReport | null>(null);
+  const currentAnalysisFingerprint = useMemo(
+    () => engine.fingerprint(caseMeta, transactions, accounts),
+    [engine, caseMeta, transactions, accounts]
+  );
+  const freshEvaluationReport = evaluationReport?.analysisFingerprint === currentAnalysisFingerprint
+    ? evaluationReport
+    : null;
 
   const [currentStep, setCurrentStep] = useState<WorkflowStep>(0);
   const [completedSteps, setCompletedSteps] = useState<Set<WorkflowStep>>(new Set());
@@ -100,7 +107,8 @@ export const App: React.FC = () => {
           const { report, processedTransactions } = engine.evaluateCase(
             active.metadata,
             normalized.transactions,
-            normalized.accounts
+            normalized.accounts,
+            active.evaluationReport
           );
           setEvaluationReport(report);
           setTransactions(processedTransactions);
@@ -120,6 +128,23 @@ export const App: React.FC = () => {
     loadUserCases();
     return () => { cancelled = true; };
   }, [currentUser]);
+
+  // A report is valid only for the exact canonical facts that produced it.
+  // Any transaction/account/case edit changes the fingerprint, hides the stale
+  // report immediately, and schedules a complete recalculation.
+  useEffect(() => {
+    if (!transactions.length) return;
+    if (currentUser && hydratedUserId !== currentUser.id) return;
+    if (evaluationReport?.analysisFingerprint === currentAnalysisFingerprint) return;
+    const { report, processedTransactions } = engine.evaluateCase(
+      caseMeta,
+      transactions,
+      accounts,
+      evaluationReport
+    );
+    setEvaluationReport(report);
+    setTransactions(processedTransactions);
+  }, [currentAnalysisFingerprint, hydratedUserId, currentUser?.id]);
 
   // Auto-Save active case to localStorage & IndexedDB on every change
   useEffect(() => {
@@ -143,7 +168,7 @@ export const App: React.FC = () => {
         metadata: caseMeta,
         accounts,
         transactions,
-        evaluationReport,
+        evaluationReport: freshEvaluationReport,
         userId: currentUser.id,
         updatedAt: new Date().toISOString()
       };
@@ -154,7 +179,7 @@ export const App: React.FC = () => {
           setPersistenceError('当前案件的最新修改尚未保存。请保持页面打开并点击“重新保存”。');
         });
     }
-  }, [caseMeta, accounts, transactions, currentStep, completedSteps, evaluationReport, currentUser, hydratedUserId, activeCaseStorageKey, saveRetryToken]);
+  }, [caseMeta, accounts, transactions, currentStep, completedSteps, freshEvaluationReport, currentUser, hydratedUserId, activeCaseStorageKey, saveRetryToken]);
 
   const handleNewCase = () => {
     const blankCase = createBlankCase();
@@ -173,7 +198,7 @@ export const App: React.FC = () => {
     setAccounts(normalized.accounts);
     setTransactions(normalized.transactions);
     if (normalized.transactions.length) {
-      const { report, processedTransactions } = engine.evaluateCase(record.metadata, normalized.transactions, normalized.accounts);
+      const { report, processedTransactions } = engine.evaluateCase(record.metadata, normalized.transactions, normalized.accounts, record.evaluationReport);
       setEvaluationReport(report);
       setTransactions(processedTransactions);
     } else {
@@ -203,6 +228,22 @@ export const App: React.FC = () => {
 
   const goToStep = (step: WorkflowStep) => {
     setCurrentStep(safeWorkflowStep(step, transactions.length));
+  };
+
+  const handleTransactionsUpdated = (updatedTransactions: StandardTransaction[]) => {
+    if (!updatedTransactions.length) {
+      setTransactions([]);
+      setEvaluationReport(null);
+      return;
+    }
+    const { report, processedTransactions } = engine.evaluateCase(
+      caseMeta,
+      updatedTransactions,
+      accounts,
+      evaluationReport
+    );
+    setTransactions(processedTransactions);
+    setEvaluationReport(report);
   };
 
   if (!currentUser) {
@@ -280,7 +321,7 @@ export const App: React.FC = () => {
             accounts={accounts}
             transactions={transactions}
             onAccountsUpdated={setAccounts}
-            onTransactionsUpdated={setTransactions}
+            onTransactionsUpdated={handleTransactionsUpdated}
             onPrev={() => goToStep(1)}
             onNext={() => {
               markStepCompleted(2);
@@ -309,7 +350,7 @@ export const App: React.FC = () => {
             accounts={accounts}
             transactions={transactions}
             engine={engine}
-            evaluationReport={evaluationReport}
+            evaluationReport={freshEvaluationReport}
             onEvaluationComplete={(report, procTx) => {
               setEvaluationReport(report);
               setTransactions(procTx);
@@ -323,17 +364,24 @@ export const App: React.FC = () => {
           />
         )}
 
-        {currentStep === 5 && evaluationReport && (
+        {(currentStep === 5 || currentStep === 6) && transactions.length > 0 && !freshEvaluationReport && (
+          <div className="max-w-3xl mx-auto mt-10 rounded-2xl border border-blue-200 bg-blue-50 px-6 py-8 text-center">
+            <div className="text-sm font-semibold text-blue-950">流水已发生变化，正在重新计算全部分析结果…</div>
+            <div className="mt-2 text-xs text-blue-700">旧报告已失效；完成平账、内部转账、资金流向和风险规则重算后会自动恢复。</div>
+          </div>
+        )}
+
+        {currentStep === 5 && freshEvaluationReport && (
           <Step5PostAnnotation
-            evaluationReport={evaluationReport}
+            evaluationReport={freshEvaluationReport}
             transactions={transactions}
             onMatchesUpdated={updatedMatches => {
               setEvaluationReport({
-                ...evaluationReport,
+                ...freshEvaluationReport,
                 matches: updatedMatches
               });
             }}
-            onTransactionsUpdated={setTransactions}
+            onTransactionsUpdated={handleTransactionsUpdated}
             onPrev={() => goToStep(4)}
             onNext={() => {
               markStepCompleted(5);
@@ -342,10 +390,10 @@ export const App: React.FC = () => {
           />
         )}
 
-        {currentStep === 6 && evaluationReport && (
+        {currentStep === 6 && freshEvaluationReport && (
           <Step6Export
             caseMeta={caseMeta}
-            evaluationReport={evaluationReport}
+            evaluationReport={freshEvaluationReport}
             transactions={transactions}
             accounts={accounts}
             onPrev={() => goToStep(5)}

@@ -8,6 +8,7 @@ import { Rule11_FalseAssetDeclaration } from '../src/engine/rules/Rule11_FalseAs
 import { Rule05_FabricatedRemarksBilateral } from '../src/engine/rules/Rule05_FabricatedRemarksBilateral';
 import { Rule08_WealthInsuranceTransfer } from '../src/engine/rules/Rule08_WealthInsuranceTransfer';
 import { Rule04_FastInFastOutZeroBalance } from '../src/engine/rules/Rule04_FastInFastOutZeroBalance';
+import { aggregateCounterparties, effectiveCounterpartyName } from '../src/engine/bilateral';
 import { BankAccount, StandardTransaction } from '../src/types/transaction';
 import { CaseMetadata } from '../src/types/case';
 
@@ -88,6 +89,14 @@ test('internal netting never pairs an owned transfer with a same-amount spouse t
   const result = calculateInternalNetting(transactions, accounts);
   assert.equal(result.internalCount, 0);
   assert.equal(result.processedTransactions.some(item => item.isInternalTransfer), false);
+});
+
+test('judicial deduction without a named counterparty is classified from its summary', () => {
+  const deduction = tx('judicial', 'A', 'OUT', 5267.59, '', '司法划扣');
+  assert.equal(effectiveCounterpartyName(deduction), '【司法机关划扣】');
+  const counterparties = aggregateCounterparties([deduction], '张三');
+  assert.equal(counterparties['【司法机关划扣】'].totalOut, 5267.59);
+  assert.equal(counterparties['【无对手方名称／用途待核对】'], undefined);
 });
 
 test('balance audit reports a real difference and distinguishes unavailable balances', () => {

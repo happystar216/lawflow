@@ -10,11 +10,16 @@ export interface NormalizedRecognizedData {
 export function normalizeRecognizedData(
   inputAccounts: BankAccount[], inputTransactions: StandardTransaction[]
 ): NormalizedRecognizedData {
+  const aliasCandidates = inputAccounts.filter(account => isReliableAccountNumber(account.accountNumber));
   const publicAccounts = inputAccounts.map(account => ({
     ...account,
+    accountNumber: canonicalStoredAccountNumber(account.accountNumber, account.fileName, account.sourceDocumentId, aliasCandidates),
     parseWarnings: account.parseWarnings?.map(publicParserWarning)
   }));
-  const preparedTransactions = restoreUnsupportedBalanceCorrections(inputTransactions.map(upgradeLegacyGeminiReviewStatus));
+  const preparedTransactions = restoreUnsupportedBalanceCorrections(inputTransactions.map(transaction => upgradeLegacyGeminiReviewStatus({
+    ...transaction,
+    accountNumber: canonicalStoredAccountNumber(transaction.accountNumber, transaction.rawSourceFile, transaction.sourceDocumentId, aliasCandidates)
+  })));
   const stabilized = healSummaryOverriddenAmounts(stabilizePageAccountIdentities(preparedTransactions));
   const { transactions: deduped, mergedPagesByAccount } = deduplicateTransactions(stabilized);
   const settlementRepaired = repairPeriodicSettlementRows(deduped);
@@ -30,6 +35,7 @@ export function normalizeRecognizedData(
         transaction.reviewStatus = 'AUTO_PASSED';
       }
     }
+    refreshFieldEvidence(transaction);
   }
   const transactionsByAccount = new Map<string, StandardTransaction[]>();
   for (const transaction of transactions) {
@@ -188,6 +194,34 @@ export function normalizeRecognizedData(
     });
   }
   return { accounts, transactions };
+}
+
+function canonicalStoredAccountNumber(value: string, sourceFile: string, sourceDocumentId: string | undefined, candidates: BankAccount[]): string {
+  const normalized = normalizeAccountIdentityPart(value || '');
+  if (!isReliableAccountNumber(normalized)) return value;
+  const matches = [...new Set(candidates
+    .filter(account => (sourceDocumentId && account.sourceDocumentId
+      ? account.sourceDocumentId === sourceDocumentId
+      : account.fileName === sourceFile) && areStoredAccountAliases(account.accountNumber, normalized))
+    .map(account => normalizeAccountIdentityPart(account.accountNumber)))];
+  if (!matches.length) return normalized;
+  const longestLength = Math.max(...matches.map(candidate => candidate.length));
+  const longest = matches.filter(candidate => candidate.length === longestLength);
+  return longest.length === 1 ? longest[0] : normalized;
+}
+
+function areStoredAccountAliases(left: string, right: string): boolean {
+  const a = normalizeAccountIdentityPart(left || '');
+  const b = normalizeAccountIdentityPart(right || '');
+  if (a === b) return true;
+  if (!/^\d+$/.test(a) || !/^\d+$/.test(b)) return false;
+  const longer = a.length >= b.length ? a : b;
+  const shorter = a.length >= b.length ? b : a;
+  const omittedPrefixLength = longer.length - shorter.length;
+  return shorter.length >= 10
+    && omittedPrefixLength >= 1
+    && omittedPrefixLength <= 4
+    && longer.endsWith(shorter);
 }
 
 /**
@@ -613,7 +647,10 @@ function minimalAccount(transaction: StandardTransaction): BankAccount {
     accountNumber: transaction.accountNumber, accountName: transaction.accountName, bankName: transaction.bankName,
     ownerType: 'DEBTOR_MAIN', fileName: transaction.rawSourceFile, fileType: 'pdf', totalIn: 0, totalOut: 0,
     transactionCount: 0, startDate: '', endDate: '', startBalance: 0, endBalance: 0,
-    isBalanced: false, balanceDiff: 0, balanceAvailable: transaction.balanceAvailable !== false
+    isBalanced: false, balanceDiff: 0, balanceAvailable: transaction.balanceAvailable !== false,
+    sourceDocumentId: transaction.sourceDocumentId,
+    sourceContentHash: transaction.sourceContentHash,
+    extractionRunId: transaction.extractionRunId
   };
 }
 
@@ -680,6 +717,8 @@ export function deduplicateTransactions(transactions: StandardTransaction[]): De
 }
 
 function areTransactionsDuplicate(a: StandardTransaction, b: StandardTransaction): boolean {
+  if (a.sourceDocumentId && b.sourceDocumentId && a.sourceDocumentId !== b.sourceDocumentId) return false;
+  if ((!a.sourceDocumentId || !b.sourceDocumentId) && a.rawSourceFile !== b.rawSourceFile) return false;
   // 1. Account matching
   const accA = normalizeAccountIdentityPart(a.accountNumber);
   const accB = normalizeAccountIdentityPart(b.accountNumber);
@@ -1011,7 +1050,7 @@ export function healOcrBalanceAndAmountDiscrepancies(transactions: StandardTrans
           const currAmtStr = curr.amount.toFixed(2);
           const transactionText = `${curr.summary || ''} ${curr.counterpartyName || ''} ${curr.rawText || ''}`;
           const isAccountClosureSettlement = curr.direction === 'OUT'
-            && /销户|清户|销账|结清|冻结扣划|司法扣划|法院扣划/.test(transactionText)
+            && /销户|清户|销账|结清|冻结扣划|司法扣划|司法划扣|法院扣划|法院划扣/.test(transactionText)
             && impliedAmt >= curr.amount
             && diff >= 1;
 
@@ -1058,4 +1097,39 @@ function recordCorrection(transaction: StandardTransaction, reason: string): voi
     ? `${transaction.correctionReason}；${reason}`
     : reason;
   transaction.reviewStatus = 'CORRECTED';
+}
+
+function refreshFieldEvidence(transaction: StandardTransaction): void {
+  if (!transaction.fieldEvidence) return;
+  const reason = transaction.correctionReason;
+  update('accountNumber', transaction.accountNumber);
+  update('transactionTime', transaction.transactionTime);
+  update('direction', transaction.direction, transaction.originalDirection);
+  update('amount', transaction.amount, transaction.originalAmount);
+  update('balance', transaction.balance, transaction.originalBalance);
+  update('counterpartyName', transaction.counterpartyName);
+  update('counterpartyAccount', transaction.counterpartyAccount || '');
+  update('summary', transaction.summary);
+
+  function update(
+    field: keyof NonNullable<StandardTransaction['fieldEvidence']>,
+    currentValue: string | number | null,
+    explicitOriginal?: string | number | null
+  ): void {
+    const existing = transaction.fieldEvidence?.[field];
+    if (!existing) return;
+    const originalValue = explicitOriginal !== undefined ? explicitOriginal : existing.originalValue;
+    const changed = String(originalValue ?? '') !== String(currentValue ?? '');
+    transaction.fieldEvidence![field] = changed ? {
+      ...existing,
+      originalValue,
+      currentValue,
+      origin: 'AUTO_NORMALIZATION',
+      decision: transaction.reviewedBy === '律师人工核对' ? 'CONFIRMED' : 'SUGGESTED',
+      reason
+    } : {
+      ...existing,
+      currentValue
+    };
+  }
 }

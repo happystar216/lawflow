@@ -6,6 +6,7 @@ import { parsePdfWithGemini, GeminiProgressInfo } from '../parsers/geminiPdfPars
 import { deleteSourceDocument, saveSourceDocument } from '../store/sourceDocumentStore';
 import { accountIdentityKey, transactionBelongsToAccount } from '../utils/accountIdentity';
 import { importErrorForUser } from '../utils/userFacingError';
+import { attachSourceProvenance, createExtractionRun, identifySourceDocument, sourceIdentity } from '../utils/evidenceProvenance';
 
 interface Step1Props {
   caseId: string;
@@ -58,6 +59,13 @@ export const Step1Upload: React.FC<Step1Props> = ({
     .filter(account => account.transactionCount === 0)
     .map(account => account.fileName))];
   const hasTransactions = transactions.length > 0;
+  const importedFileGroups = Array.from(accounts.reduce((groups, account) => {
+    const key = sourceIdentity(account);
+    const current = groups.get(key) || [];
+    current.push(account);
+    groups.set(key, current);
+    return groups;
+  }, new Map<string, BankAccount[]>()).entries());
 
   const updateImportTask = (id: string, patch: Partial<ImportTask>) => {
     setImportTasks(current => current.map(task => task.id === id ? { ...task, ...patch } : task));
@@ -124,17 +132,38 @@ export const Step1Upload: React.FC<Step1Props> = ({
         let importedTransactionCount = 0;
         let importedAccountCount = 0;
         let sourceStorageWarning = false;
+        setStatusText(`正在校验原始文件“${file.name}”…`);
+        const source = await identifySourceDocument(file);
+        const extractionRun = createExtractionRun(source.documentId);
+        const removePreviousVersion = () => {
+          for (let index = newAccounts.length - 1; index >= 0; index -= 1) {
+            const existing = newAccounts[index];
+            const sameSource = existing.sourceDocumentId
+              ? existing.sourceDocumentId === source.documentId
+              : existing.fileName === file.name;
+            if (sameSource) newAccounts.splice(index, 1);
+          }
+          for (let index = newTransactions.length - 1; index >= 0; index -= 1) {
+            const existing = newTransactions[index];
+            const sameSource = existing.sourceDocumentId
+              ? existing.sourceDocumentId === source.documentId
+              : existing.rawSourceFile === file.name;
+            if (sameSource) newTransactions.splice(index, 1);
+          }
+        };
         if (name.endsWith('.xlsx') || name.endsWith('.xls') || name.endsWith('.csv')) {
           setStatusText(`正在读取电子流水“${file.name}”…`);
           const { account, transactions: parsedTx } = await parseExcelBankStatement(file);
-          for (let index = newAccounts.length - 1; index >= 0; index -= 1) {
-            if (newAccounts[index].fileName === file.name) newAccounts.splice(index, 1);
+          try {
+            await saveSourceDocument(caseId, file, source);
+          } catch (storageError) {
+            sourceStorageWarning = true;
+            console.warn('Source document storage unavailable; continuing recognition', storageError);
           }
-          for (let index = newTransactions.length - 1; index >= 0; index -= 1) {
-            if (newTransactions[index].rawSourceFile === file.name) newTransactions.splice(index, 1);
-          }
-          newAccounts.push(account);
-          newTransactions.push(...parsedTx);
+          const annotated = attachSourceProvenance([account], parsedTx, source, extractionRun);
+          removePreviousVersion();
+          newAccounts.push(...annotated.accounts);
+          newTransactions.push(...annotated.transactions);
           importedTransactionCount = parsedTx.length;
           importedAccountCount = 1;
         } else if (name.endsWith('.pdf')) {
@@ -156,26 +185,20 @@ export const Step1Upload: React.FC<Step1Props> = ({
           try {
             // Replace the retained original only after recognition succeeds, so a
             // failed same-name retry cannot leave old rows pointing at a new PDF.
-            await saveSourceDocument(caseId, file);
+            await saveSourceDocument(caseId, file, source);
           } catch (storageError) {
             sourceStored = false;
             sourceStorageWarning = true;
             console.warn('Source document storage unavailable; continuing recognition', storageError);
           }
-          const oldAccountIndexes = newAccounts
-            .map((account, index) => account.fileName === file.name ? index : -1)
-            .filter(index => index >= 0)
-            .reverse();
-          for (const index of oldAccountIndexes) newAccounts.splice(index, 1);
-          for (let index = newTransactions.length - 1; index >= 0; index -= 1) {
-            if (newTransactions[index].rawSourceFile === file.name) newTransactions.splice(index, 1);
-          }
-          newAccounts.push(...parsedAccounts.map(account => sourceStored ? account : {
+          const annotated = attachSourceProvenance(parsedAccounts, parsedTx, source, extractionRun);
+          removePreviousVersion();
+          newAccounts.push(...annotated.accounts.map(account => sourceStored ? account : {
             ...account,
             parseStatus: 'NEEDS_REVIEW' as const,
             parseWarnings: [...new Set([...(account.parseWarnings || []), '原始文件未能持久保存，请在本次会话中完成原件核对或重新上传'])]
           }));
-          newTransactions.push(...parsedTx);
+          newTransactions.push(...annotated.transactions);
           importedTransactionCount = parsedTx.length;
           importedAccountCount = parsedAccounts.length;
         } else {
@@ -192,7 +215,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
         } : sourceStorageWarning ? {
           status: 'WARNING',
           title: `“${file.name}”已导入，但原件未保存`,
-          message: `已读取 ${importedTransactionCount} 笔流水，但浏览器未能保存原始 PDF。`,
+          message: `已读取 ${importedTransactionCount} 笔流水，但浏览器未能保存原始文件。`,
           impact: '交易可以继续分析，但刷新页面后可能无法打开原件对照。建议释放浏览器存储空间后重新上传。',
           retryable: true,
           transactionCount: importedTransactionCount,
@@ -258,19 +281,20 @@ export const Step1Upload: React.FC<Step1Props> = ({
     }
   };
 
-  const handleRemoveAccount = async (accountKey: string) => {
-    const removed = accounts.find(account => accountIdentityKey(account) === accountKey);
-    if (!removed) return;
-    const sourceAccounts = accounts.filter(account => account.fileName === removed.fileName);
+  const handleRemoveSourceFile = async (sourceKey: string, fileName: string) => {
+    const sourceAccounts = accounts.filter(account => sourceIdentity(account) === sourceKey);
+    if (!sourceAccounts.length) return;
     const sourceAccountCount = sourceAccounts.length;
-    if (!window.confirm(`确定删除来源文件“${removed.fileName}”及其识别出的 ${sourceAccountCount} 个账户吗？重新上传时将从头识别。`)) return;
-    const updatedAccounts = accounts.filter(account => account.fileName !== removed.fileName);
-    const updatedTransactions = transactions.filter(transaction => transaction.rawSourceFile
-      ? transaction.rawSourceFile !== removed.fileName
-      : !sourceAccounts.some(account => transactionBelongsToAccount(transaction, account)));
-    await deleteSourceDocument(caseId, removed.fileName);
+    if (!window.confirm(`确定删除来源文件“${fileName}”及其识别出的 ${sourceAccountCount} 个账户吗？重新上传时将从头识别。`)) return;
+    const updatedAccounts = accounts.filter(account => sourceIdentity(account) !== sourceKey);
+    const updatedTransactions = transactions.filter(transaction => transaction.sourceDocumentId
+      ? sourceIdentity(transaction) !== sourceKey
+      : transaction.rawSourceFile
+        ? transaction.rawSourceFile !== fileName
+        : !sourceAccounts.some(account => transactionBelongsToAccount(transaction, account)));
+    await deleteSourceDocument(caseId, fileName, sourceAccounts[0].sourceDocumentId);
     onDataUpdated(updatedAccounts, updatedTransactions);
-    setStatusText(`已删除 ${removed.fileName} 的识别结果`);
+    setStatusText(`已删除 ${fileName} 的识别结果`);
   };
 
   return (
@@ -495,7 +519,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
             <div className="flex items-center space-x-2">
               <CheckCircle2 className="w-5 h-5 text-emerald-500" />
               <h2 className="text-base font-semibold text-slate-900">
-                已导入账户 ({accounts.length})
+                已导入文件 ({importedFileGroups.length}) · 账户 ({accounts.length})
               </h2>
             </div>
             <span className="text-xs text-slate-500">
@@ -503,49 +527,62 @@ export const Step1Upload: React.FC<Step1Props> = ({
             </span>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {accounts.map((acc) => (
-              <div
-                key={accountIdentityKey(acc)}
-                className="flex items-start justify-between p-4 rounded-xl border border-slate-200 hover:border-slate-300 bg-slate-50/50 hover:bg-slate-50 transition"
-              >
-                <div className="flex items-start space-x-3">
-                  <div className="p-2.5 rounded-lg bg-blue-100/70 text-blue-700 mt-0.5">
-                    {acc.fileType === 'excel' || acc.fileType === 'csv' ? (
-                      <FileSpreadsheet className="w-5 h-5" />
-                    ) : acc.fileType === 'pdf' ? (
-                      <FileText className="w-5 h-5" />
-                    ) : (
-                      <FileImage className="w-5 h-5" />
-                    )}
-                  </div>
-                  <div>
-                    <div className="flex items-center space-x-2">
-                      <span className="font-semibold text-slate-900 text-sm">{acc.bankName}</span>
-                      <span className="text-xs px-2 py-0.5 rounded-full bg-slate-200/70 text-slate-700 font-mono">
-                        {acc.accountNumber.slice(-4) ? `...${acc.accountNumber.slice(-4)}` : acc.accountNumber}
-                      </span>
+          <div className="space-y-4">
+            {importedFileGroups.map(([sourceKey, fileAccounts]) => {
+              const firstAccount = fileAccounts[0];
+              const fileName = firstAccount.fileName;
+              const fileTransactionCount = fileAccounts.reduce((sum, account) => sum + account.transactionCount, 0);
+              return (
+                <section key={sourceKey} className="rounded-xl border border-slate-200 overflow-hidden bg-slate-50/40">
+                  <div className="flex items-center justify-between gap-3 px-4 py-3 bg-slate-100/80 border-b border-slate-200">
+                    <div className="flex items-center gap-2 min-w-0">
+                      {firstAccount.fileType === 'excel' || firstAccount.fileType === 'csv' ? (
+                        <FileSpreadsheet className="w-4 h-4 text-emerald-600 flex-shrink-0" />
+                      ) : firstAccount.fileType === 'pdf' ? (
+                        <FileText className="w-4 h-4 text-red-500 flex-shrink-0" />
+                      ) : (
+                        <FileImage className="w-4 h-4 text-blue-600 flex-shrink-0" />
+                      )}
+                      <div className="min-w-0">
+                        <p className="text-sm font-semibold text-slate-800 truncate" title={fileName}>{fileName}</p>
+                        <p className="text-[11px] text-slate-500">识别出 {fileAccounts.length} 个账户 · {fileTransactionCount} 笔流水</p>
+                      </div>
                     </div>
-                    <p className="text-xs text-slate-600 mt-1">
-                      户名: <span className="font-medium">{acc.accountName}</span> | 来源文件: {acc.fileName}
-                    </p>
-                    <div className="flex items-center space-x-3 mt-2 text-[11px] text-slate-500 font-mono">
-                      <span>入: <strong className="text-emerald-600 font-normal">¥{acc.totalIn.toLocaleString()}</strong></span>
-                      <span>出: <strong className="text-rose-600 font-normal">¥{acc.totalOut.toLocaleString()}</strong></span>
-                      <span>流水: {acc.transactionCount} 笔</span>
-                    </div>
+                    <button
+                      onClick={() => handleRemoveSourceFile(sourceKey, fileName)}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs text-slate-500 hover:text-red-600 hover:bg-red-50 rounded-lg transition flex-shrink-0"
+                      title="删除该来源文件及全部识别结果"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      删除文件
+                    </button>
                   </div>
-                </div>
-
-                <button
-                  onClick={() => handleRemoveAccount(accountIdentityKey(acc))}
-                  className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition"
-                  title="删除该来源文件及全部识别结果"
-                >
-                  <Trash2 className="w-4 h-4" />
-                </button>
-              </div>
-            ))}
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 p-3">
+                    {fileAccounts.map((acc) => (
+                      <div
+                        key={accountIdentityKey(acc)}
+                        className="p-4 rounded-lg border border-slate-200 bg-white"
+                      >
+                        <div className="flex items-center space-x-2">
+                          <span className="font-semibold text-slate-900 text-sm">{acc.bankName}</span>
+                          <span className="text-xs px-2 py-0.5 rounded-full bg-slate-200/70 text-slate-700 font-mono">
+                            {acc.accountNumber.slice(-4) ? `...${acc.accountNumber.slice(-4)}` : acc.accountNumber}
+                          </span>
+                        </div>
+                        <p className="text-xs text-slate-600 mt-1">
+                          户名: <span className="font-medium">{acc.accountName}</span>
+                        </p>
+                        <div className="flex items-center space-x-3 mt-2 text-[11px] text-slate-500 font-mono">
+                          <span>入: <strong className="text-emerald-600 font-normal">¥{acc.totalIn.toLocaleString()}</strong></span>
+                          <span>出: <strong className="text-rose-600 font-normal">¥{acc.totalOut.toLocaleString()}</strong></span>
+                          <span>流水: {acc.transactionCount} 笔</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              );
+            })}
           </div>
 
           <div className="pt-2 flex justify-between items-center">

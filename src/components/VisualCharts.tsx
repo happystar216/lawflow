@@ -1,8 +1,9 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import * as echarts from 'echarts';
 import { CaseEvaluationReport } from '../types/evidence';
 import { StandardTransaction } from '../types/transaction';
-import { GitCommit, Network } from 'lucide-react';
+import { GitCommit, Network, X } from 'lucide-react';
+import { effectiveCounterpartyName } from '../engine/bilateral';
 
 interface VisualChartsProps {
   report: CaseEvaluationReport;
@@ -16,8 +17,16 @@ export const VisualCharts: React.FC<VisualChartsProps> = ({
   respondentName
 }) => {
   const [chartType, setChartType] = useState<'sankey' | 'network'>('sankey');
+  const [selectedFlow, setSelectedFlow] = useState<{ title: string; transactionIds: string[] } | null>(null);
   const chartRef = useRef<HTMLDivElement>(null);
   const chartInstance = useRef<echarts.ECharts | null>(null);
+  const selectedFlowTransactions = useMemo(() => {
+    if (!selectedFlow) return [];
+    const ids = new Set(selectedFlow.transactionIds);
+    return transactions
+      .filter(transaction => ids.has(transaction.id))
+      .sort((left, right) => right.transactionTime.localeCompare(left.transactionTime));
+  }, [selectedFlow, transactions]);
 
   useEffect(() => {
     if (!chartRef.current) return;
@@ -30,25 +39,29 @@ export const VisualCharts: React.FC<VisualChartsProps> = ({
 
     if (chartType === 'sankey') {
       // 1. Prepare Sankey Data
-      const nodesMap = new Map<string, { name: string; itemStyle?: { color: string } }>();
-      const links: { source: string; target: string; value: number }[] = [];
+      const nodesMap = new Map<string, any>();
+      const links: any[] = [];
 
       const centerNode = `被执行人：${respondentName || '债务人'}`;
       nodesMap.set(centerNode, { name: centerNode, itemStyle: { color: '#1d4ed8' } });
 
       // Source Accounts -> Center Node
-      const bankSources: Record<string, number> = {};
+      const bankSources: Record<string, { amount: number; transactionIds: string[] }> = {};
       transactions.forEach(t => {
         if (t.direction === 'IN' && !t.isInternalTransfer) {
           const bankKey = `入账：${t.bankName || '银行卡'}`;
-          bankSources[bankKey] = (bankSources[bankKey] || 0) + t.amount;
+          const source = bankSources[bankKey] || { amount: 0, transactionIds: [] };
+          source.amount += t.amount;
+          source.transactionIds.push(t.id);
+          bankSources[bankKey] = source;
         }
       });
 
-      Object.entries(bankSources).forEach(([src, amount]) => {
-        if (amount > 500) {
-          nodesMap.set(src, { name: src, itemStyle: { color: '#059669' } });
-          links.push({ source: src, target: centerNode, value: Math.round(amount) });
+      Object.entries(bankSources).forEach(([src, source]) => {
+        if (source.amount > 500) {
+          const detail = { detailTitle: `${src}的具体流水`, transactionIds: source.transactionIds };
+          nodesMap.set(src, { name: src, itemStyle: { color: '#059669' }, ...detail });
+          links.push({ source: src, target: centerNode, value: Math.round(source.amount), ...detail });
         }
       });
 
@@ -75,17 +88,19 @@ export const VisualCharts: React.FC<VisualChartsProps> = ({
           }
 
           const targetNode = `去向：${cp.name}${tag}`;
-          nodesMap.set(targetNode, { name: targetNode, itemStyle: { color } });
-          links.push({ source: centerNode, target: targetNode, value: Math.round(cp.totalOut) });
+          const transactionIds = report.analysisGraph?.counterparties
+            .filter(entity => entity.name === cp.name)
+            .flatMap(entity => entity.outgoingTransactionIds)
+            || transactions
+              .filter(transaction => !transaction.isInternalTransfer
+                && transaction.direction === 'OUT'
+                && effectiveCounterpartyName(transaction) === cp.name)
+              .map(transaction => transaction.id);
+          const detail = { detailTitle: `${cp.name}的流出流水`, transactionIds };
+          nodesMap.set(targetNode, { name: targetNode, itemStyle: { color }, ...detail });
+          links.push({ source: centerNode, target: targetNode, value: Math.round(cp.totalOut), ...detail });
         }
       });
-
-      if (links.length === 0) {
-        links.push({ source: '外部资金流入', target: centerNode, value: 100000 });
-        nodesMap.set('外部资金流入', { name: '外部资金流入', itemStyle: { color: '#059669' } });
-        nodesMap.set('大额对外流出', { name: '大额对外流出', itemStyle: { color: '#dc2626' } });
-        links.push({ source: centerNode, target: '大额对外流出', value: 95000 });
-      }
 
       chart.setOption({
         tooltip: {
@@ -134,6 +149,14 @@ export const VisualCharts: React.FC<VisualChartsProps> = ({
 
       topCps.forEach((cp, idx) => {
         const nodeId = `CP_${idx}`;
+        const transactionIds = report.analysisGraph?.counterparties
+          .filter(entity => entity.name === cp.name)
+          .flatMap(entity => entity.outgoingTransactionIds)
+          || transactions
+            .filter(transaction => !transaction.isInternalTransfer
+              && transaction.direction === 'OUT'
+              && effectiveCounterpartyName(transaction) === cp.name)
+            .map(transaction => transaction.id);
         let color = '#475569';
         if (cp.isSuspectedRelative) color = '#9333ea';
         else if (cp.isSuspectedAffiliate) color = '#ea580c';
@@ -145,13 +168,17 @@ export const VisualCharts: React.FC<VisualChartsProps> = ({
           name: `${cp.name}\n(¥${Math.round(cp.totalOut / 10000)}万)`,
           symbolSize: Math.max(30, Math.min(55, Math.sqrt(cp.totalOut / 1000) * 4)),
           itemStyle: { color },
-          label: { fontSize: 10, color: '#334155' }
+          label: { fontSize: 10, color: '#334155' },
+          detailTitle: `${cp.name}的流出流水`,
+          transactionIds
         });
 
         links.push({
           source: centerId,
           target: nodeId,
           value: cp.totalOut,
+          detailTitle: `${cp.name}的流出流水`,
+          transactionIds,
           lineStyle: {
             width: Math.max(1, Math.min(6, cp.totalOut / 50000)),
             color,
@@ -185,11 +212,25 @@ export const VisualCharts: React.FC<VisualChartsProps> = ({
       }, true);
     }
 
+    const clickHandler = (params: any) => {
+      const transactionIds = Array.isArray(params?.data?.transactionIds)
+        ? params.data.transactionIds as string[]
+        : [];
+      if (!transactionIds.length) return;
+      setSelectedFlow({
+        title: String(params.data.detailTitle || '对应流水明细'),
+        transactionIds
+      });
+    };
+    chart.off('click');
+    chart.on('click', clickHandler);
+
     const resizeHandler = () => chart.resize();
     window.addEventListener('resize', resizeHandler);
 
     return () => {
       window.removeEventListener('resize', resizeHandler);
+      chart.off('click', clickHandler);
     };
   }, [chartType, report, transactions, respondentName]);
 
@@ -231,6 +272,61 @@ export const VisualCharts: React.FC<VisualChartsProps> = ({
       </div>
 
       <div ref={chartRef} className="h-[360px] w-full" />
+
+      <p className="text-xs text-slate-500 text-center">点击流向节点或连线，可查看组成该流向的具体流水</p>
+
+      {selectedFlow && (
+        <div className="rounded-xl border border-blue-200 bg-blue-50/40 overflow-hidden">
+          <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-blue-100 bg-white/70">
+            <div>
+              <h4 className="text-sm font-semibold text-slate-800">{selectedFlow.title}</h4>
+              <p className="text-[11px] text-slate-500 mt-0.5">共 {selectedFlowTransactions.length} 笔，以下为当前规范数据中的最新流水</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setSelectedFlow(null)}
+              className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-white"
+              aria-label="关闭流水明细"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+          <div className="overflow-x-auto max-h-80">
+            <table className="w-full min-w-[920px] text-xs">
+              <thead className="sticky top-0 bg-slate-100 text-slate-600">
+                <tr>
+                  <th className="text-left font-medium px-3 py-2">交易时间</th>
+                  <th className="text-left font-medium px-3 py-2">本方账户</th>
+                  <th className="text-left font-medium px-3 py-2">方向</th>
+                  <th className="text-right font-medium px-3 py-2">金额</th>
+                  <th className="text-right font-medium px-3 py-2">余额</th>
+                  <th className="text-left font-medium px-3 py-2">对手方/归类</th>
+                  <th className="text-left font-medium px-3 py-2">摘要</th>
+                  <th className="text-left font-medium px-3 py-2">原件位置</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 bg-white">
+                {selectedFlowTransactions.map(transaction => (
+                  <tr key={transaction.id} className="hover:bg-blue-50/50">
+                    <td className="px-3 py-2 whitespace-nowrap text-slate-700">{transaction.transactionTime || '待核对'}</td>
+                    <td className="px-3 py-2 whitespace-nowrap text-slate-600">{transaction.bankName} · …{transaction.accountNumber.slice(-4)}</td>
+                    <td className="px-3 py-2 whitespace-nowrap">
+                      <span className={transaction.direction === 'IN' ? 'text-emerald-600' : transaction.direction === 'OUT' ? 'text-rose-600' : 'text-amber-600'}>
+                        {transaction.direction === 'IN' ? '收入' : transaction.direction === 'OUT' ? '支出' : '待核对'}
+                      </span>
+                    </td>
+                    <td className="px-3 py-2 text-right font-mono font-medium text-slate-800">¥{transaction.amount.toLocaleString()}</td>
+                    <td className="px-3 py-2 text-right font-mono text-slate-600">{transaction.balanceAvailable === false ? '未提供' : `¥${transaction.balance.toLocaleString()}`}</td>
+                    <td className="px-3 py-2 text-slate-700">{transaction.counterpartyName || effectiveCounterpartyName(transaction)}</td>
+                    <td className="px-3 py-2 text-slate-700">{transaction.summary || '—'}</td>
+                    <td className="px-3 py-2 text-slate-500">{transaction.rawSourceFile}{transaction.rawPageNumber ? ` · 第${transaction.rawPageNumber}页` : ''}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       <div className="flex items-center justify-between text-[11px] text-slate-400 border-t border-slate-100 pt-2">
         <div className="flex items-center space-x-4">

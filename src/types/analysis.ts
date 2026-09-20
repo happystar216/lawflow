@@ -1,0 +1,67 @@
+import { FlowDirection } from './transaction';
+
+export interface AnalysisAccountEntity {
+  id: string;
+  kind: 'ACCOUNT';
+  accountNumber: string;
+  accountName: string;
+  bankName: string;
+  sourceDocumentId?: string;
+  transactionIds: string[];
+}
+
+export interface AnalysisTransactionEntity {
+  id: string;
+  kind: 'TRANSACTION';
+  transactionId: string;
+  accountEntityId: string;
+  direction: FlowDirection;
+  amount: number;
+  transactionTime: string;
+  isInternalTransfer: boolean;
+}
+
+export interface AnalysisCounterpartyEntity {
+  id: string;
+  kind: 'COUNTERPARTY';
+  name: string;
+  account?: string;
+  transactionIds: string[];
+  incomingTransactionIds: string[];
+  outgoingTransactionIds: string[];
+}
+
+export interface JudicialDeductionEntity {
+  id: string;
+  kind: 'JUDICIAL_DEDUCTION';
+  transactionId: string;
+  accountEntityId: string;
+  authorityEntityId: string;
+  amount: number;
+  transactionTime: string;
+  summary: string;
+}
+
+export type AnalysisRelationshipType =
+  | 'ACCOUNT_HAS_TRANSACTION'
+  | 'TRANSACTION_WITH_COUNTERPARTY'
+  | 'INTERNAL_TRANSFER_PAIR'
+  | 'JUDICIAL_DEDUCTION_FROM_ACCOUNT'
+  | 'JUDICIAL_DEDUCTION_TO_AUTHORITY';
+
+export interface AnalysisRelationship {
+  id: string;
+  type: AnalysisRelationshipType;
+  fromEntityId: string;
+  toEntityId: string;
+  transactionIds: string[];
+  amount: number;
+}
+
+export interface CaseAnalysisGraph {
+  accounts: AnalysisAccountEntity[];
+  transactions: AnalysisTransactionEntity[];
+  counterparties: AnalysisCounterpartyEntity[];
+  judicialDeductions: JudicialDeductionEntity[];
+  relationships: AnalysisRelationship[];
+}

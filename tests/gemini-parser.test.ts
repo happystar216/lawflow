@@ -9,7 +9,7 @@ test('Gemini parser keeps invalid fields pending and reports missing page covera
     totalExtracted: 1,
     pagesCovered: [1],
     pageChecks: [{ pageNumber: 1, transactionCount: 1, pageType: 'TRANSACTIONS' }],
-    transactions: [{ p: 1, bk: '测试银行', ac: 'A', tm: 'not-a-date', dir: 'MAYBE', amt: 'bad', bal: null }]
+    transactions: [{ p: 1, r: 3, bk: '测试银行', ac: 'A', tm: 'not-a-date', dir: 'MAYBE', amt: 'bad', bal: null, box: [200, 40, 235, 960] }]
   });
   globalThis.fetch = async () => new Response(`data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: modelJson }] } }] })}\n\n`);
   try {
@@ -24,6 +24,9 @@ test('Gemini parser keeps invalid fields pending and reports missing page covera
     assert.match(result.warnings.join('；'), /第 2 页/);
     assert.equal(result.transactions[0].direction, 'UNKNOWN');
     assert.equal(result.transactions[0].reviewStatus, 'PENDING');
+    assert.equal(result.transactions[0].rawRowIndex, 3);
+    assert.equal(result.transactions[0].sourceRegion?.origin, 'MODEL');
+    assert.ok(Math.abs((result.transactions[0].sourceRegion?.y || 0) - 0.2) < 0.0001);
     assert.deepEqual(result.transactions[0].dataQualityIssues, ['INVALID_DATE', 'INVALID_AMOUNT', 'UNKNOWN_DIRECTION']);
     assert.equal(result.accounts[0].parseStatus, 'NEEDS_REVIEW');
   } finally {
@@ -135,7 +138,9 @@ test('account-list page keeps five accounts while three consolidated-ledger grou
         pageType: 'ACCOUNT_INFO',
         bankName: '四川农信',
         accountName: '胡艳红',
-        accountNumber: '',
+        // A model may put the customer number in the singular field even
+        // though the physical account list is already complete.
+        accountNumber: '1651211443097458',
         accountNumbers: listedAccounts
       },
       {
@@ -167,6 +172,8 @@ test('account-list page keeps five accounts while three consolidated-ledger grou
     );
     assert.equal(normalized.accounts.filter(account => account.transactionCount > 0).length, 3);
     assert.equal(normalized.accounts.filter(account => account.transactionCount === 0).length, 2);
+    assert.equal(normalized.accounts.filter(account => account.accountNumber.endsWith('6216')).length, 1);
+    assert.equal(normalized.accounts.some(account => account.accountNumber === '1651211443097458'), false);
     assert.deepEqual(
       normalized.transactions.map(transaction => transaction.accountNumber).sort(),
       ['22255301100017262', '22240101100859012', '22255301100006216'].sort()

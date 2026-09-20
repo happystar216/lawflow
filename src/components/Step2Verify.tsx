@@ -19,6 +19,7 @@ import {
   EvidenceReviewIssue,
   ReviewIssueStatus,
   StandardTransaction,
+  TransactionEvidenceField,
 } from "../types/transaction";
 import { auditAccountBalance } from "../parsers/sanityChecker";
 import { buildEvidenceReviewIssues } from "../review/buildEvidenceReviewIssues";
@@ -28,6 +29,9 @@ import {
   accountIdentityKey,
   transactionBelongsToAccount,
 } from "../utils/accountIdentity";
+import { createFieldEvidenceSnapshot } from "../utils/evidenceProvenance";
+import { applyRowReviewDecision, RowReviewDecision } from "../review/fieldReview";
+import { estimatedSourceRegion } from "../utils/sourceLocator";
 
 interface Step2Props {
   caseId: string;
@@ -53,6 +57,21 @@ interface EvidenceReviewGroup {
   account: BankAccount;
   pageNumber?: number;
   issues: EvidenceReviewIssue[];
+}
+
+const EVIDENCE_FIELDS = new Set<TransactionEvidenceField>([
+  "accountNumber", "transactionTime", "direction", "amount", "balance",
+  "counterpartyName", "counterpartyAccount", "summary",
+]);
+
+function isEvidenceField(field: keyof StandardTransaction): field is TransactionEvidenceField {
+  return EVIDENCE_FIELDS.has(field as TransactionEvidenceField);
+}
+
+function evidencePrimitive(value: unknown): string | number | null {
+  return typeof value === "number" || typeof value === "string" || value === null
+    ? value
+    : String(value ?? "");
 }
 
 const emptyDraft = (): MissingTransactionDraft => ({
@@ -93,6 +112,8 @@ export const Step2Verify: React.FC<Step2Props> = ({
   const [confirmationChecks, setConfirmationChecks] = useState<string[]>([]);
   const [hasEditedReview, setHasEditedReview] = useState(false);
   const [reviewedRowIds, setReviewedRowIds] = useState<string[]>([]);
+  const [unresolvedRowIds, setUnresolvedRowIds] = useState<string[]>([]);
+  const [activeReviewRowIndex, setActiveReviewRowIndex] = useState(0);
 
   const selectedAccount =
     accounts.find(
@@ -122,6 +143,7 @@ export const Step2Verify: React.FC<Step2Props> = ({
     .filter(issue => issue.severity === "REQUIRED" && isTransactionLevelIssue(issue))
     .flatMap(issue => issue.transactionIds));
   const fieldIssueTransactions = affectedTransactions.filter(transaction => fieldIssueTransactionIds.has(transaction.id));
+  const activeReviewTransaction = fieldIssueTransactions[activeReviewRowIndex] || fieldIssueTransactions[0];
   const allAccountIssues = useMemo(
     () =>
       accounts.flatMap((account) =>
@@ -170,6 +192,18 @@ export const Step2Verify: React.FC<Step2Props> = ({
   const selectedTransaction = transactions.find(
     (transaction) => transaction.id === selectedTransactionId,
   );
+  const sourceFocusTransaction = selectedIssue
+    ? activeReviewTransaction || affectedTransactions[0]
+    : selectedTransaction;
+  const sourceFocusPageTransactions = sourceFocusTransaction
+    ? transactions.filter(transaction => (
+      transaction.rawPageNumber === sourceFocusTransaction.rawPageNumber
+      && (sourceFocusTransaction.sourceDocumentId
+        ? transaction.sourceDocumentId === sourceFocusTransaction.sourceDocumentId
+        : transaction.rawSourceFile === sourceFocusTransaction.rawSourceFile)
+    ))
+    : [];
+  const sourceFocusRegion = estimatedSourceRegion(sourceFocusTransaction, sourceFocusPageTransactions);
   const selectedCountComparison = selectedIssueGroup
     .map(issueCountComparison)
     .find(Boolean);
@@ -180,6 +214,8 @@ export const Step2Verify: React.FC<Step2Props> = ({
       : Boolean(selectedIssue.pageNumber || selectedTransaction));
   const confirmationItems = pageConfirmationItems(selectedIssueGroup, fieldIssueTransactions.length > 0);
   const rowReviewComplete = fieldIssueTransactions.every(transaction => reviewedRowIds.includes(transaction.id));
+  const rowHandlingComplete = fieldIssueTransactions.every(transaction =>
+    reviewedRowIds.includes(transaction.id) || unresolvedRowIds.includes(transaction.id));
   const confirmationComplete = rowReviewComplete
     && confirmationItems.every(item => confirmationChecks.includes(item));
 
@@ -190,7 +226,7 @@ export const Step2Verify: React.FC<Step2Props> = ({
       return;
     }
     setIsSourceLoading(true);
-    getSourceDocument(caseId, selectedAccount.fileName).then((file) => {
+    getSourceDocument(caseId, selectedAccount.fileName, selectedAccount.sourceDocumentId).then((file) => {
       if (!cancelled) {
         setSourceFile(file);
         setIsSourceLoading(false);
@@ -199,7 +235,7 @@ export const Step2Verify: React.FC<Step2Props> = ({
     return () => {
       cancelled = true;
     };
-  }, [caseId, selectedAccount?.fileName, selectedAccount?.fileType]);
+  }, [caseId, selectedAccount?.fileName, selectedAccount?.fileType, selectedAccount?.sourceDocumentId]);
 
   useEffect(() => {
     setResolutionNote(selectedIssue?.resolutionNote || "");
@@ -209,6 +245,8 @@ export const Step2Verify: React.FC<Step2Props> = ({
     setConfirmationChecks([]);
     setHasEditedReview(false);
     setReviewedRowIds([]);
+    setUnresolvedRowIds([]);
+    setActiveReviewRowIndex(0);
   }, [selectedIssue?.id]);
 
   const displayedTransactions = transactions
@@ -383,20 +421,34 @@ export const Step2Verify: React.FC<Step2Props> = ({
     );
     if (groupTransactionIds.size) {
       onTransactionsUpdated(
-        transactionSource.map((transaction) =>
-          groupTransactionIds.has(transaction.id)
-            ? {
-                ...transaction,
-                reviewStatus:
-                  status === "CORRECTED"
-                    ? "CORRECTED"
-                    : status === "CONFIRMED"
-                      ? "VERIFIED"
-                      : "PENDING",
-                reviewedAt,
-              }
-            : transaction,
-        ),
+        transactionSource.map((transaction) => {
+          if (!groupTransactionIds.has(transaction.id)) return transaction;
+          const evidenceDecision = status === "UNRESOLVED" ? "UNRESOLVED" as const : "CONFIRMED" as const;
+          const fieldEvidence = transaction.fieldEvidence && Object.fromEntries(
+            Object.entries(transaction.fieldEvidence).map(([field, evidence]) => {
+              if (!evidence || (status === "UNRESOLVED" && evidence.decision === "CONFIRMED")) return [field, evidence];
+              return [field, {
+                ...evidence,
+                decision: evidenceDecision,
+                reviewedBy: status === "UNRESOLVED" ? evidence.reviewedBy : "律师人工核对",
+                reviewedAt
+              }];
+            })
+          ) as StandardTransaction['fieldEvidence'];
+          const hasUnresolvedEvidence = Object.values(fieldEvidence || {}).some(evidence => evidence?.decision === "UNRESOLVED");
+          return {
+            ...transaction,
+            reviewStatus:
+              status === "CORRECTED"
+                ? "CORRECTED" as const
+                : status === "CONFIRMED"
+                  ? "VERIFIED" as const
+                  : hasUnresolvedEvidence ? "PENDING" as const : transaction.reviewStatus,
+            reviewedBy: status === "UNRESOLVED" ? transaction.reviewedBy : "律师人工核对",
+            reviewedAt,
+            fieldEvidence
+          };
+        }),
       );
     }
   };
@@ -439,13 +491,30 @@ export const Step2Verify: React.FC<Step2Props> = ({
   ) => {
     const updated = transactions.map((transaction) => {
       if (transaction.id !== transactionId) return transaction;
+      const reviewedAt = new Date().toISOString();
       const next = {
         ...transaction,
         [field]: value,
         reviewStatus: "CORRECTED" as const,
         reviewedBy: "律师人工核对",
-        reviewedAt: new Date().toISOString(),
+        reviewedAt,
       };
+      if (isEvidenceField(field)) {
+        const existing = transaction.fieldEvidence?.[field];
+        next.fieldEvidence = {
+          ...(transaction.fieldEvidence || {}),
+          [field]: {
+            originalValue: existing?.originalValue ?? evidencePrimitive(transaction[field]),
+            currentValue: evidencePrimitive(value),
+            confidence: 1,
+            origin: "LAWYER_REVIEW" as const,
+            decision: "CONFIRMED" as const,
+            reason: "律师对照原件修改",
+            reviewedBy: "律师人工核对",
+            reviewedAt,
+          },
+        };
+      }
       if (field === "transactionTime")
         next.transactionDate = String(value).slice(0, 10);
       const qualityIssues = new Set(next.dataQualityIssues || []);
@@ -462,6 +531,28 @@ export const Step2Verify: React.FC<Step2Props> = ({
     if (selectedIssue && affectedTransactionIds.includes(transactionId)) {
       setHasEditedReview(true);
       setReviewedRowIds(current => current.filter(id => id !== transactionId));
+      setUnresolvedRowIds(current => current.filter(id => id !== transactionId));
+    }
+  };
+
+  const handleRowDecision = (transaction: StandardTransaction, decision: RowReviewDecision) => {
+    const rowIssues = selectedIssueGroup.filter(issue => issue.transactionIds.includes(transaction.id));
+    const fields = reviewFieldsForTransaction(transaction, rowIssues);
+    const updated = transactions.map(item => item.id === transaction.id
+      ? applyRowReviewDecision(item, fields, decision)
+      : item);
+    commitTransactions(updated);
+    if (decision === "UNRESOLVED") {
+      setUnresolvedRowIds(current => current.includes(transaction.id) ? current : [...current, transaction.id]);
+      setReviewedRowIds(current => current.filter(id => id !== transaction.id));
+    } else {
+      setReviewedRowIds(current => current.includes(transaction.id) ? current : [...current, transaction.id]);
+      setUnresolvedRowIds(current => current.filter(id => id !== transaction.id));
+      if (decision === "USE_ORIGINAL") setHasEditedReview(true);
+    }
+    const currentIndex = fieldIssueTransactions.findIndex(item => item.id === transaction.id);
+    if (currentIndex >= 0 && currentIndex < fieldIssueTransactions.length - 1) {
+      setActiveReviewRowIndex(currentIndex + 1);
     }
   };
 
@@ -519,7 +610,12 @@ export const Step2Verify: React.FC<Step2Props> = ({
       reviewedBy: "律师人工核对",
       reviewedAt: new Date().toISOString(),
       lawyerNote: "律师根据原始流水补录",
+      sourceDocumentId: selectedAccount.sourceDocumentId,
+      sourceContentHash: selectedAccount.sourceContentHash,
+      extractionRunId: selectedAccount.extractionRunId,
     };
+    added.sourceObservationId = added.id;
+    added.fieldEvidence = createFieldEvidenceSnapshot(added, "LAWYER_REVIEW", "CONFIRMED");
     const updated = [...transactions, added];
     commitTransactions(updated);
     saveIssueStatus(
@@ -1039,11 +1135,14 @@ export const Step2Verify: React.FC<Step2Props> = ({
                   <PdfEvidencePage
                     file={sourceFile}
                     pageNumber={
+                      sourceFocusTransaction?.rawPageNumber ||
                       selectedIssue?.pageNumber ||
                       selectedTransaction?.rawPageNumber ||
                       affectedTransactions[0]?.rawPageNumber ||
                       1
                     }
+                    sourceRegion={sourceFocusRegion}
+                    rowLabel={sourceFocusTransaction?.rawRowIndex ? `第 ${sourceFocusTransaction.rawRowIndex} 行` : undefined}
                   />
                 )}
               </section>
@@ -1141,22 +1240,42 @@ export const Step2Verify: React.FC<Step2Props> = ({
                         {fieldIssueTransactions.length > 0 ? (
                           <div className="space-y-2">
                             <div className="rounded-xl border border-blue-200 bg-blue-50 p-3 text-[11px] text-blue-900">
-                              <div className="font-semibold">请按顺序完成 {fieldIssueTransactions.length} 个逐行任务</div>
-                              <div className="mt-1">每张卡片对应原件中的一行。只需核对卡片中标出的字段；有误就直接填写正确内容，无误就点击“这行与原件一致”。</div>
+                              <div className="flex items-center justify-between gap-3">
+                                <div className="font-semibold">逐笔核对 · 第 {Math.min(activeReviewRowIndex + 1, fieldIssueTransactions.length)} / {fieldIssueTransactions.length} 笔</div>
+                                <div className="text-blue-700">已确认 {reviewedRowIds.filter(id => fieldIssueTransactionIds.has(id)).length} · 无法确认 {unresolvedRowIds.filter(id => fieldIssueTransactionIds.has(id)).length}</div>
+                              </div>
+                              <div className="mt-1">右侧每次只显示一笔问题流水。对照左侧原件对应行，只处理标出的字段。</div>
                             </div>
-                            {fieldIssueTransactions.map((transaction, index) => (
+                            {activeReviewTransaction && (
                               <TransactionReviewTask
-                                key={transaction.id}
-                                taskNumber={index + 1}
-                                transaction={transaction}
-                                issues={selectedIssueGroup.filter(issue => issue.transactionIds.includes(transaction.id))}
+                                key={activeReviewTransaction.id}
+                                taskNumber={activeReviewRowIndex + 1}
+                                transaction={activeReviewTransaction}
+                                issues={selectedIssueGroup.filter(issue => issue.transactionIds.includes(activeReviewTransaction.id))}
                                 onEdit={handleCellEdit}
-                                reviewed={reviewedRowIds.includes(transaction.id)}
-                                onConfirm={() => setReviewedRowIds(current => current.includes(transaction.id)
-                                  ? current
-                                  : [...current, transaction.id])}
+                                reviewed={reviewedRowIds.includes(activeReviewTransaction.id)}
+                                unresolved={unresolvedRowIds.includes(activeReviewTransaction.id)}
+                                onDecision={(decision) => handleRowDecision(activeReviewTransaction, decision)}
                               />
-                            ))}
+                            )}
+                            <div className="grid grid-cols-2 gap-2">
+                              <button
+                                type="button"
+                                onClick={() => setActiveReviewRowIndex(index => Math.max(0, index - 1))}
+                                disabled={activeReviewRowIndex <= 0}
+                                className="rounded-lg border border-slate-300 py-2 text-[11px] font-medium text-slate-600 disabled:opacity-40"
+                              >
+                                上一笔
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setActiveReviewRowIndex(index => Math.min(fieldIssueTransactions.length - 1, index + 1))}
+                                disabled={activeReviewRowIndex >= fieldIssueTransactions.length - 1}
+                                className="rounded-lg border border-slate-300 py-2 text-[11px] font-medium text-slate-600 disabled:opacity-40"
+                              >
+                                下一笔
+                              </button>
+                            </div>
                           </div>
                         ) : (
                           <PageTransactionSelector
@@ -1226,7 +1345,9 @@ export const Step2Verify: React.FC<Step2Props> = ({
                         )}
                         {fieldIssueTransactions.length > 0 && !rowReviewComplete && (
                           <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-900">
-                            还有 {fieldIssueTransactions.length - reviewedRowIds.filter(id => fieldIssueTransactionIds.has(id)).length} 行没有确认。请处理完每张任务卡再完成本页。
+                            {!rowHandlingComplete
+                              ? `还有 ${fieldIssueTransactions.length - reviewedRowIds.filter(id => fieldIssueTransactionIds.has(id)).length - unresolvedRowIds.filter(id => fieldIssueTransactionIds.has(id)).length} 行尚未处理。请处理完每张任务卡。`
+                              : `有 ${unresolvedRowIds.filter(id => fieldIssueTransactionIds.has(id)).length} 行因原件不清晰仍无法确认，本页只能暂记为无法确认。`}
                           </div>
                         )}
                         <div className="grid grid-cols-1 gap-2">
@@ -1299,13 +1420,18 @@ const TransactionReviewTask: React.FC<{
   transaction: StandardTransaction;
   issues: EvidenceReviewIssue[];
   reviewed: boolean;
+  unresolved: boolean;
   onEdit: (id: string, field: keyof StandardTransaction, value: any) => void;
-  onConfirm: () => void;
-}> = ({ taskNumber, transaction, issues, reviewed, onEdit, onConfirm }) => {
+  onDecision: (decision: RowReviewDecision) => void;
+}> = ({ taskNumber, transaction, issues, reviewed, unresolved, onEdit, onDecision }) => {
   const fields = reviewFieldsForTransaction(transaction, issues);
   const reason = transactionReviewReason(transaction, issues);
+  const hasSuggestion = fields.some(field => {
+    const evidence = transaction.fieldEvidence?.[field];
+    return evidence && String(evidence.originalValue ?? "") !== String(evidence.currentValue ?? "");
+  });
   return (
-    <div className={`rounded-xl border p-3 space-y-3 ${reviewed ? "border-emerald-300 bg-emerald-50/50" : "border-amber-300 bg-white"}`}>
+    <div className={`rounded-xl border p-3 space-y-3 ${reviewed ? "border-emerald-300 bg-emerald-50/50" : unresolved ? "border-amber-400 bg-amber-50/60" : "border-amber-300 bg-white"}`}>
       <div className="flex items-start justify-between gap-3">
         <div>
           <div className="text-xs font-bold text-slate-900">
@@ -1316,7 +1442,7 @@ const TransactionReviewTask: React.FC<{
           </div>
         </div>
         <span className={`flex-shrink-0 rounded-full px-2 py-1 text-[10px] font-semibold ${reviewed ? "bg-emerald-100 text-emerald-800" : "bg-amber-100 text-amber-800"}`}>
-          {reviewed ? "本行已确认" : "等待确认"}
+          {reviewed ? "本行已确认" : unresolved ? "本行无法确认" : "等待确认"}
         </span>
       </div>
       <div className="rounded-lg bg-slate-900 px-3 py-2 text-[11px] leading-relaxed text-slate-100">
@@ -1336,15 +1462,45 @@ const TransactionReviewTask: React.FC<{
           />
         ))}
       </div>
-      <button
-        type="button"
-        onClick={onConfirm}
-        disabled={reviewed}
-        className="w-full rounded-lg bg-emerald-600 py-2 text-xs font-semibold text-white hover:bg-emerald-700 disabled:bg-emerald-100 disabled:text-emerald-700"
-      >
-        {reviewed ? "这行已经核对完成" : "以上字段与原件一致，确认这一行"}
-      </button>
-      <p className="text-[10px] text-slate-500">如果数值不对，直接在上面改成原件中的内容；修改后再点击确认。</p>
+      <div className="grid grid-cols-1 gap-2">
+        {hasSuggestion && (
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              onClick={() => onDecision("USE_ORIGINAL")}
+              disabled={reviewed}
+              className="rounded-lg border border-slate-300 bg-white py-2 text-[11px] font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+            >
+              原始识别值正确
+            </button>
+            <button
+              type="button"
+              onClick={() => onDecision("ACCEPT_CURRENT")}
+              disabled={reviewed}
+              className="rounded-lg bg-blue-600 py-2 text-[11px] font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
+            >
+              采用系统建议值
+            </button>
+          </div>
+        )}
+        <button
+          type="button"
+          onClick={() => onDecision("ACCEPT_CURRENT")}
+          disabled={reviewed}
+          className="w-full rounded-lg bg-emerald-600 py-2 text-xs font-semibold text-white hover:bg-emerald-700 disabled:bg-emerald-100 disabled:text-emerald-700"
+        >
+          {reviewed ? "这行已经核对完成" : hasSuggestion ? "我已按原件手工填写，确认本行" : "当前字段与原件一致，确认本行"}
+        </button>
+        <button
+          type="button"
+          onClick={() => onDecision("UNRESOLVED")}
+          disabled={reviewed}
+          className="w-full rounded-lg border border-amber-300 py-2 text-[11px] font-semibold text-amber-800 hover:bg-amber-50 disabled:opacity-50"
+        >
+          原件看不清，暂时无法确认
+        </button>
+      </div>
+      <p className="text-[10px] text-slate-500">如果原件是第三个数值，直接在上面填写后选择“手工填写”；系统会保留修改前后的值。</p>
     </div>
   );
 };
@@ -1356,6 +1512,17 @@ const ReviewFieldInput: React.FC<{
 }> = ({ field, transaction, onEdit }) => {
   const label = reviewFieldLabel(field);
   const hint = reviewFieldHint(field);
+  const evidence = transaction.fieldEvidence?.[field];
+  const hasSuggestedChange = evidence
+    && String(evidence.originalValue ?? "") !== String(evidence.currentValue ?? "");
+  const evidenceSummary = hasSuggestedChange ? (
+    <div className="mt-1.5 rounded-md border border-amber-200 bg-white px-2 py-1.5 text-[10px] text-slate-700">
+      原始识别：<span className="font-mono">{formatEvidenceValue(field, evidence.originalValue)}</span>
+      <span className="mx-1.5 text-slate-400">→</span>
+      系统建议：<span className="font-mono font-semibold text-blue-700">{formatEvidenceValue(field, evidence.currentValue)}</span>
+      {evidence.reason && <div className="mt-1 text-slate-500">依据：{evidence.reason}</div>}
+    </div>
+  ) : null;
   if (field === "direction") {
     return (
       <label className="block rounded-lg border border-blue-200 bg-blue-50/50 p-2.5">
@@ -1363,6 +1530,7 @@ const ReviewFieldInput: React.FC<{
           <span className="text-[11px] font-semibold text-blue-950">{label}</span>
           <span className="text-[10px] text-blue-700">{hint}</span>
         </div>
+        {evidenceSummary}
         <select
           value={transaction.direction}
           onChange={event => onEdit(transaction.id, "direction", event.target.value)}
@@ -1382,6 +1550,7 @@ const ReviewFieldInput: React.FC<{
         <span className="text-[11px] font-semibold text-blue-950">{label}</span>
         <span className="text-[10px] text-blue-700">{hint}</span>
       </div>
+      {evidenceSummary}
       <input
         type={numeric ? "number" : "text"}
         value={field === "amount" && transaction.amount === 0 ? "" : String(transaction[field] ?? "")}
@@ -1391,6 +1560,13 @@ const ReviewFieldInput: React.FC<{
     </label>
   );
 };
+
+function formatEvidenceValue(field: ReviewField, value: string | number | null): string {
+  if (value === null || value === "") return "空白／未识别";
+  if (field === "direction") return value === "IN" ? "收入" : value === "OUT" ? "支出" : "待核对";
+  if ((field === "amount" || field === "balance") && typeof value === "number") return `¥${value.toLocaleString()}`;
+  return String(value);
+}
 
 const TransactionEditor: React.FC<{
   transaction: StandardTransaction;

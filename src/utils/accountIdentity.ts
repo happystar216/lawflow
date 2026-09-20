@@ -1,17 +1,22 @@
 import { BankAccount, StandardTransaction } from '../types/transaction';
 
-type AccountIdentity = Pick<BankAccount, 'bankName' | 'accountNumber'> & Partial<Pick<BankAccount, 'fileName'>>;
-type TransactionIdentity = Pick<StandardTransaction, 'bankName' | 'accountNumber'> & Partial<Pick<StandardTransaction, 'rawSourceFile'>>;
+type AccountIdentity = Pick<BankAccount, 'bankName' | 'accountNumber'> & Partial<Pick<BankAccount, 'fileName' | 'sourceDocumentId'>>;
+type TransactionIdentity = Pick<StandardTransaction, 'bankName' | 'accountNumber'> & Partial<Pick<StandardTransaction, 'rawSourceFile' | 'sourceDocumentId'>>;
 
 export function accountIdentityKey(value: AccountIdentity | TransactionIdentity): string {
   const sourceFile = (value as AccountIdentity).fileName || (value as TransactionIdentity).rawSourceFile;
   const accountNumber = normalize(value.accountNumber);
+  if (isReliableAccountNumber(value.accountNumber) && value.sourceDocumentId) {
+    return ['source-account', value.sourceDocumentId, accountNumber].join('|');
+  }
   return isReliableAccountNumber(value.accountNumber)
     ? ['account', accountNumber].join('|')
     : ['unverified', normalize(value.bankName), accountNumber, normalize(sourceFile || '')].join('|');
 }
 
 export function transactionBelongsToAccount(transaction: StandardTransaction, account: BankAccount): boolean {
+  if (transaction.sourceDocumentId && account.sourceDocumentId
+    && transaction.sourceDocumentId !== account.sourceDocumentId) return false;
   if (isReliableAccountNumber(transaction.accountNumber) && isReliableAccountNumber(account.accountNumber)) {
     return normalize(transaction.accountNumber) === normalize(account.accountNumber);
   }

@@ -30,6 +30,18 @@ test('normalizer merges the same full account despite different bank labels', ()
   assert.equal(result.accounts[0].bankName, '中国建设银行');
 });
 
+test('normalizer migrates a cached short account alias to the full listed account', () => {
+  const fullNumber = '22255301100006216';
+  const shortNumber = '255301100006216';
+  const result = normalizeRecognizedData(
+    [account(fullNumber, '四川农信', 0), account(shortNumber, '四川农信', 1)],
+    [transaction('legacy-short', 3, shortNumber, '四川农信')]
+  );
+  assert.equal(result.accounts.length, 1);
+  assert.equal(result.accounts[0].accountNumber, fullNumber);
+  assert.equal(result.transactions[0].accountNumber, fullNumber);
+});
+
 test('normalizer repairs a page of one-off owner identifiers when adjacent pages agree', () => {
   const transactions = [
     transaction('before', 1, '6214663610258281'),

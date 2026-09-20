@@ -6,6 +6,9 @@ import { calculateInternalNetting } from './netting';
 import { aggregateCounterparties } from './bilateral';
 import { RuleRegistry } from './rules/RuleRegistry';
 import { AnomalyMatch } from '../types/rules';
+import { buildCaseAnalysisGraph } from './analysisGraph';
+import { caseAnalysisFingerprint } from './analysisFingerprint';
+import { auditAccountBalance } from '../parsers/sanityChecker';
 
 export class LawFlowEngine {
   private registry: RuleRegistry;
@@ -16,6 +19,17 @@ export class LawFlowEngine {
 
   getRegistry(): RuleRegistry {
     return this.registry;
+  }
+
+  getRuleSignature(): string {
+    return this.registry.getAllRules()
+      .map(rule => `${rule.ruleId}:${rule.enabled ? 1 : 0}:${JSON.stringify(rule.params)}`)
+      .sort()
+      .join('|');
+  }
+
+  fingerprint(caseMeta: CaseMetadata, transactions: StandardTransaction[], accounts: BankAccount[]): string {
+    return caseAnalysisFingerprint(caseMeta, transactions, accounts, this.getRuleSignature());
   }
 
   /**
@@ -29,7 +43,8 @@ export class LawFlowEngine {
   evaluateCase(
     caseMeta: CaseMetadata,
     rawTransactions: StandardTransaction[],
-    accounts: BankAccount[]
+    accounts: BankAccount[],
+    previousReport?: CaseEvaluationReport | null
   ): {
     report: CaseEvaluationReport;
     processedTransactions: StandardTransaction[];
@@ -68,6 +83,22 @@ export class LawFlowEngine {
       }
     });
 
+    // Lawyer decisions are annotations on stable rule matches. Recalculation
+    // regenerates the match facts, then reapplies annotations only when the
+    // same deterministic match id still exists.
+    const previousMatches = new Map((previousReport?.matches || []).map(match => [match.matchId, match]));
+    const annotatedMatches = allMatches.map(match => {
+      const previous = previousMatches.get(match.matchId);
+      if (!previous) return match;
+      return {
+        ...match,
+        lawyerAdopted: previous.lawyerAdopted,
+        lawyerNotes: previous.lawyerNotes,
+        verificationStatus: previous.verificationStatus,
+        verificationNotes: previous.verificationNotes
+      };
+    });
+
     // 5. Calculate macro metrics
     let totalRawIn = 0;
     let totalRawOut = 0;
@@ -103,7 +134,16 @@ export class LawFlowEngine {
     const targetDebt = caseMeta.targetAmount || 1;
     const solvencyCoverageRate = totalIncomeDuringExecution / targetDebt;
 
+    const analysisGraph = buildCaseAnalysisGraph(accounts, processedTransactions);
+    const accountAudits = Object.fromEntries(accounts.map((account, index) => [
+      analysisGraph.accounts[index]?.id || `account_${index}`,
+      auditAccountBalance(account, processedTransactions)
+    ]));
     const report: CaseEvaluationReport = {
+      analysisFingerprint: this.fingerprint(caseMeta, rawTransactions, accounts),
+      generatedAt: new Date().toISOString(),
+      analysisGraph,
+      accountAudits,
       totalRawTransactions: processedTransactions.length,
       totalRawIn,
       totalRawOut,
@@ -116,7 +156,7 @@ export class LawFlowEngine {
       targetDebtAmount: caseMeta.targetAmount,
       totalIncomeDuringExecution,
       solvencyCoverageRate,
-      matches: allMatches,
+      matches: annotatedMatches,
       counterpartySummaries
     };
 

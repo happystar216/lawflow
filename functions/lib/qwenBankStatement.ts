@@ -1,3 +1,5 @@
+import { normalizeSourceBox } from './sourceRegion';
+
 interface QwenEnvironment {
   DASHSCOPE_API_KEY?: string;
   DASHSCOPE_BASE_URL?: string;
@@ -21,6 +23,7 @@ interface QwenRawTransaction {
   rawRowIndex?: number | string;
   rawText?: string;
   confidence?: number | string;
+  box?: unknown;
 }
 
 interface QwenDocumentResult {
@@ -84,7 +87,7 @@ const extractionPrompt = (expectedPages: number, inputKind: 'pdf' | 'image', isP
 4. 同一交易跨行展示时合并为一笔；不要把页眉、页脚、合计、小计、期初余额、期末余额当作交易。
 5. rawPageNumber 必须使用本分片内的 1 起始页码，范围是 1 到 ${expectedPages}；不要猜测原文件页码。${isPageSlice ? ' 本图只是原页的一段：只输出本段中可见且有交易序号、日期或关键字段的交易；跨出图像边缘的续行不得虚构，也不要把表头当交易。rawRowIndex 按本段从上到下排列即可。' : ''}
 6. pageChecks 必须严格包含 ${expectedPages} 项，每页一项；即使没有交易，也必须输出 transactionCount: 0。pageType 必须填写 TRANSACTIONS（交易明细）、ACCOUNT_INFO（开户/账户信息）、DOCUMENT（法院或银行文书）、BLANK（空白）或 UNKNOWN。
-7. rawRowIndex 使用该页交易明细的 1 起始顺序。transactions 数量必须等于各页有效交易数之和。
+7. rawRowIndex 使用该页交易明细的 1 起始顺序。transactions 数量必须等于各页有效交易数之和。box 是交易整行在当前页面的位置，按 [上,左,下,右] 输出，以页面左上角为原点，四个值均为 0 至 1000 的整数；只有确实无法定位时才填 null。
 8. 一个分片可能同时包含多家银行或多个账户。每笔 transaction 的 bankName、accountName、accountNumber 必须填写“流水所属的本方账户”（通常来自页眉、账户信息栏或银行卡号），绝不能填写收款人、付款人或对手方的银行与账号。向多家不同银行转账仍然归属于发起交易的同一个本方账户；对方信息只能放入 counterpartyName、counterpartyAccount、counterpartyBank。
 9. 不得把不同本方银行或不同本方账号的交易统一归入 document 中的单一账户。页面切换本方账户时，按该页实际抬头填写。
 10. 严格区分表格中【发生额/交易金额】列与【摘要/备注】栏的文字数字：摘要常有批次号或协议额（如 @2640.00@），若账户余额不足发生部分划扣，必须严格以表格【发生额】列印刷的真实扣款额（如 0.84）为准，严禁将摘要中的应扣额当成实际发生额。
@@ -93,7 +96,7 @@ const extractionPrompt = (expectedPages: number, inputKind: 'pdf' | 'image', isP
 {
   "document":{"bankName":"","accountName":"","accountNumber":"","startBalance":null,"endBalance":null},
   "pageChecks":[{"pageNumber":1,"transactionCount":0,"pageType":"TRANSACTIONS","note":""}],
-  "transactions":[{"bankName":"","accountName":"","accountNumber":"","transactionTime":"YYYY-MM-DD HH:mm:ss；没有时间则 YYYY-MM-DD","transactionDate":"YYYY-MM-DD","direction":"IN、OUT 或 UNKNOWN","amount":0,"balance":null,"counterpartyName":"","counterpartyAccount":"","counterpartyBank":"","summary":"","rawText":"原始行文字","confidence":0.95,"rawPageNumber":1,"rawRowIndex":1}],
+  "transactions":[{"bankName":"","accountName":"","accountNumber":"","transactionTime":"YYYY-MM-DD HH:mm:ss；没有时间则 YYYY-MM-DD","transactionDate":"YYYY-MM-DD","direction":"IN、OUT 或 UNKNOWN","amount":0,"balance":null,"counterpartyName":"","counterpartyAccount":"","counterpartyBank":"","summary":"","rawText":"原始行文字","confidence":0.95,"rawPageNumber":1,"rawRowIndex":1,"box":[100,40,135,960]}],
   "warnings":[]
 }`;
 
@@ -273,6 +276,7 @@ function normalizeResult(
       counterpartyBank: cleanText(item.counterpartyBank), summary: cleanText(item.summary),
       rawSourceFile: options.sourceFileName, rawPageNumber: page, rawRowIndex: row,
       rawText: cleanText(item.rawText), balanceAvailable,
+      sourceRegion: options.isPageSlice ? undefined : normalizeSourceBox(item.box),
       extractionMethod: options.inputKind === 'image' ? 'DOCUMENT_IMAGE' : 'DOCUMENT_PDF', extractionConfidence: rowConfidence,
       extractionChunkId: cleanText(options.chunkId) || `P${options.pageStart}-${options.pageEnd}`,
       reviewStatus: rowConfidence < 0.8 ? 'PENDING' : 'AUTO_PASSED', dataQualityIssues

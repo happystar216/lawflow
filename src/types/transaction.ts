@@ -30,6 +30,10 @@ export interface BankAccount {
   totalPages?: number;
   balanceContinuityIssueCount?: number;
   reviewIssues?: EvidenceReviewIssue[];
+  /** Stable evidence identity. Legacy records may only have fileName. */
+  sourceDocumentId?: string;
+  sourceContentHash?: string;
+  extractionRunId?: string;
 }
 
 export type ReviewIssueStatus = 'PENDING' | 'CONFIRMED' | 'CORRECTED' | 'UNRESOLVED';
@@ -49,6 +53,37 @@ export interface EvidenceReviewIssue {
   reviewedAt?: string;
 }
 
+export type TransactionEvidenceField =
+  | 'accountNumber'
+  | 'transactionTime'
+  | 'direction'
+  | 'amount'
+  | 'balance'
+  | 'counterpartyName'
+  | 'counterpartyAccount'
+  | 'summary';
+
+export interface FieldEvidence {
+  originalValue: string | number | null;
+  currentValue: string | number | null;
+  confidence?: number;
+  origin: 'EXTRACTION' | 'AUTO_NORMALIZATION' | 'LAWYER_REVIEW';
+  decision: 'ACCEPTED' | 'SUGGESTED' | 'CONFIRMED' | 'REJECTED' | 'UNRESOLVED';
+  reason?: string;
+  reviewedBy?: string;
+  reviewedAt?: string;
+}
+
+/** Normalized top-left page coordinates. Values are constrained to 0..1. */
+export interface SourceRegion {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  origin: 'MODEL' | 'PDF_TEXT' | 'ESTIMATED';
+  confidence?: number;
+}
+
 export interface StandardTransaction {
   id: string;
   accountNumber: string;
@@ -64,9 +99,17 @@ export interface StandardTransaction {
   counterpartyBank?: string;
   summary: string; // 摘要 / 附言 / 备注
   rawSourceFile: string;
+  /** Stable evidence identity and the extraction run which produced this row. */
+  sourceDocumentId?: string;
+  sourceContentHash?: string;
+  extractionRunId?: string;
+  sourceObservationId?: string;
+  fieldEvidence?: Partial<Record<TransactionEvidenceField, FieldEvidence>>;
   rawPageNumber?: number; // 对应原始 PDF 或 Excel 行数
   rawRowIndex?: number;
   rawText?: string;
+  /** Location of the printed source row on the original page. */
+  sourceRegion?: SourceRegion;
   balanceAvailable?: boolean;
   extractionMethod?: 'DOCUMENT_PDF' | 'DOCUMENT_IMAGE' | 'GEMINI_DIRECT_PDF' | 'MANUAL';
   extractionConfidence?: number;

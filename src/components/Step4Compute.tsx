@@ -59,6 +59,15 @@ export const Step4Compute: React.FC<Step4Props> = ({
   const handleToggleRule = (ruleId: string, enabled: boolean) => {
     engine.getRegistry().toggleRule(ruleId, enabled);
     setRuleList([...engine.getRegistry().getAllRules()]);
+    if (transactions.length > 0) {
+      const { report, processedTransactions } = engine.evaluateCase(
+        caseMeta,
+        transactions,
+        accounts,
+        evaluationReport
+      );
+      onEvaluationComplete(report, processedTransactions);
+    }
   };
 
   // Run automatically once if not already computed
@@ -145,6 +154,14 @@ export const Step4Compute: React.FC<Step4Props> = ({
       {/* Evaluation Macro Dashboard */}
       {evaluationReport && (
         <div className="space-y-6">
+          {evaluationReport.analysisGraph && (
+            <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-xs text-emerald-900 flex flex-wrap items-center justify-between gap-2">
+              <div className="font-semibold">统一分析已基于当前流水更新</div>
+              <div className="text-emerald-800">
+                {evaluationReport.analysisGraph.accounts.length} 个账户 · {evaluationReport.analysisGraph.transactions.length} 笔交易 · {evaluationReport.analysisGraph.counterparties.length} 个对手方 · {evaluationReport.analysisGraph.judicialDeductions.length} 笔司法划扣
+              </div>
+            </div>
+          )}
           {/* Top KPI Cards */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             {/* Card 1: Netting Result */}
