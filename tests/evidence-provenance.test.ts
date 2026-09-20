@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { BankAccount, StandardTransaction } from '../src/types/transaction';
 import { accountIdentityKey } from '../src/utils/accountIdentity';
-import { attachSourceProvenance, createExtractionRun, identifySourceDocument, sourceIdentity } from '../src/utils/evidenceProvenance';
+import { attachSourceProvenance, createExtractionRun, identifySourceDocument, sourceFilesWithoutTransactions, sourceIdentity, transactionCountsBySource } from '../src/utils/evidenceProvenance';
 import { normalizeRecognizedData } from '../src/utils/recognizedDataNormalizer';
 
 function account(fileName: string): BankAccount {
@@ -84,4 +84,19 @@ test('automatic corrections retain field-level original and suggested values', a
   assert.equal(deduction.fieldEvidence?.amount?.currentValue, 5453.26);
   assert.equal(deduction.fieldEvidence?.amount?.decision, 'SUGGESTED');
   assert.match(deduction.fieldEvidence?.amount?.reason || '', /相邻余额关系/);
+});
+
+test('a source file is not marked empty merely because one of its accounts has zero rows', async () => {
+  const file = new File(['multi-account'], '多账户流水.pdf', { type: 'application/pdf' });
+  const source = await identifySourceDocument(file);
+  const accounts = [
+    { ...account(file.name), accountNumber: '11111111', transactionCount: 1 },
+    { ...account(file.name), accountNumber: '22222222', transactionCount: 0 }
+  ];
+  const row = { ...transaction(file.name), accountNumber: '11111111' };
+  const annotated = attachSourceProvenance(accounts, [row], source, createExtractionRun(source.documentId));
+
+  assert.equal(transactionCountsBySource(annotated.transactions).get(source.documentId), 1);
+  assert.deepEqual(sourceFilesWithoutTransactions(annotated.accounts, annotated.transactions), []);
+  assert.deepEqual(sourceFilesWithoutTransactions(annotated.accounts, []), [file.name]);
 });

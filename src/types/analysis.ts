@@ -1,4 +1,5 @@
 import { FlowDirection } from './transaction';
+import type { FlowCategoryCode } from '../engine/flowClassification';
 
 export interface AnalysisAccountEntity {
   id: string;
@@ -42,12 +43,25 @@ export interface JudicialDeductionEntity {
   summary: string;
 }
 
+export interface AnalysisFlowCategoryEntity {
+  id: string;
+  kind: 'FLOW_CATEGORY';
+  code: FlowCategoryCode;
+  label: string;
+  direction: 'IN' | 'OUT';
+  color: string;
+  priority: number;
+  totalAmount: number;
+  transactionIds: string[];
+}
+
 export type AnalysisRelationshipType =
   | 'ACCOUNT_HAS_TRANSACTION'
   | 'TRANSACTION_WITH_COUNTERPARTY'
   | 'INTERNAL_TRANSFER_PAIR'
   | 'JUDICIAL_DEDUCTION_FROM_ACCOUNT'
-  | 'JUDICIAL_DEDUCTION_TO_AUTHORITY';
+  | 'JUDICIAL_DEDUCTION_TO_AUTHORITY'
+  | 'TRANSACTION_CLASSIFIED_AS';
 
 export interface AnalysisRelationship {
   id: string;
@@ -63,5 +77,6 @@ export interface CaseAnalysisGraph {
   transactions: AnalysisTransactionEntity[];
   counterparties: AnalysisCounterpartyEntity[];
   judicialDeductions: JudicialDeductionEntity[];
+  flowCategories: AnalysisFlowCategoryEntity[];
   relationships: AnalysisRelationship[];
 }

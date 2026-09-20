@@ -4,6 +4,7 @@ import { CaseEvaluationReport } from '../types/evidence';
 import { StandardTransaction } from '../types/transaction';
 import { GitCommit, Network, X } from 'lucide-react';
 import { effectiveCounterpartyName } from '../engine/bilateral';
+import { classifyTransactionFlow } from '../engine/flowClassification';
 
 interface VisualChartsProps {
   report: CaseEvaluationReport;
@@ -38,68 +39,36 @@ export const VisualCharts: React.FC<VisualChartsProps> = ({
     const chart = chartInstance.current;
 
     if (chartType === 'sankey') {
-      // 1. Prepare Sankey Data
       const nodesMap = new Map<string, any>();
       const links: any[] = [];
-
-      const centerNode = `被执行人：${respondentName || '债务人'}`;
+      const centerNode = `${respondentName || '被执行人'}的账户资金池`;
       nodesMap.set(centerNode, { name: centerNode, itemStyle: { color: '#1d4ed8' } });
-
-      // Source Accounts -> Center Node
-      const bankSources: Record<string, { amount: number; transactionIds: string[] }> = {};
-      transactions.forEach(t => {
-        if (t.direction === 'IN' && !t.isInternalTransfer) {
-          const bankKey = `入账：${t.bankName || '银行卡'}`;
-          const source = bankSources[bankKey] || { amount: 0, transactionIds: [] };
-          source.amount += t.amount;
-          source.transactionIds.push(t.id);
-          bankSources[bankKey] = source;
+      const flowCategories = report.analysisGraph?.flowCategories || (() => {
+        const categories = new Map<string, any>();
+        for (const transaction of transactions) {
+          const classification = classifyTransactionFlow(transaction);
+          if (!classification) continue;
+          const current = categories.get(classification.code) || { ...classification, totalAmount: 0, transactionIds: [] };
+          current.totalAmount += transaction.amount;
+          current.transactionIds.push(transaction.id);
+          categories.set(classification.code, current);
         }
-      });
+        return [...categories.values()];
+      })();
 
-      Object.entries(bankSources).forEach(([src, source]) => {
-        if (source.amount > 500) {
-          const detail = { detailTitle: `${src}的具体流水`, transactionIds: source.transactionIds };
-          nodesMap.set(src, { name: src, itemStyle: { color: '#059669' }, ...detail });
-          links.push({ source: src, target: centerNode, value: Math.round(source.amount), ...detail });
-        }
-      });
-
-      // Center Node -> Top Outgoing Counterparties
-      const sortedCps = Object.values(report.counterpartySummaries)
-        .sort((a, b) => b.totalOut - a.totalOut)
-        .slice(0, 8);
-
-      sortedCps.forEach(cp => {
-        if (cp.totalOut > 1000) {
-          let tag = '';
-          let color = '#dc2626';
-          if (cp.isSuspectedRelative) {
-            tag = ' (疑似亲属)';
-            color = '#9333ea';
-          } else if (cp.isSuspectedAffiliate) {
-            tag = ' (关联企业)';
-            color = '#ea580c';
-          } else if (/现金|ATM/.test(cp.name)) {
-            tag = ' (大额取现)';
-            color = '#b91c1c';
-          } else {
-            color = '#64748b';
-          }
-
-          const targetNode = `去向：${cp.name}${tag}`;
-          const transactionIds = report.analysisGraph?.counterparties
-            .filter(entity => entity.name === cp.name)
-            .flatMap(entity => entity.outgoingTransactionIds)
-            || transactions
-              .filter(transaction => !transaction.isInternalTransfer
-                && transaction.direction === 'OUT'
-                && effectiveCounterpartyName(transaction) === cp.name)
-              .map(transaction => transaction.id);
-          const detail = { detailTitle: `${cp.name}的流出流水`, transactionIds };
-          nodesMap.set(targetNode, { name: targetNode, itemStyle: { color }, ...detail });
-          links.push({ source: centerNode, target: targetNode, value: Math.round(cp.totalOut), ...detail });
-        }
+      flowCategories.forEach(category => {
+        if (category.totalAmount <= 0 || !category.transactionIds.length) return;
+        const nodeName = `${category.direction === 'IN' ? '流入' : '流出'}｜${category.label}`;
+        const detail = {
+          detailTitle: `${category.label}明细`,
+          transactionIds: category.transactionIds,
+          totalAmount: category.totalAmount,
+          transactionCount: category.transactionIds.length
+        };
+        nodesMap.set(nodeName, { name: nodeName, itemStyle: { color: category.color }, ...detail });
+        links.push(category.direction === 'IN'
+          ? { source: nodeName, target: centerNode, value: category.totalAmount, ...detail }
+          : { source: centerNode, target: nodeName, value: category.totalAmount, ...detail });
       });
 
       chart.setOption({
@@ -108,24 +77,29 @@ export const VisualCharts: React.FC<VisualChartsProps> = ({
           triggerOn: 'mousemove',
           formatter: (params: any) => {
             if (params.dataType === 'edge') {
-              return `${params.data.source} → ${params.data.target}<br/><b>流转金额：¥ ${params.data.value.toLocaleString()} 元</b>`;
+              return `${params.data.source} → ${params.data.target}<br/><b>¥ ${Number(params.data.value).toLocaleString()} 元</b><br/>${params.data.transactionCount || 0} 笔流水`;
             }
-            return `<b>${params.name}</b>`;
+            const amount = params.data.totalAmount ? `<br/>¥ ${Number(params.data.totalAmount).toLocaleString()} 元 · ${params.data.transactionCount || 0} 笔` : '';
+            return `<b>${params.name}</b>${amount}`;
           }
         },
         series: [
           {
             type: 'sankey',
             layout: 'none',
+            nodeAlign: 'justify',
+            layoutIterations: 64,
+            nodeWidth: 16,
+            nodeGap: 14,
             emphasis: { focus: 'adjacency' },
             data: Array.from(nodesMap.values()),
             links,
             lineStyle: {
               color: 'gradient',
               curveness: 0.5,
-              opacity: 0.4
+              opacity: 0.32
             },
-            label: { fontSize: 11, color: '#334155' }
+            label: { fontSize: 11, color: '#334155', width: 135, overflow: 'break' }
           }
         ]
       }, true);
@@ -240,7 +214,7 @@ export const VisualCharts: React.FC<VisualChartsProps> = ({
         <div className="flex items-center space-x-2">
           <GitCommit className="w-4 h-4 text-blue-600" />
           <h3 className="text-sm font-bold text-slate-800">
-            资金流向穿透与关联拓扑可视化图谱
+            资金来源、用途与关联方图谱
           </h3>
         </div>
 
@@ -254,7 +228,7 @@ export const VisualCharts: React.FC<VisualChartsProps> = ({
             }`}
           >
             <GitCommit className="w-3.5 h-3.5" />
-            <span>资金流向桑基图</span>
+            <span>资金用途分类</span>
           </button>
 
           <button
@@ -271,9 +245,13 @@ export const VisualCharts: React.FC<VisualChartsProps> = ({
         </div>
       </div>
 
-      <div ref={chartRef} className="h-[360px] w-full" />
+      <div ref={chartRef} className="h-[420px] w-full" />
 
-      <p className="text-xs text-slate-500 text-center">点击流向节点或连线，可查看组成该流向的具体流水</p>
+      <p className="text-xs text-slate-500 text-center">
+        {chartType === 'sankey'
+          ? '内部互转已剔除；按摘要、对手方和交易方向归类。司法划扣等重要类别不设金额门槛。点击节点或连线查看具体流水。'
+          : '按具体对手方展示资金关系；点击节点或连线查看具体流水。'}
+      </p>
 
       {selectedFlow && (
         <div className="rounded-xl border border-blue-200 bg-blue-50/40 overflow-hidden">
@@ -329,26 +307,32 @@ export const VisualCharts: React.FC<VisualChartsProps> = ({
       )}
 
       <div className="flex items-center justify-between text-[11px] text-slate-400 border-t border-slate-100 pt-2">
-        <div className="flex items-center space-x-4">
-          <span className="flex items-center space-x-1">
-            <span className="w-2.5 h-2.5 rounded-full bg-purple-600 inline-block"></span>
-            <span>近亲属转移</span>
-          </span>
-          <span className="flex items-center space-x-1">
-            <span className="w-2.5 h-2.5 rounded-full bg-orange-500 inline-block"></span>
-            <span>关联企业</span>
-          </span>
-          <span className="flex items-center space-x-1">
-            <span className="w-2.5 h-2.5 rounded-full bg-red-600 inline-block"></span>
-            <span>大额取现</span>
-          </span>
-          <span className="flex items-center space-x-1">
-            <span className="w-2.5 h-2.5 rounded-full bg-emerald-600 inline-block"></span>
-            <span>理财/保单</span>
-          </span>
-        </div>
-        <span>支持拖拽节点与鼠标滚轮缩放</span>
+        {chartType === 'sankey' ? (
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+            <LegendDot color="#be123c" label="司法划扣" />
+            <LegendDot color="#b91c1c" label="现金取现" />
+            <LegendDot color="#7c3aed" label="贷款还款" />
+            <LegendDot color="#0891b2" label="投资理财" />
+            <LegendDot color="#ea580c" label="消费支出" />
+            <LegendDot color="#94a3b8" label="待核对" />
+          </div>
+        ) : (
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+            <LegendDot color="#9333ea" label="疑似亲属" />
+            <LegendDot color="#ea580c" label="关联企业" />
+            <LegendDot color="#dc2626" label="现金取现" />
+            <LegendDot color="#059669" label="理财／保险" />
+          </div>
+        )}
+        <span>{chartType === 'network' ? '支持拖拽节点与鼠标滚轮缩放' : '左侧为流入，右侧为流出'}</span>
       </div>
     </div>
   );
 };
+
+const LegendDot: React.FC<{ color: string; label: string }> = ({ color, label }) => (
+  <span className="flex items-center space-x-1">
+    <span className="w-2.5 h-2.5 rounded-full inline-block" style={{ backgroundColor: color }} />
+    <span>{label}</span>
+  </span>
+);

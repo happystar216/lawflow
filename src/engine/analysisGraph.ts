@@ -2,6 +2,7 @@ import { CaseAnalysisGraph, AnalysisCounterpartyEntity } from '../types/analysis
 import { BankAccount, StandardTransaction } from '../types/transaction';
 import { accountIdentityKey, transactionBelongsToAccount } from '../utils/accountIdentity';
 import { effectiveCounterpartyName, isJudicialDeduction } from './bilateral';
+import { classifyTransactionFlow } from './flowClassification';
 
 function entityKey(prefix: string, value: string): string {
   let left = 2166136261;
@@ -77,6 +78,7 @@ export function buildCaseAnalysisGraph(
   }
 
   const relationships: CaseAnalysisGraph['relationships'] = [];
+  const flowCategories = new Map<string, CaseAnalysisGraph['flowCategories'][number]>();
   for (const transaction of transactions) {
     const transactionEntityId = `transaction_${transaction.id}`;
     const accountEntityId = accountIdByTransaction.get(transaction.id)!;
@@ -96,6 +98,28 @@ export function buildCaseAnalysisGraph(
         type: 'TRANSACTION_WITH_COUNTERPARTY',
         fromEntityId: transactionEntityId,
         toEntityId: counterpartyId,
+        transactionIds: [transaction.id],
+        amount: transaction.amount
+      });
+    }
+    const classification = classifyTransactionFlow(transaction);
+    if (classification) {
+      const categoryId = `flow_category_${classification.code}`;
+      const category = flowCategories.get(categoryId) || {
+        id: categoryId,
+        kind: 'FLOW_CATEGORY' as const,
+        ...classification,
+        totalAmount: 0,
+        transactionIds: []
+      };
+      category.totalAmount += transaction.amount;
+      category.transactionIds.push(transaction.id);
+      flowCategories.set(categoryId, category);
+      relationships.push({
+        id: `tx_flow_category_${transaction.id}`,
+        type: 'TRANSACTION_CLASSIFIED_AS',
+        fromEntityId: transactionEntityId,
+        toEntityId: categoryId,
         transactionIds: [transaction.id],
         amount: transaction.amount
       });
@@ -145,6 +169,11 @@ export function buildCaseAnalysisGraph(
     })),
     counterparties: [...counterparties.values()],
     judicialDeductions,
+    flowCategories: [...flowCategories.values()].sort((left, right) => (
+      left.direction.localeCompare(right.direction)
+      || right.priority - left.priority
+      || right.totalAmount - left.totalAmount
+    )),
     relationships
   };
 }

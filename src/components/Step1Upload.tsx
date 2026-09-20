@@ -6,7 +6,7 @@ import { parsePdfWithGemini, GeminiProgressInfo } from '../parsers/geminiPdfPars
 import { deleteSourceDocument, saveSourceDocument } from '../store/sourceDocumentStore';
 import { accountIdentityKey, transactionBelongsToAccount } from '../utils/accountIdentity';
 import { importErrorForUser } from '../utils/userFacingError';
-import { attachSourceProvenance, createExtractionRun, identifySourceDocument, sourceIdentity } from '../utils/evidenceProvenance';
+import { attachSourceProvenance, createExtractionRun, identifySourceDocument, sourceFilesWithoutTransactions, sourceIdentity, transactionCountsBySource } from '../utils/evidenceProvenance';
 
 interface Step1Props {
   caseId: string;
@@ -55,9 +55,8 @@ export const Step1Upload: React.FC<Step1Props> = ({
   const [importTasks, setImportTasks] = useState<ImportTask[]>([]);
 
   const abortControllerRef = useRef<AbortController | null>(null);
-  const zeroTransactionFiles = [...new Set(accounts
-    .filter(account => account.transactionCount === 0)
-    .map(account => account.fileName))];
+  const zeroTransactionFiles = sourceFilesWithoutTransactions(accounts, transactions);
+  const sourceTransactionCounts = transactionCountsBySource(transactions);
   const hasTransactions = transactions.length > 0;
   const importedFileGroups = Array.from(accounts.reduce((groups, account) => {
     const key = sourceIdentity(account);
@@ -531,7 +530,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
             {importedFileGroups.map(([sourceKey, fileAccounts]) => {
               const firstAccount = fileAccounts[0];
               const fileName = firstAccount.fileName;
-              const fileTransactionCount = fileAccounts.reduce((sum, account) => sum + account.transactionCount, 0);
+              const fileTransactionCount = sourceTransactionCounts.get(sourceKey) || 0;
               return (
                 <section key={sourceKey} className="rounded-xl border border-slate-200 overflow-hidden bg-slate-50/40">
                   <div className="flex items-center justify-between gap-3 px-4 py-3 bg-slate-100/80 border-b border-slate-200">

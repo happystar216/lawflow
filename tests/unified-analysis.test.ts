@@ -3,6 +3,7 @@ import test from 'node:test';
 import { LawFlowEngine } from '../src/engine/engine';
 import { CaseMetadata } from '../src/types/case';
 import { BankAccount, StandardTransaction } from '../src/types/transaction';
+import { classifyTransactionFlow } from '../src/engine/flowClassification';
 
 const metadata: CaseMetadata = {
   id: 'case-unified', caseNumber: '执1号', courtName: '测试法院', applicantName: '申请人',
@@ -43,9 +44,20 @@ test('unified analysis builds explicit entities and relations without mutating c
   assert.equal(report.analysisGraph?.accounts.length, 2);
   assert.equal(report.analysisGraph?.transactions.length, 3);
   assert.equal(report.analysisGraph?.judicialDeductions.length, 1);
+  assert.ok(report.analysisGraph?.flowCategories.some(category => category.code === 'JUDICIAL_DEDUCTION' && category.transactionIds.includes('judicial')));
   assert.ok(report.analysisGraph?.relationships.some(relation => relation.type === 'INTERNAL_TRANSFER_PAIR'));
   assert.ok(report.analysisGraph?.relationships.some(relation => relation.type === 'JUDICIAL_DEDUCTION_TO_AUTHORITY'));
+  assert.ok(report.analysisGraph?.relationships.some(relation => relation.type === 'TRANSACTION_CLASSIFIED_AS' && relation.transactionIds.includes('judicial')));
   assert.equal(Object.keys(report.accountAudits || {}).length, 2);
+});
+
+test('fund flows classify legally important uses without a minimum amount threshold', () => {
+  assert.equal(classifyTransactionFlow(transaction('j', 'A', 'OUT', 1, 0, '', '法院扣划'))?.code, 'JUDICIAL_DEDUCTION');
+  assert.equal(classifyTransactionFlow(transaction('loan', 'A', 'IN', 300000, 300000, '', '个人贷款放款'))?.code, 'LOAN_DISBURSEMENT');
+  assert.equal(classifyTransactionFlow(transaction('cash', 'A', 'OUT', 500, 0, '', 'ATM现金取款'))?.code, 'CASH_WITHDRAWAL');
+  assert.equal(classifyTransactionFlow(transaction('wealth', 'A', 'OUT', 500, 0, '', '购买理财产品'))?.code, 'INVESTMENT_WEALTH');
+  assert.equal(classifyTransactionFlow(transaction('fee', 'A', 'OUT', 10, 0, '', '账户管理费'))?.code, 'TAX_AND_FEES');
+  assert.equal(classifyTransactionFlow(transaction('unknown', 'A', 'OUT', 10, 0, '', ''))?.code, 'OTHER_OUT');
 });
 
 test('changing any canonical transaction invalidates the analysis fingerprint and recomputes graph amounts', () => {

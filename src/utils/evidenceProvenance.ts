@@ -98,6 +98,28 @@ export function sourceIdentity(value: Pick<BankAccount, 'fileName' | 'sourceDocu
   return 'fileName' in value ? `LEGACY_${value.fileName}` : `LEGACY_${value.rawSourceFile}`;
 }
 
+export function transactionCountsBySource(transactions: StandardTransaction[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const transaction of transactions) {
+    const key = sourceIdentity(transaction);
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  return counts;
+}
+
+/** A file is empty only when its whole source has no rows, not when one account has no rows. */
+export function sourceFilesWithoutTransactions(
+  accounts: BankAccount[],
+  transactions: StandardTransaction[]
+): string[] {
+  const counts = transactionCountsBySource(transactions);
+  const files = new Map<string, string>();
+  for (const account of accounts) files.set(sourceIdentity(account), account.fileName);
+  return [...files.entries()]
+    .filter(([sourceKey]) => (counts.get(sourceKey) || 0) === 0)
+    .map(([, fileName]) => fileName);
+}
+
 function sourceObservationId(documentId: string, transaction: StandardTransaction, index: number): string {
   const page = transaction.rawPageNumber || 0;
   const row = transaction.rawRowIndex || index + 1;
