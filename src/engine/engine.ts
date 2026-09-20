@@ -11,6 +11,7 @@ import { caseAnalysisFingerprint } from './analysisFingerprint';
 import { auditAccountBalance } from '../parsers/sanityChecker';
 import { canonicalizeTransactionEvents } from './transactionEvents';
 import { accountIdentityKey } from '../utils/accountIdentity';
+import { businessAccounts } from '../review/recognitionCompleteness';
 
 export class LawFlowEngine {
   private registry: RuleRegistry;
@@ -142,7 +143,7 @@ export class LawFlowEngine {
     const solvencyCoverageRate = totalIncomeDuringExecution / targetDebt;
 
     const analysisGraph = buildCaseAnalysisGraph(accounts, analyzedTransactions, canonical.events);
-    const accountAudits = Object.fromEntries(accounts.map(account => [
+    const accountAudits = Object.fromEntries(businessAccounts(accounts).map(account => [
       accountIdentityKey(account),
       // Reconcile every statement against its own source rows. Cross-document
       // event consolidation is for case totals, not for altering a statement's audit.

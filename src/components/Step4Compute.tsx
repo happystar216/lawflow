@@ -144,7 +144,7 @@ export const Step4Compute: React.FC<Step4Props> = ({
                   />
                 </div>
                 <p className="text-[11px] text-slate-400 leading-snug">{rule.description}</p>
-                <div className="text-[10px] text-blue-400 font-mono pt-1">{rule.statutoryBasis[0]}</div>
+                <div className="text-[10px] text-blue-400 font-mono pt-1">{rule.statutoryBasis?.[0] || '规则依据待补充'}</div>
               </div>
             ))}
           </div>
@@ -160,7 +160,7 @@ export const Step4Compute: React.FC<Step4Props> = ({
                 <div className="font-semibold">统一分析已基于当前流水更新</div>
                 <div className="text-emerald-800">
                   {evaluationReport.analysisGraph.accounts.length} 个账户实体 · {evaluationReport.analysisGraph.transactions.length} 个交易事件
-                  {(evaluationReport.duplicateObservationCount || 0) > 0 && `（${evaluationReport.sourceObservationCount} 条原始记录中合并 ${evaluationReport.duplicateObservationCount} 条跨文件重复记录）`}
+                  {(evaluationReport.duplicateObservationCount || 0) > 0 && `（${evaluationReport.sourceObservationCount} 条原始记录中合并 ${evaluationReport.duplicateObservationCount} 条重复观察记录）`}
                   {' · '}{evaluationReport.analysisGraph.counterparties.length} 个对手方 · {evaluationReport.analysisGraph.judicialDeductions.length} 笔司法划扣
                 </div>
               </div>

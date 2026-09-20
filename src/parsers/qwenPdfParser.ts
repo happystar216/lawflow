@@ -3,11 +3,14 @@ import { createPdfPageImageRenderer, getPdfPageCount, PdfPageImage } from './pdf
 import { mergeQwenChunkResults as mergeVerifiedChunks } from './qwenResultMerger';
 export { mergeQwenChunkResults } from './qwenResultMerger';
 
-const MAX_CONCURRENCY = 5;
-const INITIAL_CONCURRENCY = 3;
-const MIN_CONCURRENCY = 2;
+// The production worker starts returning 503s when several long PDF segments
+// reach the model at once. Start serially, and only grow to two requests after
+// a sustained clean run. A retry storm is slower than conservative dispatch.
+const MAX_CONCURRENCY = 2;
+const INITIAL_CONCURRENCY = 1;
+const MIN_CONCURRENCY = 1;
 const REQUEST_TIMEOUT_MS = 150_000;
-const CACHE_VERSION = 'segment-pdf-v13-original-page-contract';
+const CACHE_VERSION = 'segment-pdf-v14-single-page-recovery';
 const PAGE_MAP_BATCH_SIZE = 8;
 const THUMBNAIL_SCALE = 0.42;
 const SEGMENT_PDF_MAX_PAGES = 4;
@@ -97,11 +100,16 @@ export async function parsePdfWithQwen(
   const requestGate = new AdaptiveRequestGate(totalPages);
   let completedPages = 0;
   let totalTransactions = 0;
+  let recoveryActive = false;
+  let recoveryCompleted = 0;
+  let recoveryTotal = 0;
 
   const report = (statusText: string) => onProgress?.({
     currentPage: completedPages,
     totalPages,
-    percent: Math.round(completedPages / totalPages * 100),
+    percent: recoveryActive
+      ? Math.min(98, 90 + Math.round((recoveryCompleted / Math.max(1, recoveryTotal)) * 8))
+      : Math.min(88, Math.round(completedPages / totalPages * 88)),
     totalTransactions,
     statusText
   });
@@ -133,13 +141,9 @@ export async function parsePdfWithQwen(
       console.warn('无法建立内存分段 PDF:', error);
       return [];
     });
-    const chunkByPage = new Map<number, SegmentPdfChunk>();
-    for (const chunk of segmentChunks) {
-      for (const page of chunkPages(chunk)) chunkByPage.set(page, chunk);
-    }
     report(`已生成 ${segmentChunks.length} 个银行/账户识别分段，正在逐段调用识别接口…`);
 
-    await runWithConcurrency(segmentChunks, 2, async chunk => {
+    await runWithConcurrency(segmentChunks, MAX_CONCURRENCY, async chunk => {
       assertNotAborted(signal);
       let segmentPages: ChunkParseResult[] = [];
       try {
@@ -167,17 +171,29 @@ export async function parsePdfWithQwen(
 
     const recoveryCandidates = results.filter(result => needsFinalPageRecovery(result, pageMap.get(result.pageStart)));
     if (recoveryCandidates.length) {
-      const recoveryChunks = [...new Set(recoveryCandidates.map(result => chunkByPage.get(result.pageStart)).filter(Boolean))] as SegmentPdfChunk[];
-      report(`仍有 ${recoveryCandidates.length} 个疑似漏页或服务失败页，正在用原 PDF 分段低并发补偿…`);
-      await abortableDelay(5_000, signal);
+      recoveryActive = true;
+      recoveryTotal = recoveryCandidates.length;
+      const recoveryChunks = await createSinglePageRecoveryChunks(
+        file,
+        pageMap,
+        recoveryCandidates.map(result => result.pageStart),
+        totalPages
+      ).catch(error => {
+        console.warn('无法建立单页补偿 PDF:', error);
+        return [];
+      });
+      report(`首次识别已完成，正在逐页补偿 ${recoveryCandidates.length} 个疑似漏页或服务失败页（0/${recoveryCandidates.length}）…`);
+      if (recoveryChunks.length) await abortableDelay(10_000, signal);
       const recoveryGate = new AdaptiveRequestGate(totalPages);
       await runWithConcurrency(recoveryChunks, 1, async chunk => {
         let recoveredSegment: ChunkParseResult;
         try {
           recoveredSegment = await parseSegmentPdfWithRetry(
-            chunk, pageMap, file.name, recoveryGate, signal, report, 2
+            chunk, pageMap, file.name, recoveryGate, signal, report, 4
           );
         } catch {
+          recoveryCompleted += 1;
+          report(`失败页补偿进度 ${recoveryCompleted}/${recoveryTotal}；未恢复页面会保留为阻断性核对事项…`);
           return;
         }
         for (const recovered of splitSegmentResultByPage(recoveredSegment, chunk, pageMap, file.name)) {
@@ -188,24 +204,37 @@ export async function parsePdfWithQwen(
           results[index] = recovered;
           totalTransactions += recovered.transactions.length - existing.transactions.length;
           if (!isHardFailedPage(recovered)) await writeCachedResults(cacheKey, [recovered]);
-          report(`已补偿完成第 ${recovered.pageStart} 页，累计提取 ${totalTransactions} 笔交易`);
         }
+        recoveryCompleted += 1;
+        report(`失败页补偿进度 ${recoveryCompleted}/${recoveryTotal}，累计提取 ${totalTransactions} 笔交易`);
       }, signal);
     }
     const finalResults = [...results].sort((a, b) => a.pageStart - b.pageStart);
     await writeCachedResults(cacheKey, finalResults.filter(result => !isHardFailedPage(result)));
-    return mergeVerifiedChunks(finalResults, file.name, totalPages);
+    const merged = mergeVerifiedChunks(finalResults, file.name, totalPages);
+    const failedPages = finalResults.filter(isHardFailedPage).map(result => result.pageStart);
+    onProgress?.({
+      currentPage: totalPages,
+      totalPages,
+      percent: 100,
+      totalTransactions,
+      statusText: failedPages.length
+        ? `已读取 ${totalTransactions} 笔流水；仍有 ${failedPages.length} 页未能可靠识别，必须重新识别或人工补录后才能分析`
+        : `识别与完整性检查完成，共读取 ${totalTransactions} 笔流水`
+    });
+    return merged;
   } finally {
     await renderer.destroy();
   }
 }
 
 function needsFinalPageRecovery(result: ChunkParseResult, mapped?: PageMapItem): boolean {
-  // A partially extracted page has already been retried as its original PDF
-  // segment. Keep its count mismatch visible for focused human completion
-  // instead of issuing another expensive whole-segment request.
-  if (result.transactions.length > 0) return false;
   if (result.warnings?.some(warning => warning.includes('连续识别失败'))) return true;
+  const expected = result.expectedTransactionCount ?? result.pageQuality?.[0]?.expectedCount;
+  if (expected !== undefined && expected > result.transactions.length) return true;
+  if (result.pageQuality?.[0]?.status === 'NEEDS_REVIEW'
+    && (mapped?.pageType === 'TRANSACTIONS' || mapped?.density === 'HIGH')) return true;
+  if (result.transactions.length > 0) return false;
   if (!mapped) return false;
   return mapped.pageType === 'TRANSACTIONS' || mapped.density === 'HIGH';
 }
@@ -404,6 +433,40 @@ async function createSegmentPdfChunks(
   return chunks;
 }
 
+async function createSinglePageRecoveryChunks(
+  sourceFile: File,
+  pageMap: Map<number, PageMapItem>,
+  pages: number[],
+  totalPages: number
+): Promise<SegmentPdfChunk[]> {
+  if (!pages.length) return [];
+  const { PDFDocument } = await import('pdf-lib');
+  const source = await PDFDocument.load(await sourceFile.arrayBuffer());
+  const chunks: SegmentPdfChunk[] = [];
+  for (const pageNumber of [...new Set(pages)].sort((left, right) => left - right)) {
+    const mapped = pageMap.get(pageNumber);
+    const document = await PDFDocument.create();
+    const [copiedPage] = await document.copyPages(source, [pageNumber - 1]);
+    document.addPage(copiedPage);
+    const bytes = await document.save({ useObjectStreams: true });
+    const fileBytes = Uint8Array.from(bytes).buffer;
+    chunks.push({
+      id: `RECOVERY-P${pageNumber}`,
+      segmentId: mapped?.segmentId || `RECOVERY-P${pageNumber}`,
+      bankName: mapped?.segmentBankName || mapped?.bankName || '',
+      accountNumbers: mapped?.segmentAccountNumbers || mapped?.accountNumbers || [],
+      pages: [pageNumber],
+      file: new File([fileBytes], `原第${pageNumber}页_补偿识别.pdf`, { type: 'application/pdf' }),
+      pageStart: pageNumber,
+      pageEnd: pageNumber,
+      totalPages,
+      rotation: mapped?.rotation || 0,
+      scale: 1
+    });
+  }
+  return chunks;
+}
+
 export function buildSegmentPageRuns(pages: number[], pending: Set<number>, maxPages = SEGMENT_PDF_MAX_PAGES): number[][] {
   const firstPendingIndex = pages.findIndex(page => pending.has(page));
   if (firstPendingIndex < 0) return [];
@@ -470,7 +533,7 @@ async function parseSegmentPdfWithRetry(
       permit = undefined;
       assertNotAborted(signal);
       if (attempt < maxAttempts - 1) {
-        const delay = transient ? Math.min(20_000, 4_000 * 2 ** attempt) : 1_500 * (attempt + 1);
+        const delay = transient ? Math.min(60_000, 10_000 * 2 ** attempt) : 1_500 * (attempt + 1);
         await abortableDelay(delay, signal);
       }
     }
@@ -824,7 +887,7 @@ class AdaptiveRequestGate {
     this.trimTransientFailures();
     this.limit = Math.max(MIN_CONCURRENCY, this.limit - 1);
     const burstSize = this.transientFailures.length;
-    const cooldown = burstSize >= 6 ? 30_000 : burstSize >= 3 ? 15_000 : 4_000;
+    const cooldown = burstSize >= 6 ? 60_000 : burstSize >= 3 ? 30_000 : 10_000;
     this.cooldownUntil = Math.max(this.cooldownUntil, now + cooldown);
   }
 
@@ -842,15 +905,19 @@ class AdaptiveRequestGate {
 
 function failedPageResult(pageNumber: number, totalPages: number, sourceFileName: string, message: string): ChunkParseResult {
   const accountNumber = `待核验-${sourceFileName.replace(/\.[^.]+$/, '')}`;
+  const finalMessage = message
+    .replace(/[，；]?\s*系统将自动重试/g, '')
+    .replace(/[；;，,]\s*$/g, '')
+    .trim();
   return {
     account: {
       accountNumber, accountName: sourceFileName.replace(/\.[^.]+$/, ''), bankName: '待核验银行', ownerType: 'DEBTOR_MAIN',
       fileName: sourceFileName, fileType: 'pdf', totalIn: 0, totalOut: 0, transactionCount: 0,
       startDate: '', endDate: '', startBalance: 0, endBalance: 0, isBalanced: false, balanceDiff: 0,
-      balanceAvailable: false, parseStatus: 'NEEDS_REVIEW'
+      balanceAvailable: false, parseStatus: 'INCOMPLETE'
     },
     transactions: [],
-    warnings: [`第 ${pageNumber} 页连续识别失败：${message}；已继续处理后续页面，请律师对照原件核验`],
+    warnings: [`第 ${pageNumber} 页连续识别失败：${finalMessage || '未取得有效结构化结果'}；自动重试后仍未恢复，已继续处理后续页面，请重新识别本页或对照原件补录`],
     coveredPages: [pageNumber], pageStart: pageNumber, pageEnd: pageNumber, totalPages,
     expectedTransactionCount: 0, countComplete: false
   };

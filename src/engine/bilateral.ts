@@ -1,6 +1,7 @@
 import { StandardTransaction, CounterpartySummary } from '../types/transaction';
 
-const JUDICIAL_DEDUCTION_PATTERN = /司法划扣|司法扣划|法院划扣|法院扣划|司法扣款|冻结扣划|强制扣划|强制执行扣款/;
+const JUDICIAL_DEDUCTION_PATTERN = /司法划扣|司法扣划|法院划扣|法院扣划|司法扣款|冻结扣划|强制扣划|强制执行扣款|(?:网络)?执行查控.{0,12}(?:扣划|划扣)|网络查控.{0,20}(?:扣划|划扣)/;
+const GENERIC_JUDICIAL_COUNTERPARTY_PATTERN = /网络.*查控.*(?:扣划|划扣)|(?:扣划|划扣).*专户/;
 
 export function isJudicialDeduction(tx: StandardTransaction): boolean {
   return tx.direction === 'OUT' && JUDICIAL_DEDUCTION_PATTERN.test(`${tx.summary || ''} ${tx.rawText || ''}`);
@@ -8,10 +9,10 @@ export function isJudicialDeduction(tx: StandardTransaction): boolean {
 
 export function effectiveCounterpartyName(tx: StandardTransaction): string {
   const extractedName = tx.counterpartyName?.trim();
-  if (extractedName) return extractedName;
-
   const context = `${tx.summary || ''} ${tx.rawText || ''}`;
-  if (JUDICIAL_DEDUCTION_PATTERN.test(context)) return '【司法机关划扣】';
+  if (JUDICIAL_DEDUCTION_PATTERN.test(context)
+    && (!extractedName || GENERIC_JUDICIAL_COUNTERPARTY_PATTERN.test(extractedName))) return '【司法机关划扣】';
+  if (extractedName) return extractedName;
   if (/\bATM\b|现金取款|取现|柜面取款/.test(context)) return '【现金取现】';
   return '【无对手方名称／用途待核对】';
 }

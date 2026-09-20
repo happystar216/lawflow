@@ -32,6 +32,7 @@ import {
 import { createFieldEvidenceSnapshot } from "../utils/evidenceProvenance";
 import { applyRowReviewDecision, RowReviewDecision } from "../review/fieldReview";
 import { estimatedSourceRegion } from "../utils/sourceLocator";
+import { isBlockingRecognitionIssue, isDocumentReviewAccount } from "../review/recognitionCompleteness";
 
 interface Step2Props {
   caseId: string;
@@ -44,6 +45,7 @@ interface Step2Props {
 }
 
 interface MissingTransactionDraft {
+  accountKey: string;
   transactionTime: string;
   direction: "IN" | "OUT";
   amount: string;
@@ -74,7 +76,8 @@ function evidencePrimitive(value: unknown): string | number | null {
     : String(value ?? "");
 }
 
-const emptyDraft = (): MissingTransactionDraft => ({
+const emptyDraft = (accountKey = ""): MissingTransactionDraft => ({
+  accountKey,
   transactionTime: "",
   direction: "OUT",
   amount: "",
@@ -119,6 +122,15 @@ export const Step2Verify: React.FC<Step2Props> = ({
     accounts.find(
       (account) => accountIdentityKey(account) === selectedAccNum,
     ) || accounts[0];
+  const manualAccountOptions = selectedAccount ? accounts.filter(account => (
+    !isDocumentReviewAccount(account)
+    && (selectedAccount.sourceDocumentId
+      ? account.sourceDocumentId === selectedAccount.sourceDocumentId
+      : account.fileName === selectedAccount.fileName)
+  )) : [];
+  const defaultManualAccountKey = selectedAccount && !isDocumentReviewAccount(selectedAccount)
+    ? accountIdentityKey(selectedAccount)
+    : manualAccountOptions.length === 1 ? accountIdentityKey(manualAccountOptions[0]) : "";
   const auditReport = selectedAccount
     ? auditAccountBalance(selectedAccount, transactions)
     : null;
@@ -156,6 +168,7 @@ export const Step2Verify: React.FC<Step2Props> = ({
       issue.severity === "REQUIRED" &&
       (issue.status === "PENDING" || issue.status === "UNRESOLVED"),
   );
+  const blockingRecognitionIssues = allAccountIssues.filter(isBlockingRecognitionIssue);
   const reviewQueueGroups = useMemo(
     () => buildReviewGroups(accounts, transactions),
     [accounts, transactions],
@@ -240,14 +253,14 @@ export const Step2Verify: React.FC<Step2Props> = ({
   useEffect(() => {
     setResolutionNote(selectedIssue?.resolutionNote || "");
     setShowAddForm(false);
-    setDraft(emptyDraft());
+    setDraft(emptyDraft(defaultManualAccountKey));
     setSelectedRemovalIds([]);
     setConfirmationChecks([]);
     setHasEditedReview(false);
     setReviewedRowIds([]);
     setUnresolvedRowIds([]);
     setActiveReviewRowIndex(0);
-  }, [selectedIssue?.id]);
+  }, [selectedIssue?.id, defaultManualAccountKey]);
 
   const displayedTransactions = transactions
     .filter((transaction) => {
@@ -575,6 +588,12 @@ export const Step2Verify: React.FC<Step2Props> = ({
 
   const addMissingTransaction = () => {
     if (!selectedAccount || !selectedIssue) return;
+    const targetAccount = accounts.find(account => accountIdentityKey(account) === draft.accountKey)
+      || (!isDocumentReviewAccount(selectedAccount) ? selectedAccount : undefined);
+    if (!targetAccount || isDocumentReviewAccount(targetAccount)) {
+      window.alert("请先选择这笔流水所属的真实账户。若账户尚未识别，请返回上传页重新识别该文件。");
+      return;
+    }
     const amount = Number(draft.amount);
     if (!draft.transactionTime || !Number.isFinite(amount) || amount <= 0) {
       window.alert("请至少填写有效的交易日期和金额。");
@@ -583,14 +602,14 @@ export const Step2Verify: React.FC<Step2Props> = ({
     const page = selectedIssue.pageNumber || 1;
     const pageTransactions = transactions.filter(
       (transaction) =>
-        transactionBelongsToAccount(transaction, selectedAccount) &&
+        transactionBelongsToAccount(transaction, targetAccount) &&
         transaction.rawPageNumber === page,
     );
     const added: StandardTransaction = {
       id: `TX_MANUAL_${Date.now()}`,
-      accountNumber: selectedAccount.accountNumber,
-      accountName: selectedAccount.accountName,
-      bankName: selectedAccount.bankName,
+      accountNumber: targetAccount.accountNumber,
+      accountName: targetAccount.accountName,
+      bankName: targetAccount.bankName,
       transactionTime: draft.transactionTime,
       transactionDate: draft.transactionTime.slice(0, 10),
       direction: draft.direction,
@@ -599,7 +618,7 @@ export const Step2Verify: React.FC<Step2Props> = ({
       balanceAvailable: draft.balance !== "",
       counterpartyName: draft.counterpartyName,
       summary: draft.summary,
-      rawSourceFile: selectedAccount.fileName,
+      rawSourceFile: targetAccount.fileName,
       rawPageNumber: page,
       rawRowIndex:
         Math.max(0, ...pageTransactions.map((item) => item.rawRowIndex || 0)) +
@@ -610,26 +629,36 @@ export const Step2Verify: React.FC<Step2Props> = ({
       reviewedBy: "律师人工核对",
       reviewedAt: new Date().toISOString(),
       lawyerNote: "律师根据原始流水补录",
-      sourceDocumentId: selectedAccount.sourceDocumentId,
-      sourceContentHash: selectedAccount.sourceContentHash,
-      extractionRunId: selectedAccount.extractionRunId,
+      sourceDocumentId: targetAccount.sourceDocumentId,
+      sourceContentHash: targetAccount.sourceContentHash,
+      extractionRunId: targetAccount.extractionRunId,
     };
     added.sourceObservationId = added.id;
     added.fieldEvidence = createFieldEvidenceSnapshot(added, "LAWYER_REVIEW", "CONFIRMED");
     const updated = [...transactions, added];
-    commitTransactions(updated);
-    saveIssueStatus(
-      selectedIssue,
-      "CORRECTED",
-      "律师已根据原始流水补录遗漏交易",
-      updated,
-    );
+    onTransactionsUpdated(updated);
+    onAccountsUpdated(accounts.map(account => {
+      if (accountIdentityKey(account) === accountIdentityKey(targetAccount)) {
+        return summarizeAccount(account, updated);
+      }
+      if (accountIdentityKey(account) === accountIdentityKey(selectedAccount)) {
+        return { ...account, reviewIssues: preserveReviewIssues(account.reviewIssues || [], selectedIssueGroup) };
+      }
+      return account;
+    }));
+    setHasEditedReview(true);
     setShowAddForm(false);
-    setDraft(emptyDraft());
-    advanceAfterResolution(selectedIssue.id);
+    setDraft(emptyDraft(accountIdentityKey(targetAccount)));
   };
 
   const continueToNext = () => {
+    if (blockingRecognitionIssues.length) {
+      const firstBlocking = blockingRecognitionIssues[0];
+      const group = reviewQueueGroups.find(item => item.issues.some(issue => issue.id === firstBlocking.id));
+      window.alert(`还有 ${blockingRecognitionIssues.length} 个页面识别任务没有完成。请先返回上传页重新识别，或对照原件补录并完成这些页面后再进入资金分析。`);
+      if (group) openIssueReview(group.account, firstBlocking);
+      return;
+    }
     const outstanding: string[] = [];
     if (allRequiredOutstanding.length > 0) outstanding.push(`${pendingReviewGroups.length} 页尚未人工核对`);
     if (unbalancedAccounts.length > 0) outstanding.push(`${unbalancedAccounts.length} 个账户尚未平账`);
@@ -653,6 +682,7 @@ export const Step2Verify: React.FC<Step2Props> = ({
         </p>
         <div className="flex items-center gap-2 mt-5 overflow-x-auto pb-1">
           {accounts.map((account) => {
+            const isDocumentReview = isDocumentReviewAccount(account);
             const pending = buildReviewGroups([account], transactions).filter(
               (group) =>
                 group.issues.some(isOutstandingRequired),
@@ -661,7 +691,9 @@ export const Step2Verify: React.FC<Step2Props> = ({
             const accountAudit = accountAuditMap.get(identity);
             const isUnbalanced = Boolean(accountAudit?.isAuditable && !accountAudit.isBalanced);
             const hasUnknownAccount = /待核对账号|待归属|未知账号/.test(account.accountNumber);
-            const badgeLabel = pending
+            const badgeLabel = isDocumentReview
+              ? '识别未完成'
+              : pending
               ? `待核对 ${pending} 页`
               : hasUnknownAccount
                 ? '账号待核对'
@@ -684,7 +716,9 @@ export const Step2Verify: React.FC<Step2Props> = ({
                 className={`px-4 py-2 rounded-xl text-xs font-medium flex items-center gap-2 flex-shrink-0 ${selectedAccNum === identity ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}
               >
                 <span>
-                  {account.bankName}（{account.accountNumber.slice(-4)}）
+                  {isDocumentReview
+                    ? `${account.fileName} · 未识别页`
+                    : `${account.bankName}（${account.accountNumber.slice(-4)}）`}
                 </span>
                 <span
                   className={`px-1.5 py-0.5 rounded-full text-[10px] ${badgeClass}`}
@@ -1078,10 +1112,12 @@ export const Step2Verify: React.FC<Step2Props> = ({
             )}
             <button
               onClick={continueToNext}
-              className="flex items-center gap-2 px-6 py-2.5 rounded-xl bg-blue-600 text-white text-sm font-medium"
+              className={`flex items-center gap-2 px-6 py-2.5 rounded-xl text-white text-sm font-medium ${blockingRecognitionIssues.length ? "bg-amber-600 hover:bg-amber-700" : "bg-blue-600"}`}
             >
               <Check className="w-4 h-4" />
-              {pendingReviewGroups.length || unbalancedAccounts.length
+              {blockingRecognitionIssues.length
+                ? `请先处理 ${blockingRecognitionIssues.length} 个未识别页面`
+                : pendingReviewGroups.length || unbalancedAccounts.length
                 ? "保留未处理事项并继续"
                 : "完成核对，进入下一步"}
               <ArrowRight className="w-4 h-4" />
@@ -1317,6 +1353,7 @@ export const Step2Verify: React.FC<Step2Props> = ({
                         {showAddForm && (
                           <MissingTransactionForm
                             draft={draft}
+                            accounts={manualAccountOptions}
                             onChange={setDraft}
                             onSave={addMissingTransaction}
                           />
@@ -1738,11 +1775,24 @@ const PageTransactionSelector: React.FC<{
 
 const MissingTransactionForm: React.FC<{
   draft: MissingTransactionDraft;
+  accounts: BankAccount[];
   onChange: (draft: MissingTransactionDraft) => void;
   onSave: () => void;
-}> = ({ draft, onChange, onSave }) => (
+}> = ({ draft, accounts, onChange, onSave }) => (
   <div className="border border-blue-200 bg-blue-50/40 rounded-xl p-3 space-y-2">
     <div className="text-xs font-semibold">根据原件补录</div>
+    <select
+      value={draft.accountKey}
+      onChange={(event) => onChange({ ...draft, accountKey: event.target.value })}
+      className="w-full border rounded-lg px-2 py-1.5 text-xs"
+    >
+      <option value="">选择这笔流水所属账户</option>
+      {accounts.map(account => (
+        <option key={accountIdentityKey(account)} value={accountIdentityKey(account)}>
+          {account.bankName} · {account.accountNumber}
+        </option>
+      ))}
+    </select>
     <input
       placeholder="日期时间，如 2023-08-09"
       value={draft.transactionTime}
@@ -1795,7 +1845,7 @@ const MissingTransactionForm: React.FC<{
       onClick={onSave}
       className="w-full bg-blue-600 text-white rounded-lg py-2 text-xs font-medium"
     >
-      保存补录
+      保存本笔，继续核对本页
     </button>
   </div>
 );

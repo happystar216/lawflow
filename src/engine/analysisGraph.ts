@@ -5,6 +5,7 @@ import { sourceIdentity } from '../utils/evidenceProvenance';
 import { effectiveCounterpartyName, isJudicialDeduction } from './bilateral';
 import { classifyTransactionFlow } from './flowClassification';
 import { CanonicalTransactionEvent } from './transactionEvents';
+import { businessAccounts } from '../review/recognitionCompleteness';
 
 function entityKey(prefix: string, value: string): string {
   let left = 2166136261;
@@ -30,7 +31,7 @@ export function buildCaseAnalysisGraph(
   events: CanonicalTransactionEvent[] = []
 ): CaseAnalysisGraph {
   const accountEntitiesByKey = new Map<string, AnalysisAccountEntity>();
-  for (const account of accounts) {
+  for (const account of businessAccounts(accounts)) {
     const masterKey = masterAccountKey(account);
     const sourceAccountKey = accountIdentityKey(account);
     const existing = accountEntitiesByKey.get(masterKey);

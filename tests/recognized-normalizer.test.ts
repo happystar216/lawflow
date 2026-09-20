@@ -126,6 +126,15 @@ test('normalizer preserves a real zero-transaction account instead of replacing 
   assert.equal(result.accounts[0].ownerType, 'DEBTOR_MAIN');
 });
 
+test('normalizer shows a shared file-level warning only once across zero-transaction accounts', () => {
+  const warning = '原件未识别到交易明细，请确认查询期间是否确无流水';
+  const first = account('6222000000000001', '测试银行', 0, [warning]);
+  const second = account('6222000000000002', '测试银行', 0, [warning]);
+  const result = normalizeRecognizedData([first, second], []);
+  assert.equal(result.accounts.length, 2);
+  assert.equal(result.accounts.filter(item => item.parseWarnings?.includes(warning)).length, 1);
+});
+
 test('normalizer never merges two real accounts merely because their pages alternate', () => {
   const first = '2308014101100042218';
   const second = '2308417101003074088';

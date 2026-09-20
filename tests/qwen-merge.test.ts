@@ -160,7 +160,7 @@ test('Qwen chunk merge keeps an all-failed document reviewable instead of aborti
 
   assert.equal(merged.transactions.length, 0);
   assert.equal(merged.accounts.length, 1);
-  assert.equal(merged.account.parseStatus, 'NEEDS_REVIEW');
+  assert.equal(merged.account.parseStatus, 'INCOMPLETE');
   assert.deepEqual(merged.account.coveredPages, [1]);
 });
 

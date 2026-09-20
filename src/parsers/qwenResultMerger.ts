@@ -246,11 +246,12 @@ function buildAccountSummaries(
   const actionableOrphanWarnings = orphanWarnings.filter(w => !/空白|留白/.test(w) || /缺少|漏|失败|错误/.test(w));
   if (actionableOrphanWarnings.length) {
     const orphanPages = actionableOrphanWarnings.map(warningPage).filter((page): page is number => Boolean(page));
+    const hasHardFailure = actionableOrphanWarnings.some(warning => /连续识别失败|服务暂时不可用|未能完整获取/.test(warning));
     accountSummaries.push({
       accountNumber: `待归属页面-${sourceFileName}`, accountName: '待归属页面', bankName: '待核对',
       ownerType: 'UNKNOWN', fileName: sourceFileName, fileType: 'pdf', totalIn: 0, totalOut: 0, transactionCount: 0,
       startDate: '', endDate: '', startBalance: 0, endBalance: 0, isBalanced: false, balanceDiff: 0,
-      balanceAvailable: false, parseStatus: 'NEEDS_REVIEW', parseWarnings: [...new Set(actionableOrphanWarnings)],
+      balanceAvailable: false, parseStatus: hasHardFailure ? 'INCOMPLETE' : 'NEEDS_REVIEW', parseWarnings: [...new Set(actionableOrphanWarnings)],
       coveredPages: [...new Set(orphanPages)].sort((a, b) => a - b), totalPages, balanceContinuityIssueCount: 0
     });
   }

@@ -9,6 +9,7 @@ import { importErrorForUser } from '../utils/userFacingError';
 import { attachSourceProvenance, createExtractionRun, identifySourceDocument, sourceFilesWithoutTransactions, sourceIdentity, transactionCountsBySource } from '../utils/evidenceProvenance';
 import { publishAutomationImportState } from '../debug/automationBridge';
 import { normalizeRecognizedData } from '../utils/recognizedDataNormalizer';
+import { businessAccounts, incompleteRecognitionPages, isDocumentReviewAccount } from '../review/recognitionCompleteness';
 
 interface Step1Props {
   caseId: string;
@@ -62,6 +63,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
   const zeroTransactionFiles = sourceFilesWithoutTransactions(accounts, transactions);
   const sourceTransactionCounts = transactionCountsBySource(transactions);
   const hasTransactions = transactions.length > 0;
+  const visibleAccounts = businessAccounts(accounts);
   const importedFileGroups = Array.from(accounts.reduce((groups, account) => {
     const key = sourceIdentity(account);
     const current = groups.get(key) || [];
@@ -160,6 +162,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
       try {
         let importedTransactionCount = 0;
         let importedAccountCount = 0;
+        let incompletePages: number[] = [];
         let sourceStorageWarning = false;
         setStatusText(`正在校验原始文件“${file.name}”…`);
         const source = await identifySourceDocument(file);
@@ -195,7 +198,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
           newAccounts.push(...canonical.accounts);
           newTransactions.push(...canonical.transactions);
           importedTransactionCount = canonical.transactions.length;
-          importedAccountCount = canonical.accounts.filter(item => item.ownerType !== 'UNKNOWN').length;
+          importedAccountCount = businessAccounts(canonical.accounts).length;
         } else if (name.endsWith('.pdf')) {
           const controller = new AbortController();
           abortControllerRef.current = controller;
@@ -227,12 +230,13 @@ export const Step1Upload: React.FC<Step1Props> = ({
           removePreviousVersion();
           newAccounts.push(...canonical.accounts.map(account => sourceStored ? account : {
             ...account,
-            parseStatus: 'NEEDS_REVIEW' as const,
+            parseStatus: account.parseStatus === 'INCOMPLETE' ? 'INCOMPLETE' as const : 'NEEDS_REVIEW' as const,
             parseWarnings: [...new Set([...(account.parseWarnings || []), '原始文件未能持久保存，请在本次会话中完成原件核对或重新上传'])]
           }));
           newTransactions.push(...canonical.transactions);
           importedTransactionCount = canonical.transactions.length;
-          importedAccountCount = canonical.accounts.filter(item => item.ownerType !== 'UNKNOWN').length;
+          importedAccountCount = businessAccounts(canonical.accounts).length;
+          incompletePages = incompleteRecognitionPages(canonical.accounts);
         } else {
           throw new Error('不支持的文件格式');
         }
@@ -244,6 +248,16 @@ export const Step1Upload: React.FC<Step1Props> = ({
           retryable: true,
           transactionCount: 0,
           accountCount: importedAccountCount
+        } : incompletePages.length ? {
+          status: 'WARNING',
+          title: `“${file.name}”仅完成部分识别`,
+          message: `已保留 ${importedTransactionCount} 笔流水和 ${importedAccountCount} 个账户，但仍有 ${incompletePages.length} 页未能可靠识别。`,
+          impact: `未完成页面：第 ${incompletePages.join('、')} 页。请点击“重新识别”自动补齐；补齐或人工录入前不能进入资金分析。`,
+          retryable: true,
+          transactionCount: importedTransactionCount,
+          accountCount: importedAccountCount,
+          diagnosticCode: 'PDF_INCOMPLETE_PAGES',
+          diagnosis: '识别服务在这些页面连续失败。已成功页面已经缓存，重新识别时会优先补偿失败页。'
         } : sourceStorageWarning ? {
           status: 'WARNING',
           title: `“${file.name}”已导入，但原件未保存`,
@@ -318,7 +332,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
   const handleRemoveSourceFile = async (sourceKey: string, fileName: string) => {
     const sourceAccounts = accounts.filter(account => sourceIdentity(account) === sourceKey);
     if (!sourceAccounts.length) return;
-    const sourceAccountCount = sourceAccounts.length;
+    const sourceAccountCount = businessAccounts(sourceAccounts).length;
     if (!window.confirm(`确定删除来源文件“${fileName}”及其识别出的 ${sourceAccountCount} 个账户吗？重新上传时将从头识别。`)) return;
     const updatedAccounts = accounts.filter(account => sourceIdentity(account) !== sourceKey);
     const updatedTransactions = transactions.filter(transaction => transaction.sourceDocumentId
@@ -559,7 +573,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
             <div className="flex items-center space-x-2">
               <CheckCircle2 className="w-5 h-5 text-emerald-500" />
               <h2 className="text-base font-semibold text-slate-900">
-                已导入文件 ({importedFileGroups.length}) · 账户 ({accounts.length})
+                已导入文件 ({importedFileGroups.length}) · 账户 ({visibleAccounts.length})
               </h2>
             </div>
             <span className="text-xs text-slate-500">
@@ -572,6 +586,8 @@ export const Step1Upload: React.FC<Step1Props> = ({
               const firstAccount = fileAccounts[0];
               const fileName = firstAccount.fileName;
               const fileTransactionCount = sourceTransactionCounts.get(sourceKey) || 0;
+              const fileBusinessAccounts = fileAccounts.filter(account => !isDocumentReviewAccount(account));
+              const reviewPages = incompleteRecognitionPages(fileAccounts);
               return (
                 <section key={sourceKey} className="rounded-xl border border-slate-200 overflow-hidden bg-slate-50/40">
                   <div className="flex items-center justify-between gap-3 px-4 py-3 bg-slate-100/80 border-b border-slate-200">
@@ -585,7 +601,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
                       )}
                       <div className="min-w-0">
                         <p className="text-sm font-semibold text-slate-800 truncate" title={fileName}>{fileName}</p>
-                        <p className="text-[11px] text-slate-500">识别出 {fileAccounts.length} 个账户 · {fileTransactionCount} 笔流水</p>
+                        <p className="text-[11px] text-slate-500">识别出 {fileBusinessAccounts.length} 个账户 · {fileTransactionCount} 笔流水</p>
                       </div>
                     </div>
                     <button
@@ -597,8 +613,14 @@ export const Step1Upload: React.FC<Step1Props> = ({
                       删除文件
                     </button>
                   </div>
+                  {reviewPages.length > 0 && (
+                    <div className="mx-3 mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-[11px] text-rose-900">
+                      <span className="font-semibold">该文件尚未完整识别：</span>
+                      第 {reviewPages.join('、')} 页仍需重新识别或人工补录，完成前不会进入正式资金分析。
+                    </div>
+                  )}
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3 p-3">
-                    {fileAccounts.map((acc) => (
+                    {fileBusinessAccounts.map((acc) => (
                       <div
                         key={accountIdentityKey(acc)}
                         className="p-4 rounded-lg border border-slate-200 bg-white"

@@ -43,12 +43,6 @@ export async function parsePdfWithGemini(
     throw new Error('当前识别方式仅支持 PDF 文件');
   }
 
-  // 校验文件体积（Cloudflare 单次请求推荐 75MB 以内）
-  const maxBytes = 75 * 1024 * 1024;
-  if (file.size > maxBytes) {
-    throw new Error(`当前 PDF 文件体积约为 ${(file.size / (1024 * 1024)).toFixed(1)}MB，超过单次上传限制（75MB）。建议适度压缩扫描件，或拆分为上下分册后分别上传。`);
-  }
-
   onProgress?.({
     statusText: '正在安全上传卷宗文件…',
     totalTransactions: 0,
@@ -74,6 +68,13 @@ export async function parsePdfWithGemini(
       percent: info.percent,
       isStreaming: info.percent < 100
     }), signal, { cacheIdentity: options?.sourceContentHash });
+  }
+  // Only the direct short-document path sends the original file in one request.
+  // Long documents are split locally into small PDF segments, so their original
+  // size must not be rejected against the single-request upload limit.
+  const maxBytes = 75 * 1024 * 1024;
+  if (file.size > maxBytes) {
+    throw new Error(`当前 PDF 文件体积约为 ${(file.size / (1024 * 1024)).toFixed(1)}MB，超过短文件单次上传限制（75MB）。建议适度压缩扫描件后重试。`);
   }
   formData.append('file', file);
   formData.append('sourceFileName', file.name);

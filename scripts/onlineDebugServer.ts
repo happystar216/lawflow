@@ -312,9 +312,18 @@ async function executeRun(run: DebugRun): Promise<void> {
       completedAt: new Date().toISOString(),
       files: run.fileNames,
       summary: {
-        accountCount: app?.accounts.length || 0,
+        accountCount: app?.accounts?.filter((account: any) => !(
+          account.ownerType === 'UNKNOWN'
+          && (/待归属页面|待处理页面/.test(account.accountNumber || '') || account.accountName === '待归属页面')
+        )).length || 0,
         transactionCount: app?.transactions.length || 0,
         reviewIssueCount: app?.reviewIssues?.length || 0,
+        incompletePageCount: app?.reviewIssues?.filter((issue: any) => (
+          issue.category === 'PAGE_INTEGRITY'
+          && issue.severity === 'REQUIRED'
+          && (issue.status === 'PENDING' || issue.status === 'UNRESOLVED')
+          && /连续识别失败|服务暂时不可用|未能完整获取|PDF\s*解析不完整/.test(`${issue.title || ''} ${issue.description || ''}`)
+        )).length || 0,
         unbalancedAccountCount: Object.values(app?.evaluationReport?.accountAudits || {}).filter((audit: any) => audit.isAuditable && !audit.isBalanced).length
       },
       import: snapshot?.import || null,

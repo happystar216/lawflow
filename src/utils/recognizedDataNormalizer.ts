@@ -155,12 +155,20 @@ export function normalizeRecognizedData(
       && accountIdentityKey(account) === accountIdentityKey(original)
     ));
     if (alreadyPreserved) continue;
-    for (const warning of original.parseWarnings || []) {
-      if (warningPage(warning)) coveredWarningSet.add(warning);
-      else assignedUnscopedWarningSet.add(warning);
-    }
+    const retainedWarnings = (original.parseWarnings || []).filter(warning => {
+      if (warningPage(warning)) {
+        coveredWarningSet.add(warning);
+        return true;
+      }
+      if (assignedUnscopedWarningSet.has(warning)) return false;
+      assignedUnscopedWarningSet.add(warning);
+      return true;
+    });
+    const isIncomplete = original.parseStatus === 'INCOMPLETE'
+      || retainedWarnings.some(warning => /连续识别失败|服务暂时不可用|未能完整获取/.test(warning));
     accounts.push({
       ...original,
+      parseWarnings: [...new Set(retainedWarnings)],
       totalIn: 0,
       totalOut: 0,
       transactionCount: 0,
@@ -168,7 +176,7 @@ export function normalizeRecognizedData(
       endDate: '',
       isBalanced: false,
       balanceAvailable: false,
-      parseStatus: 'NEEDS_REVIEW'
+      parseStatus: isIncomplete ? 'INCOMPLETE' : 'NEEDS_REVIEW'
     });
   }
 
@@ -195,7 +203,10 @@ export function normalizeRecognizedData(
       ...(existing || minimalDocumentAccount(sourceFile)),
       accountNumber: `待归属页面-${sourceFile}`, accountName: '待归属页面', bankName: '待核对', ownerType: 'UNKNOWN',
       fileName: sourceFile, transactionCount: 0, totalIn: 0, totalOut: 0,
-      parseStatus: 'NEEDS_REVIEW', parseWarnings: documentWarnings,
+      parseStatus: documentWarnings.some(warning => /连续识别失败|服务暂时不可用|未能完整获取/.test(warning))
+        ? 'INCOMPLETE'
+        : 'NEEDS_REVIEW',
+      parseWarnings: documentWarnings,
       coveredPages: [...new Set(orphanWarnings.map(warningPage).filter((page): page is number => Boolean(page)))].sort((a, b) => a - b)
     });
   }

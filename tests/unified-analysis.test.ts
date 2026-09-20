@@ -4,6 +4,7 @@ import { LawFlowEngine } from '../src/engine/engine';
 import { CaseMetadata } from '../src/types/case';
 import { BankAccount, StandardTransaction } from '../src/types/transaction';
 import { classifyTransactionFlow } from '../src/engine/flowClassification';
+import { effectiveCounterpartyName } from '../src/engine/bilateral';
 import { accountIdentityKey } from '../src/utils/accountIdentity';
 
 const metadata: CaseMetadata = {
@@ -59,6 +60,26 @@ test('fund flows classify legally important uses without a minimum amount thresh
   assert.equal(classifyTransactionFlow(transaction('wealth', 'A', 'OUT', 500, 0, '', '购买理财产品'))?.code, 'INVESTMENT_WEALTH');
   assert.equal(classifyTransactionFlow(transaction('fee', 'A', 'OUT', 10, 0, '', '账户管理费'))?.code, 'TAX_AND_FEES');
   assert.equal(classifyTransactionFlow(transaction('unknown', 'A', 'OUT', 10, 0, '', ''))?.code, 'OTHER_OUT');
+});
+
+test('network enforcement deductions are classified as judicial deductions instead of unknown transfers', () => {
+  const networkDeduction = {
+    ...transaction('network-judicial', 'A', 'OUT', 16903.99, 3.47, '网络查控定期及跨行扣划专户', '网络执行查控 扣划'),
+    rawText: '2025-02-25 OUT 16903.99 网络执行查控 扣划 网络查控定期及跨行扣划专户'
+  };
+  assert.equal(classifyTransactionFlow(networkDeduction)?.code, 'JUDICIAL_DEDUCTION');
+  assert.equal(effectiveCounterpartyName(networkDeduction), '【司法机关划扣】');
+});
+
+test('document review placeholders never become account entities or balance audits', () => {
+  const placeholder: BankAccount = {
+    ...account('待归属页面-流水.pdf'),
+    accountName: '待归属页面', bankName: '待核对', ownerType: 'UNKNOWN', transactionCount: 0,
+    parseStatus: 'INCOMPLETE', parseWarnings: ['第 2 页连续识别失败：服务暂时不可用']
+  };
+  const result = new LawFlowEngine().evaluateCase(metadata, [transaction('real', 'A', 'OUT', 10, 90, '甲')], [account('A'), placeholder]);
+  assert.equal(result.report.analysisGraph?.accounts.length, 1);
+  assert.equal(Object.keys(result.report.accountAudits || {}).length, 1);
 });
 
 test('changing any canonical transaction invalidates the analysis fingerprint and recomputes graph amounts', () => {

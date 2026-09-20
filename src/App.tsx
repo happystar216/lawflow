@@ -17,6 +17,7 @@ import { CaseRecord, saveCaseRecord, listSavedCases } from './store/caseStore';
 import { normalizeRecognizedData } from './utils/recognizedDataNormalizer';
 import { publishAutomationAppState } from './debug/automationBridge';
 import { buildEvidenceReviewIssues } from './review/buildEvidenceReviewIssues';
+import { blockingRecognitionIssues } from './review/recognitionCompleteness';
 
 const Step1Upload = lazy(() => import('./components/Step1Upload').then(module => ({ default: module.Step1Upload })));
 const Step4Compute = lazy(() => import('./components/Step4Compute').then(module => ({ default: module.Step4Compute })));
@@ -61,7 +62,12 @@ export const App: React.FC = () => {
     () => engine.fingerprint(caseMeta, transactions, accounts),
     [engine, caseMeta, transactions, accounts]
   );
-  const freshEvaluationReport = evaluationReport?.analysisFingerprint === currentAnalysisFingerprint
+  const recognitionBlockers = useMemo(
+    () => blockingRecognitionIssues(accounts, transactions),
+    [accounts, transactions]
+  );
+  const recognitionBlocked = recognitionBlockers.length > 0;
+  const freshEvaluationReport = !recognitionBlocked && evaluationReport?.analysisFingerprint === currentAnalysisFingerprint
     ? evaluationReport
     : null;
 
@@ -95,17 +101,21 @@ export const App: React.FC = () => {
       const active = savedList.find(record => record.metadata.id === requestedCaseId) || savedList[0];
       if (active) {
         const normalized = normalizeRecognizedData(active.accounts || [], active.transactions || []);
+        const restoredRecognitionBlocked = blockingRecognitionIssues(normalized.accounts, normalized.transactions).length > 0;
         setCaseMeta(active.metadata);
         setAccounts(normalized.accounts);
         setTransactions(normalized.transactions);
-        const restoredStep = safeWorkflowStep(session?.currentStep, normalized.transactions.length);
+        const requestedStep = safeWorkflowStep(session?.currentStep, normalized.transactions.length);
+        const restoredStep = restoredRecognitionBlocked && requestedStep > 2 ? 2 : requestedStep;
         setCurrentStep(restoredStep);
         if (session?.completedSteps) {
           setCompletedSteps(new Set((session.completedSteps as WorkflowStep[]).filter(step => (
-            normalized.transactions.length > 0 || step <= 1
+            (normalized.transactions.length > 0 || step <= 1)
+            && (!restoredRecognitionBlocked || step <= 1)
           ))));
         }
-        if (normalized.transactions.length > 0) {
+        if (normalized.transactions.length > 0
+          && !restoredRecognitionBlocked) {
           const { report, processedTransactions } = engine.evaluateCase(
             active.metadata,
             normalized.transactions,
@@ -115,7 +125,7 @@ export const App: React.FC = () => {
           setEvaluationReport(report);
           setTransactions(processedTransactions);
         } else {
-          setEvaluationReport(active.evaluationReport || null);
+          setEvaluationReport(null);
         }
       } else {
         setCaseMeta(createBlankCase());
@@ -137,6 +147,10 @@ export const App: React.FC = () => {
   useEffect(() => {
     if (!transactions.length) return;
     if (currentUser && hydratedUserId !== currentUser.id) return;
+    if (recognitionBlocked) {
+      if (evaluationReport) setEvaluationReport(null);
+      return;
+    }
     if (evaluationReport?.analysisFingerprint === currentAnalysisFingerprint) return;
     const { report, processedTransactions } = engine.evaluateCase(
       caseMeta,
@@ -146,7 +160,7 @@ export const App: React.FC = () => {
     );
     setEvaluationReport(report);
     setTransactions(processedTransactions);
-  }, [currentAnalysisFingerprint, hydratedUserId, currentUser?.id]);
+  }, [currentAnalysisFingerprint, hydratedUserId, currentUser?.id, recognitionBlocked]);
 
   // Auto-Save active case to localStorage & IndexedDB on every change
   useEffect(() => {
@@ -199,17 +213,21 @@ export const App: React.FC = () => {
     setCaseMeta(record.metadata);
     setAccounts(normalized.accounts);
     setTransactions(normalized.transactions);
-    if (normalized.transactions.length) {
+    if (normalized.transactions.length
+      && blockingRecognitionIssues(normalized.accounts, normalized.transactions).length === 0) {
       const { report, processedTransactions } = engine.evaluateCase(record.metadata, normalized.transactions, normalized.accounts, record.evaluationReport);
       setEvaluationReport(report);
       setTransactions(processedTransactions);
     } else {
-      setEvaluationReport(record.evaluationReport || null);
+      setEvaluationReport(null);
     }
     const hasCaseIdentity = Boolean(record.metadata.respondentName?.trim() || record.metadata.caseNumber?.trim());
     const hasTransactions = normalized.transactions.length > 0;
-    setCurrentStep(hasTransactions ? 4 : hasCaseIdentity || normalized.accounts.length > 0 ? 1 : 0);
-    setCompletedSteps(new Set(hasTransactions ? [0, 1, 2, 3, 4] : hasCaseIdentity ? [0] : []));
+    const hasRecognitionBlockers = blockingRecognitionIssues(normalized.accounts, normalized.transactions).length > 0;
+    setCurrentStep(hasTransactions ? (hasRecognitionBlockers ? 2 : 4) : hasCaseIdentity || normalized.accounts.length > 0 ? 1 : 0);
+    setCompletedSteps(new Set(hasTransactions
+      ? (hasRecognitionBlockers ? [0, 1] : [0, 1, 2, 3, 4])
+      : hasCaseIdentity ? [0] : []));
   };
 
   const handleLogout = () => {
@@ -229,12 +247,22 @@ export const App: React.FC = () => {
   };
 
   const goToStep = (step: WorkflowStep) => {
+    if (step > 2 && recognitionBlocked) {
+      setCurrentStep(2);
+      window.alert(`还有 ${recognitionBlockers.length} 个页面未完成识别。请先重新识别失败页，或在原件核对中补录并完成这些页面。`);
+      return;
+    }
     setCurrentStep(safeWorkflowStep(step, transactions.length));
   };
 
   const handleTransactionsUpdated = (updatedTransactions: StandardTransaction[]) => {
     if (!updatedTransactions.length) {
       setTransactions([]);
+      setEvaluationReport(null);
+      return;
+    }
+    if (blockingRecognitionIssues(accounts, updatedTransactions).length > 0) {
+      setTransactions(updatedTransactions);
       setEvaluationReport(null);
       return;
     }
