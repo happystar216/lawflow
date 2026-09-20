@@ -93,3 +93,56 @@ test('recalculation preserves lawyer annotations only for the same stable rule m
   const removed = engine.evaluateCase(metadata, [{ ...rows[0], amount: 100 }], accounts, second).report;
   assert.equal(removed.matches.some(match => match.matchId === first.matches[0].matchId), false);
 });
+
+test('cross-document duplicate observations become one transaction event without deleting source evidence', () => {
+  const firstAccount = { ...account('6222000000004088'), fileName: 'first.pdf', sourceDocumentId: 'doc-first' };
+  const secondAccount = { ...account('6222000000004088'), fileName: 'second.pdf', sourceDocumentId: 'doc-second' };
+  const first = {
+    ...transaction('first-row', firstAccount.accountNumber, 'OUT', 4000, 6497.36, '收款人', '跨行汇款'),
+    transactionTime: '2025-01-02 09:23:02', rawSourceFile: 'first.pdf', sourceDocumentId: 'doc-first'
+  };
+  const second = {
+    ...first, id: 'second-row', rawSourceFile: 'second.pdf', sourceDocumentId: 'doc-second'
+  };
+
+  const result = new LawFlowEngine().evaluateCase(metadata, [first, second], [firstAccount, secondAccount]);
+  assert.equal(result.report.sourceObservationCount, 2);
+  assert.equal(result.report.canonicalTransactionCount, 1);
+  assert.equal(result.report.duplicateObservationCount, 1);
+  assert.equal(result.report.totalRawOut, 4000);
+  assert.equal(result.report.analysisGraph?.accounts.length, 1);
+  assert.equal(result.report.analysisGraph?.transactions.length, 1);
+  assert.equal(result.report.analysisGraph?.duplicateGroups.length, 1);
+  assert.equal(result.processedTransactions.length, 2);
+  assert.equal(result.processedTransactions.filter(row => row.excludedFromAnalysis).length, 1);
+  assert.equal(new Set(result.processedTransactions.map(row => row.analysisEventId)).size, 1);
+});
+
+test('same-day same-amount rows are not merged without another strong matching field', () => {
+  const firstAccount = { ...account('6222000000004088'), fileName: 'first.pdf', sourceDocumentId: 'doc-first' };
+  const secondAccount = { ...account('6222000000004088'), fileName: 'second.pdf', sourceDocumentId: 'doc-second' };
+  const first = {
+    ...transaction('first-row', firstAccount.accountNumber, 'OUT', 100, 900, '', ''),
+    balanceAvailable: false, rawSourceFile: 'first.pdf', sourceDocumentId: 'doc-first'
+  };
+  const second = {
+    ...first, id: 'second-row', rawSourceFile: 'second.pdf', sourceDocumentId: 'doc-second', rawText: '另一笔同额交易'
+  };
+  const report = new LawFlowEngine().evaluateCase(metadata, [first, second], [firstAccount, secondAccount]).report;
+  assert.equal(report.canonicalTransactionCount, 2);
+  assert.equal(report.totalRawOut, 200);
+  assert.equal(report.analysisGraph?.duplicateGroups.length, 0);
+});
+
+test('name-only possible internal transfers stay in totals and are exposed as review candidates', () => {
+  const accounts = [account('6222000000000001'), account('6222000000000002')];
+  const rows = [
+    transaction('out-name', accounts[0].accountNumber, 'OUT', 500, 500, '胡艳红', '转账'),
+    transaction('in-name', accounts[1].accountNumber, 'IN', 500, 500, '胡艳红', '转账')
+  ];
+  const result = new LawFlowEngine().evaluateCase(metadata, rows, accounts).report;
+  assert.equal(result.internalTransferCount, 0);
+  assert.equal(result.internalTransferCandidates?.length, 1);
+  assert.equal(result.netExternalIn, 500);
+  assert.equal(result.netExternalOut, 500);
+});

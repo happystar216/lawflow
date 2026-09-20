@@ -126,6 +126,12 @@ export interface StandardTransaction {
   // Computed & Annotated attributes
   isInternalTransfer?: boolean; // 是否属于内部自有账户互转
   internalTransferPairId?: string; // 对应的对冲交易 ID
+  internalTransferMatchConfidence?: 'HIGH' | 'MEDIUM';
+  internalTransferMatchReason?: string;
+  /** Derived analysis linkage. Source observations remain stored even when one event is counted once. */
+  analysisEventId?: string;
+  duplicateOfTransactionId?: string;
+  excludedFromAnalysis?: boolean;
   timePhaseTag?: string; // e.g. "执行立案后", "报告财产令送达后", "生效至立案前"
   counterpartyRoleTag?: string; // 律师后标注身份: "被执行人胞弟", "空壳过账公司"
   lawyerNote?: string; // 律师批注

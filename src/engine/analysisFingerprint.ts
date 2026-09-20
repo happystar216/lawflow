@@ -1,7 +1,7 @@
 import { CaseMetadata } from '../types/case';
 import { BankAccount, StandardTransaction } from '../types/transaction';
 
-const ANALYSIS_MODEL_VERSION = '2026-09-unified-flow-v2';
+const ANALYSIS_MODEL_VERSION = '2026-09-cross-source-events-v3';
 
 function stableHash(input: string): string {
   let left = 2166136261;

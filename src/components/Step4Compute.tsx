@@ -155,11 +155,40 @@ export const Step4Compute: React.FC<Step4Props> = ({
       {evaluationReport && (
         <div className="space-y-6">
           {evaluationReport.analysisGraph && (
-            <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-xs text-emerald-900 flex flex-wrap items-center justify-between gap-2">
-              <div className="font-semibold">统一分析已基于当前流水更新</div>
-              <div className="text-emerald-800">
-                {evaluationReport.analysisGraph.accounts.length} 个账户 · {evaluationReport.analysisGraph.transactions.length} 笔交易 · {evaluationReport.analysisGraph.counterparties.length} 个对手方 · {evaluationReport.analysisGraph.judicialDeductions.length} 笔司法划扣
+            <div className="space-y-3">
+              <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-xs text-emerald-900 flex flex-wrap items-center justify-between gap-2">
+                <div className="font-semibold">统一分析已基于当前流水更新</div>
+                <div className="text-emerald-800">
+                  {evaluationReport.analysisGraph.accounts.length} 个账户实体 · {evaluationReport.analysisGraph.transactions.length} 个交易事件
+                  {(evaluationReport.duplicateObservationCount || 0) > 0 && `（${evaluationReport.sourceObservationCount} 条原始记录中合并 ${evaluationReport.duplicateObservationCount} 条跨文件重复记录）`}
+                  {' · '}{evaluationReport.analysisGraph.counterparties.length} 个对手方 · {evaluationReport.analysisGraph.judicialDeductions.length} 笔司法划扣
+                </div>
               </div>
+              {(evaluationReport.internalTransferCandidates?.length || 0) > 0 && (
+                <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs leading-relaxed text-amber-900">
+                  <div className="font-semibold">发现 {evaluationReport.internalTransferCandidates!.length} 组疑似本人账户互转，未自动核销</div>
+                  <div className="mt-1 text-amber-800">这些流水只有户名、日期和金额相符，缺少对手账号等强证据；当前仍按对外收支计算，请核对原件中的本方账号和对手账号。</div>
+                  <details className="mt-2">
+                    <summary className="cursor-pointer font-medium">查看需要核对的流水</summary>
+                    <div className="mt-2 space-y-2">
+                      {evaluationReport.internalTransferCandidates!.map((candidate, index) => {
+                        const pair = candidate.transactionIds.map(id => transactions.find(transaction => transaction.id === id));
+                        return (
+                          <div key={candidate.transactionIds.join('|')} className="rounded-xl border border-amber-200 bg-white/70 p-3">
+                            <div className="font-semibold">第 {index + 1} 组 · ¥{candidate.amount.toLocaleString()}</div>
+                            {pair.map((transaction, pairIndex) => transaction && (
+                              <div key={transaction.id} className="mt-1 text-amber-950">
+                                {pairIndex === 0 ? '流水 A' : '流水 B'}：{transaction.transactionTime} · 尾号 {transaction.accountNumber.slice(-4)} · {transaction.direction === 'IN' ? '收入' : '支出'} · {transaction.summary || '无摘要'}
+                              </div>
+                            ))}
+                            <div className="mt-1 text-amber-700">请确认：两行的对手账号是否分别指向对方本方账号。确认后才能按本人互转核销。</div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </details>
+                </div>
+              )}
             </div>
           )}
           {/* Top KPI Cards */}

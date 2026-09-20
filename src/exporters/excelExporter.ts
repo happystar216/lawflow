@@ -34,7 +34,9 @@ export async function exportEvidenceAnalysisExcel(
   appendObjectSheet(workbook, '分析概览', [
     { '项目': '执行案号', '内容': caseMeta.caseNumber || '未录入', '说明': '' },
     { '项目': '被执行人', '内容': caseMeta.respondentName || '未录入', '说明': '' },
-    { '项目': '流水交易数', '内容': report.totalRawTransactions, '说明': '已导入并结构化的交易记录' },
+    { '项目': '分析交易事件数', '内容': report.totalRawTransactions, '说明': '跨文件重复流水只计算一次' },
+    { '项目': '原始流水记录数', '内容': report.sourceObservationCount ?? report.totalRawTransactions, '说明': '各来源文件中保留的原始记录总数' },
+    { '项目': '跨文件重复记录', '内容': report.duplicateObservationCount ?? 0, '说明': '保留原始证据，但不重复计入金额和规则' },
     { '项目': '原始总流入', '内容': report.totalRawIn, '说明': '全部账户贷方发生额' },
     { '项目': '原始总流出', '内容': report.totalRawOut, '说明': '全部账户借方发生额' },
     { '项目': '内部互转核销', '内容': report.internalTransferAmount, '说明': `${report.internalTransferCount}笔本人账户双边匹配记录` },
@@ -99,6 +101,8 @@ export async function exportEvidenceAnalysisExcel(
     '附言/摘要': transaction.summary,
     '时间阶段': transaction.timePhaseTag || '常规期间',
     '内部自转': transaction.isInternalTransfer ? '是（双边匹配已核销）' : '否（外部流向/待核实）',
+    '分析事件编号': transaction.analysisEventId || '',
+    '跨文件重复记录': transaction.excludedFromAnalysis ? `是（与 ${transaction.duplicateOfTransactionId || '代表记录'} 属于同一交易）` : '否',
     '原始文件': transaction.rawSourceFile,
     '页码/行号': transaction.rawPageNumber ? `第${transaction.rawPageNumber}页` : `第${transaction.rawRowIndex || 1}行`
   })));

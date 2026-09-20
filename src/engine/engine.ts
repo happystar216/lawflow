@@ -9,6 +9,8 @@ import { AnomalyMatch } from '../types/rules';
 import { buildCaseAnalysisGraph } from './analysisGraph';
 import { caseAnalysisFingerprint } from './analysisFingerprint';
 import { auditAccountBalance } from '../parsers/sanityChecker';
+import { canonicalizeTransactionEvents } from './transactionEvents';
+import { accountIdentityKey } from '../utils/accountIdentity';
 
 export class LawFlowEngine {
   private registry: RuleRegistry;
@@ -49,28 +51,32 @@ export class LawFlowEngine {
     report: CaseEvaluationReport;
     processedTransactions: StandardTransaction[];
   } {
-    // 1. Apply Timeline Annotation
-    const taggedTx = applyTimelineTags(rawTransactions, caseMeta);
+    // 1. Consolidate duplicate observations across different source documents.
+    // All source rows remain stored; only the representative event enters totals.
+    const canonical = canonicalizeTransactionEvents(rawTransactions);
 
-    // 2. Multi-Account Internal Netting
-    const { processedTransactions, internalCount, internalTotalAmount } = calculateInternalNetting(
+    // 2. Apply Timeline Annotation
+    const taggedTx = applyTimelineTags(canonical.canonicalTransactions, caseMeta);
+
+    // 3. Multi-Account Internal Netting
+    const { processedTransactions: analyzedTransactions, internalCount, internalTotalAmount, candidates } = calculateInternalNetting(
       taggedTx,
       accounts
     );
 
-    // 3. Bilateral Counterparty Aggregation
+    // 4. Bilateral Counterparty Aggregation
     const counterpartySummaries = aggregateCounterparties(
-      processedTransactions,
+      analyzedTransactions,
       caseMeta.respondentName
     );
 
-    // 4. Run Modular Rules DAG
+    // 5. Run Modular Rules DAG
     const activeRules = this.registry.getAllRules().filter(r => r.enabled);
     const allMatches: AnomalyMatch[] = [];
 
     const ruleContext = {
       caseMeta,
-      allTransactions: processedTransactions,
+      allTransactions: analyzedTransactions,
       counterpartySummaries
     };
 
@@ -99,7 +105,7 @@ export class LawFlowEngine {
       };
     });
 
-    // 5. Calculate macro metrics
+    // 6. Calculate macro metrics
     let totalRawIn = 0;
     let totalRawOut = 0;
     let postExecutionTransferAmount = 0;
@@ -109,7 +115,7 @@ export class LawFlowEngine {
     const t3 = caseMeta.timeline.executionFilingDate;
     const t4 = caseMeta.timeline.reportOrderServedDate;
 
-    processedTransactions.forEach(tx => {
+    analyzedTransactions.forEach(tx => {
       if (tx.direction === 'IN') {
         totalRawIn += tx.amount;
         if (t3 && tx.transactionDate >= t3 && !tx.isInternalTransfer) {
@@ -134,21 +140,27 @@ export class LawFlowEngine {
     const targetDebt = caseMeta.targetAmount || 1;
     const solvencyCoverageRate = totalIncomeDuringExecution / targetDebt;
 
-    const analysisGraph = buildCaseAnalysisGraph(accounts, processedTransactions);
-    const accountAudits = Object.fromEntries(accounts.map((account, index) => [
-      analysisGraph.accounts[index]?.id || `account_${index}`,
-      auditAccountBalance(account, processedTransactions)
+    const analysisGraph = buildCaseAnalysisGraph(accounts, analyzedTransactions, canonical.events);
+    const accountAudits = Object.fromEntries(accounts.map(account => [
+      accountIdentityKey(account),
+      // Reconcile every statement against its own source rows. Cross-document
+      // event consolidation is for case totals, not for altering a statement's audit.
+      auditAccountBalance(account, rawTransactions)
     ]));
     const report: CaseEvaluationReport = {
       analysisFingerprint: this.fingerprint(caseMeta, rawTransactions, accounts),
       generatedAt: new Date().toISOString(),
       analysisGraph,
       accountAudits,
-      totalRawTransactions: processedTransactions.length,
+      sourceObservationCount: rawTransactions.length,
+      canonicalTransactionCount: analyzedTransactions.length,
+      duplicateObservationCount: rawTransactions.length - analyzedTransactions.length,
+      totalRawTransactions: analyzedTransactions.length,
       totalRawIn,
       totalRawOut,
       internalTransferCount: internalCount,
       internalTransferAmount: internalTotalAmount,
+      internalTransferCandidates: candidates,
       netExternalIn,
       netExternalOut,
       postExecutionTransferAmount,
@@ -160,9 +172,28 @@ export class LawFlowEngine {
       counterpartySummaries
     };
 
-    return {
-      report,
-      processedTransactions
-    };
+    const analyzedById = new Map(analyzedTransactions.map(transaction => [transaction.id, transaction]));
+    const processedTransactions = rawTransactions.map(observation => {
+      const representativeId = canonical.representativeIdByObservationId.get(observation.id) || observation.id;
+      const representative = analyzedById.get(representativeId);
+      const analysisEventId = canonical.eventIdByObservationId.get(observation.id);
+      if (!representative) return { ...observation, analysisEventId };
+      if (observation.id === representativeId) {
+        return { ...observation, ...representative, analysisEventId, duplicateOfTransactionId: undefined, excludedFromAnalysis: undefined };
+      }
+      return {
+        ...observation,
+        analysisEventId,
+        duplicateOfTransactionId: representativeId,
+        excludedFromAnalysis: true,
+        timePhaseTag: representative.timePhaseTag,
+        isInternalTransfer: undefined,
+        internalTransferPairId: undefined,
+        internalTransferMatchConfidence: undefined,
+        internalTransferMatchReason: undefined
+      };
+    });
+
+    return { report, processedTransactions };
   }
 }

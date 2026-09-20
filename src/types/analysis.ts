@@ -7,7 +7,8 @@ export interface AnalysisAccountEntity {
   accountNumber: string;
   accountName: string;
   bankName: string;
-  sourceDocumentId?: string;
+  sourceDocumentIds: string[];
+  sourceAccountKeys: string[];
   transactionIds: string[];
 }
 
@@ -15,6 +16,7 @@ export interface AnalysisTransactionEntity {
   id: string;
   kind: 'TRANSACTION';
   transactionId: string;
+  observationIds: string[];
   accountEntityId: string;
   direction: FlowDirection;
   amount: number;
@@ -55,6 +57,15 @@ export interface AnalysisFlowCategoryEntity {
   transactionIds: string[];
 }
 
+export interface AnalysisDuplicateGroup {
+  eventId: string;
+  representativeTransactionId: string;
+  observationIds: string[];
+  sourceDocumentIds: string[];
+  confidence: number;
+  reasons: string[];
+}
+
 export type AnalysisRelationshipType =
   | 'ACCOUNT_HAS_TRANSACTION'
   | 'TRANSACTION_WITH_COUNTERPARTY'
@@ -78,5 +89,6 @@ export interface CaseAnalysisGraph {
   counterparties: AnalysisCounterpartyEntity[];
   judicialDeductions: JudicialDeductionEntity[];
   flowCategories: AnalysisFlowCategoryEntity[];
+  duplicateGroups: AnalysisDuplicateGroup[];
   relationships: AnalysisRelationship[];
 }
