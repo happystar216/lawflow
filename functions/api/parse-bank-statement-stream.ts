@@ -51,7 +51,10 @@ export async function onRequestPost(context: any) {
             update => {
               send({
                 type: 'progress',
-                currentPage: Math.round((update.percent / 100) * options.totalPages),
+                currentPage: Math.min(
+                  options.pageEnd,
+                  options.pageStart - 1 + Math.round((update.percent / 100) * (options.pageEnd - options.pageStart + 1))
+                ),
                 totalPages: options.totalPages,
                 percent: update.percent,
                 totalTransactions: update.totalTransactions,
@@ -63,13 +66,18 @@ export async function onRequestPost(context: any) {
             {
               respondentName: options.respondentName,
               totalPages: options.totalPages,
-              sourceFileName: options.sourceFileName
+              sourceFileName: options.sourceFileName,
+              pageStart: options.pageStart,
+              pageEnd: options.pageEnd,
+              isPageSlice: options.isPageSlice,
+              auditHint: options.auditHint,
+              verificationMode: options.verificationMode
             }
           );
 
           send({
             type: 'progress',
-            currentPage: options.totalPages,
+            currentPage: options.pageEnd,
             totalPages: options.totalPages,
             percent: 100,
             totalTransactions: result.transactions.length,
@@ -86,7 +94,8 @@ export async function onRequestPost(context: any) {
             totalPages: options.totalPages,
             pageCount: options.totalPages,
             countComplete: result.countComplete,
-            warnings: result.warnings
+            warnings: result.warnings,
+            pageQuality: result.pageQuality
           });
         } else {
           // 回退使用 Qwen 单页/分片解析引擎

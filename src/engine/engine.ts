@@ -51,7 +51,8 @@ export class LawFlowEngine {
     report: CaseEvaluationReport;
     processedTransactions: StandardTransaction[];
   } {
-    // 1. Consolidate duplicate observations across different source documents.
+    // 1. Consolidate duplicate observations across source documents and
+    // repeated statement layouts within one document.
     // All source rows remain stored; only the representative event enters totals.
     const canonical = canonicalizeTransactionEvents(rawTransactions);
 

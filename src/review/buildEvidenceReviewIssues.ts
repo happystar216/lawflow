@@ -7,7 +7,7 @@ export function buildEvidenceReviewIssues(
   allTransactions: StandardTransaction[]
 ): EvidenceReviewIssue[] {
   const transactions = allTransactions
-    .filter(transaction => transactionBelongsToAccount(transaction, account))
+    .filter(transaction => transactionBelongsToAccount(transaction, account) && !transaction.excludedFromAnalysis)
     .sort(compareSourceOrder);
   const generated: EvidenceReviewIssue[] = [];
   const unscopedWarnings: string[] = [];
@@ -16,7 +16,7 @@ export function buildEvidenceReviewIssues(
     if (isLegacyDerivedWarning(warning)) continue;
     let pageNumber = numberFrom(warning, /第\s*(\d+)\s*页/) || numberFrom(warning, /原PDF第\s*(\d+)\s*页/);
     const isBlank = /空白|扫描残页|未识别到交易/.test(warning);
-    const isIntegrity = /汇总|缺少|漏|不完整|页面覆盖|识别失败|独立清点|独立行数复核/.test(warning);
+    const isIntegrity = /汇总|缺少|漏|不完整|页面覆盖|识别失败|独立清点|独立行数复核|页面行数报告/.test(warning);
     const countComparison = parseCountComparison(warning);
     if (!pageNumber && countComparison) pageNumber = inferUniquePageByCount(transactions, countComparison.detailCount);
     if (!pageNumber) {

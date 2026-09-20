@@ -22,6 +22,55 @@ test('Gemini parser reports an explicit output-limit diagnostic', async () => {
   }
 });
 
+test('Gemini segmented PDF contract maps local pages once and carries field confidence', async () => {
+  const originalFetch = globalThis.fetch;
+  let requestPrompt = '';
+  const modelJson = JSON.stringify({
+    totalExtracted: 2,
+    pagesCovered: [1, 2, 3, 4],
+    pageChecks: [
+      { pageNumber: 1, transactionCount: 1, pageType: 'TRANSACTIONS', bankName: '测试银行', accountName: '胡艳红', accountNumber: '62220001' },
+      { pageNumber: 2, transactionCount: 0, pageType: 'DOCUMENT' },
+      { pageNumber: 3, transactionCount: 1, pageType: 'TRANSACTIONS', bankName: '测试银行', accountName: '胡艳红', accountNumber: '62220001' },
+      { pageNumber: 4, transactionCount: 0, pageType: 'BLANK' }
+    ],
+    transactions: [
+      { p: 1, r: 1, bk: '测试银行', ac: '62220001', tm: '2024-01-01', dir: 'IN', amt: 100, bal: 100, cf: { ac: 0.98, tm: 0.98, dir: 0.98, amt: 0.98, bal: 0.98 } },
+      { p: 3, r: 1, bk: '测试银行', ac: '62220001', tm: '2024-01-02', dir: 'OUT', amt: 50, bal: 50, cf: { ac: 0.98, tm: 0.98, dir: 0.98, amt: 0.55, bal: 0.98 } }
+    ]
+  });
+  globalThis.fetch = async (_input, init) => {
+    const body = JSON.parse(String(init?.body || '{}'));
+    requestPrompt = body.contents?.[0]?.parts?.[1]?.text || '';
+    return new Response(`data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: modelJson }] }, finishReason: 'STOP' }] })}\n\n`);
+  };
+  try {
+    const result = await parsePdfWithGeminiStream(
+      new File(['pdf'], 'segment.pdf', { type: 'application/pdf' }),
+      { GEMINI_API_KEY: 'test' }, undefined, undefined,
+      {
+        totalPages: 128,
+        pageStart: 49,
+        pageEnd: 52,
+        isPageSlice: true,
+        auditHint: '银行：测试银行；本方账号：62220001',
+        verificationMode: 'skip'
+      }
+    );
+    assert.deepEqual(result.pagesCovered, [49, 50, 51, 52]);
+    assert.deepEqual(result.transactions.map(transaction => transaction.rawPageNumber), [49, 51]);
+    assert.equal(result.countComplete, true);
+    assert.equal(result.transactions[0].reviewStatus, 'AUTO_PASSED');
+    assert.equal(result.transactions[1].reviewStatus, 'PENDING');
+    assert.equal(result.transactions[1].fieldEvidence?.amount?.decision, 'UNRESOLVED');
+    assert.match(requestPrompt, /当前上传 PDF 只有 4 页/);
+    assert.match(requestPrompt, /本方账号：62220001/);
+    assert.doesNotMatch(result.warnings.join('\n'), /缺少第 1 页/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('Gemini parser accepts compact printed bank dates without unnecessary lawyer review', async () => {
   const originalFetch = globalThis.fetch;
   const modelJson = JSON.stringify({

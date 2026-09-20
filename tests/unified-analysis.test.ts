@@ -4,6 +4,7 @@ import { LawFlowEngine } from '../src/engine/engine';
 import { CaseMetadata } from '../src/types/case';
 import { BankAccount, StandardTransaction } from '../src/types/transaction';
 import { classifyTransactionFlow } from '../src/engine/flowClassification';
+import { accountIdentityKey } from '../src/utils/accountIdentity';
 
 const metadata: CaseMetadata = {
   id: 'case-unified', caseNumber: '执1号', courtName: '测试法院', applicantName: '申请人',
@@ -116,6 +117,28 @@ test('cross-document duplicate observations become one transaction event without
   assert.equal(result.processedTransactions.length, 2);
   assert.equal(result.processedTransactions.filter(row => row.excludedFromAnalysis).length, 1);
   assert.equal(new Set(result.processedTransactions.map(row => row.analysisEventId)).size, 1);
+});
+
+test('same-document duplicate observations remain stored but enter analysis only once', () => {
+  const statementAccount = { ...account('6222000000004088'), fileName: 'statement.pdf', sourceDocumentId: 'doc-statement' };
+  const first = {
+    ...transaction('page-4-row', statementAccount.accountNumber, 'OUT', 4000, 6497.36, '收款人', '跨行汇款'),
+    transactionTime: '2025-01-02 09:23:02', rawSourceFile: 'statement.pdf', sourceDocumentId: 'doc-statement',
+    rawPageNumber: 4, rawRowIndex: 1
+  };
+  const reprint = {
+    ...first, id: 'page-13-row', rawPageNumber: 13, rawRowIndex: 1,
+    duplicateOfTransactionId: first.id, excludedFromAnalysis: true
+  };
+
+  const result = new LawFlowEngine().evaluateCase(metadata, [first, reprint], [statementAccount]);
+  assert.equal(result.report.sourceObservationCount, 2);
+  assert.equal(result.report.canonicalTransactionCount, 1);
+  assert.equal(result.report.duplicateObservationCount, 1);
+  assert.equal(result.report.totalRawOut, 4000);
+  assert.equal(result.report.accountAudits?.[accountIdentityKey(statementAccount)]?.totalExpense, 4000);
+  assert.equal(result.processedTransactions.length, 2);
+  assert.equal(result.processedTransactions.filter(row => row.excludedFromAnalysis).length, 1);
 });
 
 test('same-day same-amount rows are not merged without another strong matching field', () => {

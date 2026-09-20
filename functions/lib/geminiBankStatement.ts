@@ -18,6 +18,11 @@ export interface GeminiParseOptions {
   respondentName?: string;
   totalPages?: number;
   sourceFileName?: string;
+  pageStart?: number;
+  pageEnd?: number;
+  isPageSlice?: boolean;
+  auditHint?: string;
+  verificationMode?: 'always' | 'auto' | 'skip';
 }
 
 export class RecognitionDiagnosticError extends Error {
@@ -33,7 +38,23 @@ export class RecognitionDiagnosticError extends Error {
 
 function buildGeminiDirectPrompt(options?: GeminiParseOptions): string {
   const targetPerson = options?.respondentName ? `【被执行人：${options.respondentName}】` : '被执行人';
-  const pageHint = options?.totalPages && options.totalPages > 0 ? `（原件共约 ${options.totalPages} 页）` : '';
+  const pageStart = positiveInteger(options?.pageStart) || 1;
+  const pageEnd = Math.max(pageStart, positiveInteger(options?.pageEnd) || positiveInteger(options?.totalPages) || pageStart);
+  const uploadedPageCount = pageEnd - pageStart + 1;
+  const originalTotalPages = Math.max(pageEnd, positiveInteger(options?.totalPages) || pageEnd);
+  const isPageSlice = Boolean(options?.isPageSlice || pageStart !== 1 || pageEnd !== originalTotalPages);
+  const pageHint = isPageSlice
+    ? `（当前上传 PDF 只有 ${uploadedPageCount} 页，对应原文件第 ${pageStart}-${pageEnd} 页；原文件共 ${originalTotalPages} 页）`
+    : `（当前 PDF 共 ${uploadedPageCount} 页）`;
+  const pageNumberContract = isPageSlice
+    ? `当前是原文件的物理分段。pageChecks.pageNumber、pagesCovered 和 transactions.p 必须只填写当前上传 PDF 内的局部页码 1-${uploadedPageCount}；不得填写原文件页码。系统会在收到结果后统一换算成原文件页码。`
+    : `pageChecks.pageNumber、pagesCovered 和 transactions.p 使用当前 PDF 页码 1-${uploadedPageCount}。`;
+  const auditHint = options?.auditHint?.trim()
+    ? `\n【本分段已知上下文】：${options.auditHint.slice(0, 6000)}\n这些信息只用于限定本分段归属；仍须以当前 PDF 原件可见内容为准，不得补造。`
+    : '';
+  const verificationHint = options?.verificationMode === 'skip'
+    ? '本次优先完成逐行结构化提取；页面行数是同次读取的完整性提示，不得描述为独立复核。'
+    : '输出前请重新逐页清点可见交易物理行，并将清点结果写入 pageChecks；该清点仍属于本次识别，不得声称已经人工或独立二次复核。';
 
   return `你是一名国家级司法审计与银行流水审查专家，正在对法院依法调取的${targetPerson}银行流水卷宗扫描件 PDF${pageHint}进行全量对账提取。
 
@@ -51,8 +72,11 @@ function buildGeminiDirectPrompt(options?: GeminiParseOptions): string {
 6. 严格按物理列位对齐提取：摘要栏经常包含合同还款额或代扣协议文本（例如包含 "@2640.00@6@1@" 等），严禁提取摘要中的文本数值代替实际发生额！必须严格提取表格中【交易金额】一列印刷的真实发生额数值。
 7. 忠实还原数字原样：仔细核验千分位逗号与每位数字（例如 “-4,000.00” 是 4000.00，注意区分首位点阵字形），按印刷字面原样输出，严禁自行心算凑数或编造虚假数字。
 8. 信用卡与特殊账单：如遇到透支余额为负数、按月打印的周期性利息还款或免收年费（发生额印为 0.00），均如实按原件印刷数值记录。
-9. pageChecks 必须逐页列出原件的每一页，包括空白页和非交易文书页；transactions 数量必须等于各交易页 transactionCount 之和。每个交易页必须从该页页眉独立读取本方 bankName、accountName、accountNumber，不得沿用上一页或下一页账号；无法确认时留空，不得猜测。同一页若表格逐行列出多个不同账号，pageChecks.accountNumber 留空，每笔 transactions.ac 必须填写该行自身账号，严禁用页级账号覆盖整页。
+9. ${pageNumberContract} pageChecks 必须逐页列出当前上传 PDF 的每一页，包括空白页和非交易文书页；transactions 数量必须等于各交易页 transactionCount 之和。每个交易页必须从该页页眉独立读取本方 bankName、accountName、accountNumber，不得沿用上一页或下一页账号；无法确认时留空，不得猜测。同一页若表格逐行列出多个不同账号，pageChecks.accountNumber 留空，每笔 transactions.ac 必须填写该行自身账号，严禁用页级账号覆盖整页。
 10. 点阵打印表中的日期必须逐位读取完整的 8 位数字；同一账号的日期通常按表格物理行顺序排列，如年份突然倒退数年必须回看原图复核。发生额明确印为 0.00 的“结息”行必须输出 amt: 0，不得当作缺失值；“销户/清户/冻结扣划/司法扣划”行必须读取完整的带符号发生额，并用相邻余额差复核是否漏掉中间数字。
+11. 每笔交易必须输出 cf 字段，分别给 ac、tm、dir、amt、bal 五个字段提供 0 至 1 的视觉读取把握度；看不清、被印章遮挡、数字可能有多个解释时必须低于 0.8，严禁仅因格式合法就填高置信度。无法读取余额时 bal 为 null、cf.bal 为 0。
+
+【完整性核查方式】：${verificationHint}${auditHint}
 
 【输出格式】：严格输出标准 JSON，字段精简以避免超限：
 {
@@ -73,6 +97,7 @@ function buildGeminiDirectPrompt(options?: GeminiParseOptions): string {
       "cp": "对方户名",
       "ca": "对方账号",
       "sm": "摘要及备注",
+      "cf": {"ac": 0.0, "tm": 0.0, "dir": 0.0, "amt": 0.0, "bal": 0.0},
       "box": [该交易整行的上边界, 左边界, 下边界, 右边界，按页面左上角为原点的0至1000整数坐标；无法定位填null]
     }
   ]
@@ -297,6 +322,35 @@ export async function parsePdfWithGeminiStream(
   }
 
   const expectedHolder = options?.respondentName?.trim() || '';
+  const originalPageStart = positiveInteger(options?.pageStart) || 1;
+  const originalPageEnd = Math.max(
+    originalPageStart,
+    positiveInteger(options?.pageEnd) || positiveInteger(options?.totalPages) || originalPageStart
+  );
+  const originalTotalPages = Math.max(originalPageEnd, positiveInteger(options?.totalPages) || originalPageEnd);
+  const uploadedPageCount = originalPageEnd - originalPageStart + 1;
+  const isPageSlice = Boolean(options?.isPageSlice || originalPageStart !== 1 || originalPageEnd !== originalTotalPages);
+  const toOriginalPage = (value: unknown): number | undefined => {
+    const page = Number.parseInt(String(value || ''), 10);
+    if (!Number.isInteger(page) || page < 1 || page > uploadedPageCount) return undefined;
+    return isPageSlice ? originalPageStart + page - 1 : page;
+  };
+
+  // The model reports pages relative to the uploaded PDF. Convert once at the
+  // server boundary so downstream code never has to guess local vs original.
+  if (Array.isArray(parsedResult.pagesCovered)) {
+    parsedResult.pagesCovered = parsedResult.pagesCovered.map(toOriginalPage).filter(Boolean);
+  }
+  if (Array.isArray(parsedResult.pageChecks)) {
+    parsedResult.pageChecks = parsedResult.pageChecks.flatMap((check: any) => {
+      const pageNumber = toOriginalPage(check?.pageNumber);
+      return pageNumber ? [{ ...check, pageNumber }] : [];
+    });
+  }
+  rawTxList = rawTxList.flatMap((transaction: any) => {
+    const pageNumber = toOriginalPage(transaction?.p);
+    return pageNumber ? [{ ...transaction, p: pageNumber }] : [];
+  });
   const pageIdentities = new Map<number, { bankName: string; accountName: string; accountNumber: string; accountNumbers: string[] }>();
   for (const check of Array.isArray(parsedResult.pageChecks) ? parsedResult.pageChecks : []) {
     const pageNumber = Number(check?.pageNumber);
@@ -355,6 +409,21 @@ export async function parsePdfWithGeminiStream(
     if (!transactionTime) dataQualityIssues.push('INVALID_DATE');
     if (!Number.isFinite(rawAmount) || amount <= 0) dataQualityIssues.push('INVALID_AMOUNT');
     if (direction === 'UNKNOWN') dataQualityIssues.push('UNKNOWN_DIRECTION');
+    const confidence = {
+      accountNumber: geminiFieldConfidence(tx?.cf?.ac),
+      transactionTime: geminiFieldConfidence(tx?.cf?.tm),
+      direction: geminiFieldConfidence(tx?.cf?.dir),
+      amount: geminiFieldConfidence(tx?.cf?.amt),
+      balance: balance === null ? 0 : geminiFieldConfidence(tx?.cf?.bal)
+    };
+    const extractionConfidence = Math.min(
+      confidence.accountNumber,
+      confidence.transactionTime,
+      confidence.direction,
+      confidence.amount,
+      ...(balance === null ? [] : [confidence.balance])
+    );
+    const reviewStatus = dataQualityIssues.length || extractionConfidence < 0.8 ? 'PENDING' : 'AUTO_PASSED';
     return {
       id: `TX_GEMINI_${idx + 1}`,
       accountNumber: resolvedAccountNumber,
@@ -376,25 +445,38 @@ export async function parsePdfWithGeminiStream(
       sourceRegion: normalizeSourceBox(tx.box),
       balanceAvailable: balance !== null,
       extractionMethod: 'GEMINI_DIRECT_PDF',
-      extractionConfidence: dataQualityIssues.length ? 0.4 : 0.9,
-      reviewStatus: dataQualityIssues.length ? 'PENDING' : 'AUTO_PASSED',
-      dataQualityIssues
+      extractionConfidence: dataQualityIssues.length ? Math.min(0.4, extractionConfidence) : extractionConfidence,
+      reviewStatus,
+      dataQualityIssues,
+      fieldEvidence: {
+        accountNumber: extractedFieldEvidence(resolvedAccountNumber, confidence.accountNumber),
+        transactionTime: extractedFieldEvidence(transactionTime, confidence.transactionTime),
+        direction: extractedFieldEvidence(direction, confidence.direction),
+        amount: extractedFieldEvidence(amount, confidence.amount),
+        balance: extractedFieldEvidence(balance, confidence.balance),
+        counterpartyName: extractedFieldEvidence(String(tx.cp || ''), 0.9),
+        counterpartyAccount: extractedFieldEvidence(String(tx.ca || ''), 0.9),
+        summary: extractedFieldEvidence(String(tx.sm || ''), 0.9)
+      }
     };
   });
 
   // Deduplication preserves the extracted values. Any mathematical correction is performed later
   // by the shared normalizer, which records the original values and requires lawyer review.
   const transactions = deduplicateGeminiTransactions(rawTransactions);
-  const expectedPages = Math.max(1, Number(options?.totalPages) || 1);
+  const expectedPages = Array.from(
+    { length: uploadedPageCount },
+    (_, index) => originalPageStart + index
+  );
   const reportedPages = Array.isArray(parsedResult.pagesCovered)
-    ? parsedResult.pagesCovered.map((page: unknown) => Number(page)).filter((page: number) => Number.isInteger(page) && page >= 1 && page <= expectedPages)
+    ? parsedResult.pagesCovered.map((page: unknown) => Number(page)).filter((page: number) => expectedPages.includes(page))
     : [];
   const checkedPages = Array.isArray(parsedResult.pageChecks)
-    ? parsedResult.pageChecks.map((item: any) => Number(item?.pageNumber)).filter((page: number) => Number.isInteger(page) && page >= 1 && page <= expectedPages)
+    ? parsedResult.pageChecks.map((item: any) => Number(item?.pageNumber)).filter((page: number) => expectedPages.includes(page))
     : [];
   const transactionPages = transactions.map((item: any) => item.rawPageNumber).filter((page: unknown): page is number => typeof page === 'number');
   const pagesCovered = [...new Set([...reportedPages, ...checkedPages, ...transactionPages])].sort((a, b) => a - b);
-  const missingPages = Array.from({ length: expectedPages }, (_, index) => index + 1).filter(page => !pagesCovered.includes(page));
+  const missingPages = expectedPages.filter(page => !pagesCovered.includes(page));
   const pageChecks = Array.isArray(parsedResult.pageChecks) ? parsedResult.pageChecks : [];
   const extractedCountByPage = new Map<number, number>();
   transactions.forEach((transaction: any) => {
@@ -420,7 +502,7 @@ export async function parsePdfWithGeminiStream(
       : []),
     ...(missingPages.length ? [`页面覆盖不完整，缺少第 ${missingPages.join('、')} 页的结构化确认`] : []),
     ...countMismatches.map(({ page, expectedCount, extractedCount }) =>
-      `第 ${page} 页独立清点为 ${expectedCount} 笔，但结构化结果只有 ${extractedCount} 笔；该页可能漏识别或重复合并`)
+      `第 ${page} 页页面行数报告为 ${expectedCount} 笔，但结构化结果只有 ${extractedCount} 笔；该页可能漏识别或重复合并`)
   ];
 
   // 生成聚合银行账户摘要
@@ -531,7 +613,7 @@ export async function parsePdfWithGeminiStream(
     acc.parseStatus = 'NEEDS_REVIEW';
     acc.parseWarnings = warnings;
     acc.coveredPages = pagesCovered;
-    acc.totalPages = expectedPages;
+    acc.totalPages = originalTotalPages;
   }
 
   let accounts = Array.from(accountMap.values());
@@ -555,7 +637,7 @@ export async function parsePdfWithGeminiStream(
     parseStatus: 'NEEDS_REVIEW',
     parseWarnings: warnings,
     coveredPages: pagesCovered,
-    totalPages: expectedPages
+    totalPages: originalTotalPages
   };
   if (accounts.length === 0) accounts = [mainAccount];
 
@@ -566,8 +648,47 @@ export async function parsePdfWithGeminiStream(
     totalCount: transactions.length,
     pagesCovered,
     warnings,
-    countComplete: missingPages.length === 0 && pagesCovered.length === expectedPages && countMismatches.length === 0
+    countComplete: missingPages.length === 0 && pagesCovered.length === expectedPages.length && countMismatches.length === 0,
+    pageQuality: pageChecks.flatMap((item: any) => {
+      const page = Number(item?.pageNumber);
+      const expectedCount = Number(item?.transactionCount);
+      if (!expectedPages.includes(page) || !Number.isInteger(expectedCount) || expectedCount < 0) return [];
+      const extractedCount = extractedCountByPage.get(page) || 0;
+      return [{
+        page,
+        expectedCount,
+        extractedCount,
+        status: expectedCount === extractedCount ? 'COMPLETE' as const : 'NEEDS_REVIEW' as const,
+        pageType: normalizeGeminiPageType(item?.pageType)
+      }];
+    })
   };
+}
+
+function positiveInteger(value: unknown): number | undefined {
+  const parsed = Number.parseInt(String(value || ''), 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function geminiFieldConfidence(value: unknown): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.max(0, Math.min(1, parsed)) : 0.9;
+}
+
+function extractedFieldEvidence(value: string | number | null, confidence: number) {
+  return {
+    originalValue: value,
+    currentValue: value,
+    confidence,
+    origin: 'EXTRACTION' as const,
+    decision: confidence < 0.8 ? 'UNRESOLVED' as const : 'ACCEPTED' as const
+  };
+}
+
+function normalizeGeminiPageType(value: unknown): 'TRANSACTIONS' | 'ACCOUNT_INFO' | 'DOCUMENT' | 'BLANK' | 'UNKNOWN' {
+  const normalized = String(value || '').toUpperCase();
+  return normalized === 'TRANSACTIONS' || normalized === 'ACCOUNT_INFO' || normalized === 'DOCUMENT'
+    || normalized === 'BLANK' ? normalized : 'UNKNOWN';
 }
 
 function normalizeExtractedAccountNumber(value: unknown): string {

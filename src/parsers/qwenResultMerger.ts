@@ -4,6 +4,7 @@ import { isReliableAccountNumber, normalizeAccountIdentityPart } from '../utils/
 
 export interface QwenChunkResult {
   account: BankAccount;
+  accounts?: BankAccount[];
   transactions: StandardTransaction[];
   warnings?: string[];
   coveredPages: number[];
@@ -49,7 +50,7 @@ export function mergeQwenChunkResults(
   const transactions = reconciled.transactions;
   const pageQualityWarnings = results.flatMap(result => result.pageQuality || [])
     .filter(page => page.status === 'NEEDS_REVIEW' && Number.isFinite(page.expectedCount))
-    .map(page => `第 ${page.page} 页页面计数为 ${page.expectedCount} 笔，逐笔提取为 ${page.extractedCount} 笔；两者尚未核实，请对照原件确认`);
+    .map(page => `第 ${page.page} 页页面行数报告为 ${page.expectedCount} 笔，逐笔提取为 ${page.extractedCount} 笔；两者尚未核实，请对照原件确认`);
   const invalidCountWarnings = results.flatMap(result => result.pageQuality || [])
     .filter(page => page.status === 'NEEDS_REVIEW' && !Number.isFinite(page.expectedCount))
     .map(page => `第 ${page.page} 页未能完成独立行数清点，当前已提取 ${page.extractedCount} 笔；请仅在发现日期、金额或余额异常时对照原件核对`);
@@ -199,6 +200,49 @@ function buildAccountSummaries(
       balanceContinuityIssueCount: continuityIssues.length
     };
   });
+
+  // Account-list pages are evidence even when a listed account has no rows in
+  // this statement period. Preserve those entities instead of silently losing
+  // them when the segmented response is flattened into per-page chunks.
+  const listedAccounts = results.flatMap(result => {
+    const accounts = result.accounts?.length ? result.accounts : (result.transactions.length ? [result.account] : []);
+    return accounts.map(account => ({ account, result }));
+  });
+  for (const { account: listed, result } of listedAccounts) {
+    if (!isReliableAccountNumber(listed.accountNumber)) continue;
+    if (accountSummaries.some(existing => sameAccountIdentity(existing, listed))) continue;
+    const pages = [...new Set(listed.coveredPages?.length ? listed.coveredPages : result.coveredPages)]
+      .filter(page => Number.isInteger(page) && page > 0)
+      .sort((a, b) => a - b);
+    const pageSet = new Set(pages);
+    const parseWarnings = [...new Set([
+      ...(listed.parseWarnings || []),
+      ...warnings.filter(warning => {
+        const page = warningPage(warning);
+        return Boolean(page && pageSet.has(page));
+      })
+    ])];
+    accountSummaries.push({
+      ...listed,
+      fileName: sourceFileName,
+      fileType: 'pdf',
+      totalIn: 0,
+      totalOut: 0,
+      transactionCount: 0,
+      startDate: '',
+      endDate: '',
+      startBalance: 0,
+      endBalance: 0,
+      balanceAvailable: false,
+      isBalanced: false,
+      balanceDiff: 0,
+      parseStatus: parseWarnings.length ? 'NEEDS_REVIEW' : 'COMPLETE',
+      parseWarnings,
+      coveredPages: pages,
+      totalPages,
+      balanceContinuityIssueCount: 0
+    });
+  }
   const actionableOrphanWarnings = orphanWarnings.filter(w => !/空白|留白/.test(w) || /缺少|漏|失败|错误/.test(w));
   if (actionableOrphanWarnings.length) {
     const orphanPages = actionableOrphanWarnings.map(warningPage).filter((page): page is number => Boolean(page));
@@ -211,6 +255,19 @@ function buildAccountSummaries(
     });
   }
   return accountSummaries;
+}
+
+function sameAccountIdentity(left: BankAccount, right: BankAccount): boolean {
+  const leftNumber = normalizeAccountIdentityPart(left.accountNumber);
+  const rightNumber = normalizeAccountIdentityPart(right.accountNumber);
+  if (!leftNumber || !rightNumber) return false;
+  const sameNumber = leftNumber === rightNumber
+    || (Math.min(leftNumber.length, rightNumber.length) >= 12
+      && (leftNumber.endsWith(rightNumber) || rightNumber.endsWith(leftNumber)));
+  if (!sameNumber) return false;
+  const leftBank = normalizeAccountIdentityPart(left.bankName).replace(/中国|股份有限公司|有限责任公司|银行/g, '');
+  const rightBank = normalizeAccountIdentityPart(right.bankName).replace(/中国|股份有限公司|有限责任公司|银行/g, '');
+  return !leftBank || !rightBank || leftBank === rightBank || leftBank.includes(rightBank) || rightBank.includes(leftBank);
 }
 
 function inheritMissingAccountIdentity(transactions: StandardTransaction[]): StandardTransaction[] {

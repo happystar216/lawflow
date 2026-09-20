@@ -61,6 +61,20 @@ test('Qwen chunk merge separates multiple banks in one PDF into account tabs', (
   assert.equal(merged.accounts.every(item => item.balanceContinuityIssueCount === 0), true);
 });
 
+test('Qwen chunk merge preserves listed accounts that have no transaction rows', () => {
+  const withAccountList = chunk(1, 1, [transaction('a', 1, 1, 'OUT', 100, 900)]);
+  withAccountList.totalPages = 1;
+  withAccountList.accounts = [
+    account(),
+    { ...account(), accountNumber: '62220002', transactionCount: 0, balanceAvailable: false }
+  ];
+  const merged = mergeQwenChunkResults([withAccountList], '账户清单.pdf', 1);
+
+  assert.equal(merged.accounts.length, 2);
+  assert.equal(merged.accounts.find(item => item.accountNumber === '62220002')?.transactionCount, 0);
+  assert.equal(merged.accounts.find(item => item.accountNumber === '62220002')?.balanceAvailable, false);
+});
+
 test('Qwen chunk merge inherits the surrounding owner account for a headerless continuation page', () => {
   const first = transaction('a', 1, 1, 'OUT', 100, 900);
   const continuation = {

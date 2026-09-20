@@ -22,6 +22,17 @@ export function canonicalizeTransactionEvents(transactions: StandardTransaction[
   const events: CanonicalTransactionEvent[] = [];
 
   for (const observation of observations) {
+    const declaredTargetId = observation.duplicateOfTransactionId;
+    const declaredEvent = declaredTargetId
+      ? events.find(event => event.observations.some(item => item.id === declaredTargetId))
+      : undefined;
+    if (declaredEvent) {
+      declaredEvent.observations.push(observation);
+      declaredEvent.representative = chooseRepresentative(declaredEvent.observations);
+      declaredEvent.confidence = Math.min(declaredEvent.confidence, 0.98);
+      declaredEvent.reasons = [...new Set([...declaredEvent.reasons, '同一原文件中的重复版式记录'])];
+      continue;
+    }
     let best: { event: CanonicalTransactionEvent; score: DuplicateScore } | undefined;
     for (const event of events) {
       if (event.observations.some(item => sourceIdentity(item) === sourceIdentity(observation))) continue;
@@ -57,7 +68,12 @@ export function canonicalizeTransactionEvents(transactions: StandardTransaction[
   }
   return {
     events,
-    canonicalTransactions: events.map(event => ({ ...event.representative, analysisEventId: event.id })),
+    canonicalTransactions: events.map(event => {
+      const representative = { ...event.representative, analysisEventId: event.id };
+      delete representative.duplicateOfTransactionId;
+      delete representative.excludedFromAnalysis;
+      return representative;
+    }),
     eventIdByObservationId,
     representativeIdByObservationId
   };
@@ -143,8 +159,6 @@ function representativeScore(transaction: StandardTransaction): number {
 function clearDerivedEventFields(transaction: StandardTransaction): StandardTransaction {
   const clone = { ...transaction };
   delete clone.analysisEventId;
-  delete clone.duplicateOfTransactionId;
-  delete clone.excludedFromAnalysis;
   return clone;
 }
 

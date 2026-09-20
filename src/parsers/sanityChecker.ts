@@ -29,7 +29,7 @@ export function auditAccountBalance(
   let totalExpense = 0;
   const suspiciousRows: { transactionId: string; reason: string }[] = [];
 
-  const accountTx = transactions.filter(t => transactionBelongsToAccount(t, account));
+  const accountTx = transactions.filter(t => transactionBelongsToAccount(t, account) && !t.excludedFromAnalysis);
 
   accountTx.forEach(tx => {
     if (tx.direction === 'IN') {

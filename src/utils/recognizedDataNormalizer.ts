@@ -23,13 +23,16 @@ export function normalizeRecognizedData(
   const stabilized = repairOutlierOcrYears(restorePrintedDatesFromRawText(
     healSummaryOverriddenAmounts(stabilizePageAccountIdentities(preparedTransactions))
   ));
-  const { transactions: deduped, mergedPagesByAccount } = deduplicateTransactions(stabilized);
-  const settlementRepaired = repairPeriodicSettlementRows(deduped);
+  const { transactions: observations, mergedPagesByAccount } = deduplicateTransactions(stabilized);
+  const canonicalObservations = observations.filter(transaction => !transaction.excludedFromAnalysis);
+  const settlementRepaired = repairPeriodicSettlementRows(canonicalObservations);
   const calibrated = calibrateDirectionsByBalanceMath(settlementRepaired);
-  const transactions = healOcrBalanceAndAmountDiscrepancies(calibrated);
+  const analyzedTransactions = healOcrBalanceAndAmountDiscrepancies(calibrated);
+  const analyzedById = new Map(analyzedTransactions.map(transaction => [transaction.id, transaction]));
+  const transactions = observations.map(transaction => analyzedById.get(transaction.id) || transaction);
   for (const transaction of transactions) {
     const isFeeWaiverRow = isFeeWaiver(transaction);
-    const isConfirmedZeroSettlement = isBalanceConfirmedZeroSettlement(transaction, transactions);
+    const isConfirmedZeroSettlement = isBalanceConfirmedZeroSettlement(transaction, analyzedTransactions);
     if ((isFeeWaiverRow || isConfirmedZeroSettlement) && transaction.dataQualityIssues) {
       transaction.dataQualityIssues = transaction.dataQualityIssues.filter(q => q !== 'INVALID_AMOUNT');
       if (!transaction.dataQualityIssues.length && transaction.reviewStatus === 'PENDING') {
@@ -40,7 +43,7 @@ export function normalizeRecognizedData(
     refreshFieldEvidence(transaction);
   }
   const transactionsByAccount = new Map<string, StandardTransaction[]>();
-  for (const transaction of transactions) {
+  for (const transaction of analyzedTransactions) {
     const key = accountIdentityKey(transaction);
     transactionsByAccount.set(key, [...(transactionsByAccount.get(key) || []), transaction]);
   }
@@ -315,7 +318,7 @@ function repairOutlierOcrYears(transactions: StandardTransaction[]): StandardTra
       candidate.row.transactionDate = repairedDate;
       candidate.row.transactionTime = timeSuffix ? `${repairedDate} ${timeSuffix}` : repairedDate;
       candidate.row.correctionReason = appendCorrectionReason(candidate.row.correctionReason, '系统依据同账户主要时间范围修正异常年份');
-      if (!candidate.row.dataQualityIssues?.length) candidate.row.reviewStatus = 'AUTO_PASSED';
+      candidate.row.reviewStatus = 'CORRECTED';
     }
   }
   return transactions;
@@ -335,7 +338,7 @@ function restorePrintedDatesFromRawText(transactions: StandardTransaction[]): St
     transaction.transactionDate = sameMonthDay;
     transaction.transactionTime = timeSuffix ? `${sameMonthDay} ${timeSuffix}` : sameMonthDay;
     transaction.correctionReason = appendCorrectionReason(transaction.correctionReason, '系统依据原始行印刷日期恢复异常年份');
-    if (!transaction.dataQualityIssues?.length) transaction.reviewStatus = 'AUTO_PASSED';
+    transaction.reviewStatus = 'CORRECTED';
   }
   return transactions;
 }
@@ -419,6 +422,7 @@ function repairSettlementYear(
     transaction.correctionReason,
     '系统依据同账户原始行日期顺序修正结息年份'
   );
+  transaction.reviewStatus = 'CORRECTED';
 }
 
 function repairSettlementAmount(transaction: StandardTransaction, previous: StandardTransaction): void {
@@ -443,7 +447,7 @@ function repairSettlementAmount(transaction: StandardTransaction, previous: Stan
   );
   if (!transaction.dataQualityIssues.length) {
     transaction.extractionConfidence = Math.max(transaction.extractionConfidence ?? 0, 0.9);
-    transaction.reviewStatus = 'AUTO_PASSED';
+    transaction.reviewStatus = 'CORRECTED';
   }
 }
 
@@ -722,9 +726,7 @@ function restoreUnsupportedBalanceCorrections(transactions: StandardTransaction[
     if (!creditCardKeys.has(accountIdentityKey(transaction)) && strictDigitBridge) {
       return {
         ...transaction,
-        reviewStatus: !transaction.dataQualityIssues?.length && (transaction.extractionConfidence ?? 0) >= 0.8
-          ? 'AUTO_PASSED'
-          : transaction.reviewStatus
+        reviewStatus: 'CORRECTED'
       };
     }
     if (!creditCardKeys.has(accountIdentityKey(transaction)) && isTwoRowCorrection) return transaction;
@@ -823,10 +825,15 @@ export interface DeduplicateTransactionsResult {
 
 export function deduplicateTransactions(transactions: StandardTransaction[]): DeduplicateTransactionsResult {
   const result: StandardTransaction[] = [];
+  const representatives: StandardTransaction[] = [];
   const mergedPagesByAccount = new Map<string, Set<number>>();
   const matchedTargetsByPage = new Map<number, Set<number>>();
 
-  const sorted = [...transactions].sort(compareSourceOrder);
+  const sorted = transactions.map(transaction => ({
+    ...transaction,
+    duplicateOfTransactionId: undefined,
+    excludedFromAnalysis: undefined
+  })).sort(compareSourceOrder);
 
   for (const candidate of sorted) {
     const accKey = accountIdentityKey(candidate);
@@ -834,9 +841,9 @@ export function deduplicateTransactions(transactions: StandardTransaction[]): De
     const pageMatched = matchedTargetsByPage.get(candPage) || new Set<number>();
     let matchedIdx = -1;
 
-    for (let i = 0; i < result.length; i++) {
+    for (let i = 0; i < representatives.length; i++) {
       if (pageMatched.has(i)) continue;
-      const target = result[i];
+      const target = representatives[i];
       if (areTransactionsDuplicate(target, candidate)) {
         matchedIdx = i;
         break;
@@ -844,8 +851,12 @@ export function deduplicateTransactions(transactions: StandardTransaction[]): De
     }
 
     if (matchedIdx !== -1) {
-      const target = result[matchedIdx];
-      mergeDuplicateTransactions(target, candidate);
+      const target = representatives[matchedIdx];
+      result.push({
+        ...candidate,
+        duplicateOfTransactionId: target.id,
+        excludedFromAnalysis: true
+      });
       pageMatched.add(matchedIdx);
       matchedTargetsByPage.set(candPage, pageMatched);
 
@@ -855,7 +866,9 @@ export function deduplicateTransactions(transactions: StandardTransaction[]): De
         mergedPagesByAccount.set(accKey, pages);
       }
     } else {
-      result.push({ ...candidate });
+      const representative = { ...candidate };
+      representatives.push(representative);
+      result.push(representative);
     }
   }
 
@@ -995,32 +1008,6 @@ function cleanSummaryForMatch(str?: string): string {
   return str.replace(/[\s\-_@#*|/\\.,:;，。、：；]/g, '').trim().toLowerCase();
 }
 
-function mergeDuplicateTransactions(kept: StandardTransaction, dup: StandardTransaction): StandardTransaction {
-  if ((!kept.summary || kept.summary.length < (dup.summary?.length || 0)) && dup.summary) {
-    kept.summary = dup.summary;
-  }
-  if (!kept.counterpartyName && dup.counterpartyName) {
-    kept.counterpartyName = dup.counterpartyName;
-  }
-  if (!kept.counterpartyAccount && dup.counterpartyAccount) {
-    kept.counterpartyAccount = dup.counterpartyAccount;
-  }
-  if (!kept.counterpartyBank && dup.counterpartyBank) {
-    kept.counterpartyBank = dup.counterpartyBank;
-  }
-  if (dup.transactionTime && dup.transactionTime.length > (kept.transactionTime?.length || 0)) {
-    kept.transactionTime = dup.transactionTime;
-  }
-  if ((kept.balance == null || kept.balanceAvailable === false) && dup.balance != null && dup.balanceAvailable !== false) {
-    kept.balance = dup.balance;
-    kept.balanceAvailable = true;
-  }
-  if ((dup.extractionConfidence || 0) > (kept.extractionConfidence || 0)) {
-    kept.extractionConfidence = dup.extractionConfidence;
-  }
-  return kept;
-}
-
 export function calibrateDirectionsByBalanceMath(transactions: StandardTransaction[]): StandardTransaction[] {
   const byAccount = new Map<string, StandardTransaction[]>();
   for (const tx of transactions) {
@@ -1072,16 +1059,6 @@ export function calibrateDirectionsByBalanceMath(transactions: StandardTransacti
         if (curr.reviewStatus === 'AUTO_PASSED') {
           curr.reviewStatus = 'CORRECTED';
         }
-      }
-      if (
-        curr.correctionReason === '系统依据相邻余额关系修正收支方向'
-        && curr.originalAmount === curr.amount
-        && curr.originalBalance === curr.balance
-        && !curr.dataQualityIssues?.length
-        && (curr.extractionConfidence ?? 0) >= 0.8
-        && ((curr.direction === 'IN' && diffIn < 0.05) || (curr.direction === 'OUT' && diffOut < 0.05))
-      ) {
-        curr.reviewStatus = 'AUTO_PASSED';
       }
     }
   }
@@ -1160,14 +1137,6 @@ export function healOcrBalanceAndAmountDiscrepancies(transactions: StandardTrans
             recordCorrection(curr, '系统依据前后余额桥接关系提出金额及余额修正');
             curr.amount = impliedAmtCurr;
             curr.balance = impliedBalCurr;
-            if (
-              isOcrDigitVariant(currAmtStr, impliedAmtStr)
-              && isOcrDigitVariant(currBalStr, impliedBalStr)
-              && !curr.dataQualityIssues?.length
-              && (curr.extractionConfidence ?? 0) >= 0.8
-            ) {
-              curr.reviewStatus = 'AUTO_PASSED';
-            }
           }
         }
       }

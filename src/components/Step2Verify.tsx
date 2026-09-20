@@ -976,7 +976,9 @@ export const Step2Verify: React.FC<Step2Props> = ({
                         </span>
                       </td>
                       <td className="p-3 text-[11px] font-medium">
-                        {transactionStateLabel(state)}
+                        {transaction.excludedFromAnalysis
+                          ? "重复观察 · 分析只计一次"
+                          : transactionStateLabel(state)}
                       </td>
                       <td className="p-3">
                         {expanded ? (
@@ -992,10 +994,17 @@ export const Step2Verify: React.FC<Step2Props> = ({
                           <div className="px-6 py-4 bg-slate-50 border-l-4 border-blue-400 flex items-start justify-between gap-4">
                             <div className="space-y-2">
                               <div className="font-semibold text-xs text-slate-800">
-                                {transactionIssues.length
+                                {transaction.excludedFromAnalysis
+                                  ? `该行与 ${transaction.duplicateOfTransactionId || "另一条记录"} 属于同一笔交易`
+                                  : transactionIssues.length
                                   ? `该笔涉及 ${transactionIssues.length} 项核对问题`
                                   : "自动检查未发现明确问题"}
                               </div>
+                              {transaction.excludedFromAnalysis && (
+                                <div className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-[11px] text-blue-800">
+                                  原始行仍完整保留并可查看，但账户汇总、平账、资金流向和风险分析只计算代表记录一次。
+                                </div>
+                              )}
                               {transactionIssues.length ? (
                                 <div className="space-y-2">
                                   {transactionIssues.map((issue) => (
@@ -2166,7 +2175,7 @@ function summarizeAccount(
   allTransactions: StandardTransaction[],
 ): BankAccount {
   const accountTransactions = allTransactions.filter((transaction) =>
-    transactionBelongsToAccount(transaction, account),
+    transactionBelongsToAccount(transaction, account) && !transaction.excludedFromAnalysis,
   );
   const dates = accountTransactions
     .map((transaction) => transaction.transactionDate)

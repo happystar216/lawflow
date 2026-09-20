@@ -102,7 +102,7 @@ export async function exportEvidenceAnalysisExcel(
     '时间阶段': transaction.timePhaseTag || '常规期间',
     '内部自转': transaction.isInternalTransfer ? '是（双边匹配已核销）' : '否（外部流向/待核实）',
     '分析事件编号': transaction.analysisEventId || '',
-    '跨文件重复记录': transaction.excludedFromAnalysis ? `是（与 ${transaction.duplicateOfTransactionId || '代表记录'} 属于同一交易）` : '否',
+    '重复观察记录': transaction.excludedFromAnalysis ? `是（与 ${transaction.duplicateOfTransactionId || '代表记录'} 属于同一交易，仅在分析中计算一次）` : '否',
     '原始文件': transaction.rawSourceFile,
     '页码/行号': transaction.rawPageNumber ? `第${transaction.rawPageNumber}页` : `第${transaction.rawRowIndex || 1}行`
   })));

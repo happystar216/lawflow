@@ -332,9 +332,12 @@ test('normalizeRecognizedData deduplicates identical transactions from multi-tem
   const rawContinuityIssues = balanceContinuityIssues([...p4Txs, ...p13Txs]);
   assert.ok(rawContinuityIssues.length >= 9, 'Without deduplication, duplicated pairs break continuity');
 
-  // With normalizer deduplication:
+  // Normalization preserves all source observations but excludes one copy of
+  // each duplicate pair from account calculations.
   const normalized = normalizeRecognizedData([accountBase], [...p4Txs, ...p13Txs]);
-  assert.equal(normalized.transactions.length, 10, 'Should deduplicate from 20 to 10 transactions');
+  assert.equal(normalized.transactions.length, 20, 'All 20 source observations must remain available');
+  assert.equal(normalized.transactions.filter(transaction => transaction.excludedFromAnalysis).length, 10);
+  assert.equal(normalized.transactions.filter(transaction => !transaction.excludedFromAnalysis).length, 10);
   assert.equal(normalized.accounts[0].transactionCount, 10);
   assert.equal(normalized.accounts[0].balanceContinuityIssueCount, 0, 'Should have 0 continuity breaks');
   assert.equal(normalized.accounts[0].isBalanced, true, 'Account should be perfectly balanced');
@@ -383,8 +386,8 @@ test('normalizeRecognizedData calibrates credit card installment conversion dire
   const normalized = normalizeRecognizedData([account], rawTxs);
   assert.equal(normalized.transactions.find(t => t.id === 'c4')?.direction, 'IN', 'c4 should be calibrated to IN');
   assert.equal(normalized.transactions.find(t => t.id === 'c7')?.direction, 'IN', 'c7 should be calibrated to IN');
-  assert.equal(normalized.transactions.find(t => t.id === 'c4')?.reviewStatus, 'AUTO_PASSED');
-  assert.equal(normalized.transactions.find(t => t.id === 'c7')?.reviewStatus, 'AUTO_PASSED');
+  assert.equal(normalized.transactions.find(t => t.id === 'c4')?.reviewStatus, 'CORRECTED');
+  assert.equal(normalized.transactions.find(t => t.id === 'c7')?.reviewStatus, 'CORRECTED');
   assert.equal(normalized.accounts[0].balanceContinuityIssueCount, 0, 'All breaks should be resolved');
 });
 
@@ -424,7 +427,7 @@ test('normalizeRecognizedData mathematically heals OCR single-digit error (4000 
   assert.ok(healedP9Row1, 'p9_row1 must exist');
   assert.equal(healedP9Row1.amount, 4000.00, 'Amount 1000.00 should be healed to 4000.00 based on balance bridge');
   assert.equal(healedP9Row1.balance, 6497.36, 'Balance 6197.36 should be healed to 6497.36 based on balance bridge');
-  assert.equal(healedP9Row1.reviewStatus, 'AUTO_PASSED', 'A strict two-field OCR digit repair should not remain pending');
+  assert.equal(healedP9Row1.reviewStatus, 'CORRECTED', 'A system-proposed digit repair must remain visible for lawyer confirmation');
 
   const healedIssues = balanceContinuityIssues(normalized.transactions);
   assert.equal(healedIssues.length, 0, 'All breaks between Page 9 and Page 8 should be eliminated');
@@ -600,13 +603,13 @@ test('normalizer restores omitted settlement amounts and obvious OCR years from 
   assert.equal(byId.get('bad-year-1')?.amount, 2);
   assert.equal(byId.get('bad-year-2')?.amount, 2);
   assert.equal(byId.get('bad-year-zero')?.amount, 0);
-  assert.equal(byId.get('bad-year-1')?.reviewStatus, 'AUTO_PASSED');
-  assert.equal(byId.get('bad-year-2')?.reviewStatus, 'AUTO_PASSED');
-  assert.equal(byId.get('bad-year-zero')?.reviewStatus, 'AUTO_PASSED');
+  assert.equal(byId.get('bad-year-1')?.reviewStatus, 'CORRECTED');
+  assert.equal(byId.get('bad-year-2')?.reviewStatus, 'CORRECTED');
+  assert.equal(byId.get('bad-year-zero')?.reviewStatus, 'CORRECTED');
   assert.deepEqual(byId.get('bad-year-1')?.dataQualityIssues, []);
 
   const issues = buildEvidenceReviewIssues(normalized.accounts[0], normalized.transactions);
-  assert.equal(issues.some(issue => issue.category === 'LOW_CONFIDENCE'), false);
+  assert.equal(issues.some(issue => issue.category === 'LOW_CONFIDENCE'), true);
   assert.equal(issues.some(issue => issue.category === 'INVALID_AMOUNT'), false);
 });
 

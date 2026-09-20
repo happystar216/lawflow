@@ -1,7 +1,7 @@
 import { CaseMetadata } from '../types/case';
 import { BankAccount, StandardTransaction } from '../types/transaction';
 
-const ANALYSIS_MODEL_VERSION = '2026-09-cross-source-events-v3';
+const ANALYSIS_MODEL_VERSION = '2026-09-preserved-observations-v4';
 
 function stableHash(input: string): string {
   let left = 2166136261;
@@ -44,7 +44,9 @@ export function caseAnalysisFingerprint(
       summary: transaction.summary,
       rawText: transaction.rawText || '',
       counterpartyRoleTag: transaction.counterpartyRoleTag || '',
-      reviewStatus: transaction.reviewStatus || ''
+      reviewStatus: transaction.reviewStatus || '',
+      duplicateOfTransactionId: transaction.duplicateOfTransactionId || '',
+      excludedFromAnalysis: transaction.excludedFromAnalysis === true
     }));
   const canonicalAccounts = [...accounts]
     .sort((left, right) => `${left.sourceDocumentId || ''}|${left.accountNumber}`.localeCompare(`${right.sourceDocumentId || ''}|${right.accountNumber}`))
