@@ -20,3 +20,15 @@ test('oversized upload errors provide a concrete recovery action', () => {
   assert.equal(result.retryable, false);
   assert.match(result.message, /压缩|拆分/);
 });
+
+test('premature stream completion exposes a concrete diagnostic instead of blaming document clarity', () => {
+  const error = Object.assign(new Error('识别数据流提前结束，未收到最终完成结果'), {
+    diagnosticCode: 'STREAM_ENDED_BEFORE_COMPLETE',
+    diagnosis: '已接收约 486 笔中间结果，文件 128 页，耗时约 100 秒，请求编号 request-1'
+  });
+  const result = importErrorForUser(error, '长卷宗.pdf');
+  assert.equal(result.diagnosticCode, 'STREAM_ENDED_BEFORE_COMPLETE');
+  assert.match(result.message, /最终结果生成前结束/);
+  assert.match(result.diagnosis || '', /486.*128.*100/);
+  assert.doesNotMatch(result.message, /清晰/);
+});

@@ -14,6 +14,17 @@ export interface GeminiParserClientOptions {
   totalPages?: number;
 }
 
+export class RecognitionImportError extends Error {
+  constructor(
+    message: string,
+    public diagnosticCode: string,
+    public diagnosis: string
+  ) {
+    super(message);
+    this.name = 'RecognitionImportError';
+  }
+}
+
 export async function parsePdfWithGemini(
   file: File,
   onProgress?: (info: GeminiProgressInfo) => void,
@@ -52,6 +63,7 @@ export async function parsePdfWithGemini(
   }
 
   let response: Response;
+  const startedAt = Date.now();
   try {
     response = await fetch('/api/parse-bank-statement-stream', {
       method: 'POST',
@@ -78,9 +90,13 @@ export async function parsePdfWithGemini(
   const decoder = new TextDecoder();
   let buffer = '';
   let completeResult: any = null;
-  let serverError = '';
+  let serverError: { message: string; diagnosticCode: string; diagnosis: string } | null = null;
   let lastCapturedCount = 0;
   let lastPercent = 5;
+  let lastHeartbeatSeconds = 0;
+  let parserVersion = '';
+  let requestId = response.headers.get('X-LawFlow-Request-Id') || '';
+  let eventCount = 0;
 
   const handleLine = (line: string) => {
     const trimmed = line.trim();
@@ -90,7 +106,11 @@ export async function parsePdfWithGemini(
 
     try {
       const payload = JSON.parse(dataStr);
-      if (payload.type === 'progress') {
+      eventCount += 1;
+      if (payload.type === 'init') {
+        parserVersion = String(payload.parserVersion || '');
+        requestId = String(payload.requestId || requestId);
+      } else if (payload.type === 'progress') {
         if (typeof payload.totalTransactions === 'number' && payload.totalTransactions > lastCapturedCount) {
           lastCapturedCount = payload.totalTransactions;
         }
@@ -108,6 +128,7 @@ export async function parsePdfWithGemini(
           isStreaming: true
         });
       } else if (payload.type === 'heartbeat') {
+        lastHeartbeatSeconds = Math.max(lastHeartbeatSeconds, Number(payload.secondsElapsed) || 0);
         const heartbeatPercent = Math.min(92, 15 + Math.floor(((payload.secondsElapsed || 0) / 100) * 75));
         if (heartbeatPercent > lastPercent) {
           lastPercent = heartbeatPercent;
@@ -133,7 +154,16 @@ export async function parsePdfWithGemini(
         });
         completeResult = payload;
       } else if (payload.type === 'error') {
-        serverError = payload.message || '智能识别服务返回异常';
+        const metrics = payload.diagnostics && typeof payload.diagnostics === 'object'
+          ? Object.entries(payload.diagnostics).map(([key, value]) => `${diagnosticMetricLabel(key)}=${String(value)}`).join('，')
+          : '';
+        const diagnosticCode = String(payload.diagnosticCode || 'SERVER_PARSE_ERROR');
+        const serverRequestId = String(payload.requestId || requestId || '无');
+        serverError = {
+          message: payload.message || '智能识别服务返回异常',
+          diagnosticCode,
+          diagnosis: `服务端已明确返回失败；${metrics || '没有附加指标'}；请求编号 ${serverRequestId}`
+        };
       }
     } catch {
       // 容错单个 SSE 帧格式波动
@@ -157,15 +187,26 @@ export async function parsePdfWithGemini(
     if (signal?.aborted) {
       throw new Error('用户已手动停止解析');
     }
-    throw new Error(`数据流传输中断: ${streamErr.message || '网络连接超时'}`);
+    const elapsedSeconds = Math.max(lastHeartbeatSeconds, Math.round((Date.now() - startedAt) / 1000));
+    throw new RecognitionImportError(
+      `数据流传输中断：${streamErr.message || '浏览器与服务器的连接异常'}`,
+      'STREAM_TRANSPORT_INTERRUPTED',
+      `连接在收到完成结果前异常中断；已接收约 ${lastCapturedCount} 笔中间结果，耗时约 ${elapsedSeconds} 秒，请求编号 ${requestId || '无'}`
+    );
   }
 
-  if (serverError) {
-    throw new Error(serverError);
+  const capturedServerError = serverError as { message: string; diagnosticCode: string; diagnosis: string } | null;
+  if (capturedServerError) {
+    throw new RecognitionImportError(capturedServerError.message, capturedServerError.diagnosticCode, capturedServerError.diagnosis);
   }
 
   if (!completeResult || !Array.isArray(completeResult.transactions)) {
-    throw new Error('智能识别服务未返回有效的结构化结果，请检查文档是否清晰后重试');
+    const elapsedSeconds = Math.max(lastHeartbeatSeconds, Math.round((Date.now() - startedAt) / 1000));
+    throw new RecognitionImportError(
+      '识别数据流提前结束，未收到最终完成结果',
+      'STREAM_ENDED_BEFORE_COMPLETE',
+      `服务器连接正常结束，但没有发送完成标记；已接收约 ${lastCapturedCount} 笔中间结果、${eventCount} 个状态事件，文件 ${totalPages} 页，耗时约 ${elapsedSeconds} 秒，处理方式 ${parserVersion || '未知'}，请求编号 ${requestId || '无'}。这通常表示单次长任务被托管平台终止，或上游输出在完成前结束。`
+    );
   }
 
   return {
@@ -173,4 +214,15 @@ export async function parsePdfWithGemini(
     accounts: completeResult.accounts || [completeResult.account],
     transactions: completeResult.transactions
   };
+}
+
+function diagnosticMetricLabel(key: string): string {
+  return ({
+    receivedTransactions: '已接收中间流水数',
+    responseFrames: '服务响应片段数',
+    malformedFrames: '异常响应片段数',
+    outputTokens: '输出用量',
+    finishReason: '停止原因',
+    responseCharacters: '响应字符数'
+  } as Record<string, string>)[key] || key;
 }

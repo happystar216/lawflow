@@ -1,7 +1,26 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parsePdfWithGeminiStream } from '../functions/lib/geminiBankStatement';
+import { parsePdfWithGeminiStream, RecognitionDiagnosticError } from '../functions/lib/geminiBankStatement';
 import { normalizeRecognizedData } from '../src/utils/recognizedDataNormalizer';
+
+test('Gemini parser reports an explicit output-limit diagnostic', async () => {
+  const originalFetch = globalThis.fetch;
+  const partialJson = '{"transactions":[{"p":1,"tm":"2024-01-01","dir":"IN","amt":1}';
+  globalThis.fetch = async () => new Response(`data: ${JSON.stringify({
+    candidates: [{ content: { parts: [{ text: partialJson }] }, finishReason: 'MAX_TOKENS' }],
+    usageMetadata: { candidatesTokenCount: 65536 }
+  })}\n\n`);
+  try {
+    await assert.rejects(
+      () => parsePdfWithGeminiStream(new File(['pdf'], 'long.pdf', { type: 'application/pdf' }), { GEMINI_API_KEY: 'test' }, undefined, undefined, { totalPages: 300 }),
+      (error: unknown) => error instanceof RecognitionDiagnosticError
+        && error.diagnosticCode === 'OUTPUT_LIMIT_REACHED'
+        && error.diagnostics.outputTokens === 65536
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
 
 test('Gemini parser keeps invalid fields pending and reports missing page coverage', async () => {
   const originalFetch = globalThis.fetch;

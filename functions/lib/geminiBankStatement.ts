@@ -20,6 +20,17 @@ export interface GeminiParseOptions {
   sourceFileName?: string;
 }
 
+export class RecognitionDiagnosticError extends Error {
+  constructor(
+    public diagnosticCode: string,
+    message: string,
+    public diagnostics: Record<string, string | number | boolean | undefined> = {}
+  ) {
+    super(message);
+    this.name = 'RecognitionDiagnosticError';
+  }
+}
+
 function buildGeminiDirectPrompt(options?: GeminiParseOptions): string {
   const targetPerson = options?.respondentName ? `【被执行人：${options.respondentName}】` : '被执行人';
   const pageHint = options?.totalPages && options.totalPages > 0 ? `（原件共约 ${options.totalPages} 页）` : '';
@@ -135,62 +146,95 @@ export async function parsePdfWithGeminiStream(
   let transactionMatchCount = 0;
   let lastCurrentBank = '银行流水';
   let buffer = '';
+  let finishReason = '';
+  let responseFrames = 0;
+  let malformedFrames = 0;
+  let outputTokens = 0;
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n');
-    buffer = lines.pop() || '';
+  const consumePayload = (payload: any) => {
+    responseFrames += 1;
+    const candidate = payload.candidates?.[0];
+    if (candidate?.finishReason) finishReason = String(candidate.finishReason);
+    if (Number.isFinite(Number(payload.usageMetadata?.candidatesTokenCount))) {
+      outputTokens = Number(payload.usageMetadata.candidatesTokenCount);
+    }
+    const textChunk = candidate?.content?.parts?.[0]?.text;
+    if (!textChunk) return;
+    accumulatedText += textChunk;
 
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed.startsWith('data:')) continue;
-      const dataStr = trimmed.slice(5).trim();
-      if (!dataStr) continue;
+    const matches = accumulatedText.match(/"amt"\s*:/g);
+    const currentCount = matches ? matches.length : 0;
+    const bankMatch = textChunk.match(/"bk"\s*:\s*"([^"]+)"/);
+    if (bankMatch?.[1]) lastCurrentBank = bankMatch[1];
+    if (currentCount <= transactionMatchCount) return;
+    transactionMatchCount = currentCount;
+    const dynamicPercent = Math.min(95, 20 + Math.floor((transactionMatchCount / 500) * 75));
+    onProgress?.({
+      statusText: `正在提取【${lastCurrentBank}】流水明细，已读取约 ${transactionMatchCount} 笔…`,
+      totalTransactions: transactionMatchCount,
+      percent: dynamicPercent,
+      currentBank: lastCurrentBank
+    });
+  };
 
-      try {
-        const payload = JSON.parse(dataStr);
-        const textChunk = payload.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (textChunk) {
-          accumulatedText += textChunk;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
 
-          // 估算已解析出来的交易数量（统计 "amt": 或 "dir": 出现的次数）
-          const matches = accumulatedText.match(/"amt"\s*:/g);
-          const currentCount = matches ? matches.length : 0;
-          
-          // 尝试探测当前处理的银行名称
-          const bankMatch = textChunk.match(/"bk"\s*:\s*"([^"]+)"/);
-          if (bankMatch && bankMatch[1]) {
-            lastCurrentBank = bankMatch[1];
-          }
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith('data:')) continue;
+        const dataStr = trimmed.slice(5).trim();
+        if (!dataStr || dataStr === '[DONE]') continue;
 
-          if (currentCount > transactionMatchCount) {
-            transactionMatchCount = currentCount;
-            const dynamicPercent = Math.min(95, 20 + Math.floor((transactionMatchCount / 500) * 75));
-            onProgress?.({
-              statusText: `正在提取【${lastCurrentBank}】流水明细，已读取约 ${transactionMatchCount} 笔…`,
-              totalTransactions: transactionMatchCount,
-              percent: dynamicPercent,
-              currentBank: lastCurrentBank
-            });
-          }
+        try {
+          consumePayload(JSON.parse(dataStr));
+        } catch {
+          malformedFrames += 1;
         }
-      } catch {
-        // 忽略单个 SSE 帧格式波动
       }
     }
+  } catch (error) {
+    throw new RecognitionDiagnosticError(
+      'UPSTREAM_STREAM_INTERRUPTED',
+      '上游识别数据流在完成前中断',
+      { receivedTransactions: transactionMatchCount, responseFrames, malformedFrames, outputTokens }
+    );
   }
 
   if (buffer.trim()) {
     const trimmed = buffer.trim();
     if (trimmed.startsWith('data:')) {
       try {
-        const payload = JSON.parse(trimmed.slice(5).trim());
-        const textChunk = payload.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (textChunk) accumulatedText += textChunk;
-      } catch {}
+        consumePayload(JSON.parse(trimmed.slice(5).trim()));
+      } catch { malformedFrames += 1; }
     }
+  }
+
+  if (/MAX_TOKENS|LENGTH|TOKEN/i.test(finishReason)) {
+    throw new RecognitionDiagnosticError(
+      'OUTPUT_LIMIT_REACHED',
+      '单次识别输出达到长度上限，完整结果尚未生成',
+      { receivedTransactions: transactionMatchCount, responseFrames, malformedFrames, outputTokens, finishReason }
+    );
+  }
+  if (finishReason && !/STOP/i.test(finishReason)) {
+    throw new RecognitionDiagnosticError(
+      'MODEL_STOPPED_EARLY',
+      `识别服务提前停止生成（${finishReason}）`,
+      { receivedTransactions: transactionMatchCount, responseFrames, malformedFrames, outputTokens, finishReason }
+    );
+  }
+  if (!accumulatedText.trim()) {
+    throw new RecognitionDiagnosticError(
+      'EMPTY_MODEL_RESPONSE',
+      '识别服务已响应，但没有返回可解析的正文',
+      { responseFrames, malformedFrames, outputTokens, finishReason }
+    );
   }
 
   // 解析完整的 JSON 结果（具备工业级多阶段容错修复能力）
@@ -244,7 +288,11 @@ export async function parsePdfWithGeminiStream(
     }
 
     if (rawTxList.length === 0) {
-      throw new Error('未能从大模型返回流中捕获到有效交易数据，请稍后重试或确认卷宗扫描清晰度');
+      throw new RecognitionDiagnosticError(
+        'INVALID_STRUCTURED_OUTPUT',
+        '识别服务返回了内容，但结构化数据不完整且无法恢复',
+        { receivedTransactions: transactionMatchCount, responseFrames, malformedFrames, outputTokens, finishReason, responseCharacters: cleanJsonText.length }
+      );
     }
   }
 

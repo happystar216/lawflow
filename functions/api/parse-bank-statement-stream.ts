@@ -1,5 +1,5 @@
 import { parseBankStatementWithQwen } from '../lib/qwenBankStatement';
-import { parsePdfWithGeminiStream } from '../lib/geminiBankStatement';
+import { parsePdfWithGeminiStream, RecognitionDiagnosticError } from '../lib/geminiBankStatement';
 import { guardParseRequest, secureResponseHeaders, validateUploadedFile } from '../lib/requestSecurity';
 
 export async function onRequestPost(context: any) {
@@ -16,6 +16,7 @@ export async function onRequestPost(context: any) {
   const invalidFile = validateUploadedFile(file);
   if (invalidFile) return invalidFile;
   const options = chunkOptions(formData, file);
+  const requestId = crypto.randomUUID();
 
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
@@ -40,7 +41,8 @@ export async function onRequestPost(context: any) {
             totalPages: options.totalPages,
             pageStart: options.pageStart,
             pageEnd: options.pageEnd,
-            parserVersion: 'gemini-3.8-flash'
+            parserVersion: 'direct-pdf-stream',
+            requestId
           });
 
           const result = await parsePdfWithGeminiStream(
@@ -125,7 +127,13 @@ export async function onRequestPost(context: any) {
           send({ type: 'complete', ...publicResult });
         }
       } catch (error: any) {
-        send({ type: 'error', message: publicErrorMessage(error) });
+        send({
+          type: 'error',
+          message: publicErrorMessage(error),
+          diagnosticCode: error instanceof RecognitionDiagnosticError ? error.diagnosticCode : 'SERVER_PARSE_ERROR',
+          diagnostics: error instanceof RecognitionDiagnosticError ? error.diagnostics : undefined,
+          requestId
+        });
       } finally {
         clearInterval(heartbeat);
         controller.close();
@@ -136,6 +144,7 @@ export async function onRequestPost(context: any) {
   return new Response(stream, {
     headers: {
       'Content-Type': 'text/event-stream; charset=utf-8',
+      'X-LawFlow-Request-Id': requestId,
       ...secureResponseHeaders
     }
   });

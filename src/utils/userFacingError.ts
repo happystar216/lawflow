@@ -4,10 +4,14 @@ export interface UserFacingError {
   impact: string;
   retryable: boolean;
   details: string;
+  diagnosticCode?: string;
+  diagnosis?: string;
 }
 
 export function importErrorForUser(error: unknown, fileName: string): UserFacingError {
   const rawDetails = error instanceof Error ? error.message : String(error || '未知错误');
+  const diagnosticCode = typeof (error as any)?.diagnosticCode === 'string' ? (error as any).diagnosticCode : undefined;
+  const diagnosis = typeof (error as any)?.diagnosis === 'string' ? (error as any).diagnosis : undefined;
   const details = rawDetails
     .replace(/Gemini(?:\s*[\w.-]+)?/gi, '识别服务')
     .replace(/Qwen(?:\s*[\w.-]+)?/gi, '识别服务')
@@ -15,8 +19,39 @@ export function importErrorForUser(error: unknown, fileName: string): UserFacing
   const base = {
     title: `未能导入“${fileName}”`,
     impact: '本次文件没有写入案件，案件中原有数据未受影响。',
-    details
+    details,
+    diagnosticCode,
+    diagnosis
   };
+
+  if (diagnosticCode === 'OUTPUT_LIMIT_REACHED') {
+    return {
+      ...base,
+      message: '识别服务的单次输出已达到长度上限，因此只返回了前半部分，完整流水尚未生成。',
+      retryable: true
+    };
+  }
+  if (diagnosticCode === 'STREAM_ENDED_BEFORE_COMPLETE') {
+    return {
+      ...base,
+      message: '长文件识别连接在最终结果生成前结束。已读取的数字只是中间进度，并未形成可导入的完整结果。',
+      retryable: true
+    };
+  }
+  if (diagnosticCode === 'STREAM_TRANSPORT_INTERRUPTED' || diagnosticCode === 'UPSTREAM_STREAM_INTERRUPTED') {
+    return {
+      ...base,
+      message: '识别数据流在完成前中断。请查看下方诊断信息确认中断位置。',
+      retryable: true
+    };
+  }
+  if (diagnosticCode === 'INVALID_STRUCTURED_OUTPUT' || diagnosticCode === 'EMPTY_MODEL_RESPONSE' || diagnosticCode === 'MODEL_STOPPED_EARLY') {
+    return {
+      ...base,
+      message: '识别服务已返回内容，但没有形成完整可用的结构化流水。',
+      retryable: true
+    };
+  }
 
   if (/75\s*MB|文件体积|413|超过.*限制/i.test(details)) {
     return {

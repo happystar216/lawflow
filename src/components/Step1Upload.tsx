@@ -31,6 +31,8 @@ interface ImportTask {
   retryable?: boolean;
   transactionCount?: number;
   accountCount?: number;
+  diagnosticCode?: string;
+  diagnosis?: string;
 }
 
 function importTaskId(file: File): string {
@@ -254,7 +256,9 @@ export const Step1Upload: React.FC<Step1Props> = ({
           message: friendly.message,
           impact: friendly.impact,
           details: friendly.details,
-          retryable: friendly.retryable
+          retryable: friendly.retryable,
+          diagnosticCode: friendly.diagnosticCode,
+          diagnosis: friendly.diagnosis
         });
       } finally {
         abortControllerRef.current = null;
@@ -484,6 +488,12 @@ export const Step1Upload: React.FC<Step1Props> = ({
                         <div className="text-xs font-semibold text-slate-900 break-all">{task.title}</div>
                         {task.message && <p className="text-[11px] text-slate-700 mt-1 leading-relaxed">{task.message}</p>}
                         {task.impact && <p className="text-[11px] text-slate-500 mt-1 leading-relaxed">{task.impact}</p>}
+                        {task.diagnosis && (
+                          <div className="mt-2 rounded-lg border border-rose-200 bg-white/80 p-2 text-[11px] leading-relaxed text-rose-900">
+                            <div className="font-semibold">具体诊断{task.diagnosticCode ? ` · ${task.diagnosticCode}` : ''}</div>
+                            <div className="mt-1">{task.diagnosis}</div>
+                          </div>
+                        )}
                         {task.details && (
                           <details className="mt-2 text-[10px] text-slate-500">
                             <summary className="cursor-pointer select-none">查看错误详情</summary>
