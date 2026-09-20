@@ -6,9 +6,9 @@ export { mergeQwenChunkResults } from './qwenResultMerger';
 const MAX_CONCURRENCY = 5;
 const INITIAL_CONCURRENCY = 3;
 const MIN_CONCURRENCY = 2;
-const SINGLE_PAGE_ATTEMPTS = 5;
+const SINGLE_PAGE_ATTEMPTS = 2;
 const REQUEST_TIMEOUT_MS = 150_000;
-const CACHE_VERSION = 'page-image-v5-document-map-selective-audit';
+const CACHE_VERSION = 'segment-pdf-v12-pdf-only-retries';
 const NORMAL_IMAGE_SCALE = 2.35;
 const HIGH_DETAIL_IMAGE_SCALE = 3;
 const DENSE_PAGE_BAND_SCALE = 3;
@@ -16,9 +16,10 @@ const DENSE_PAGE_BAND_COUNT = 4;
 const PAGE_MAP_BATCH_SIZE = 8;
 const THUMBNAIL_SCALE = 0.42;
 const MAX_GLOBAL_AUDIT_PAGES = 20;
+const SEGMENT_PDF_MAX_PAGES = 4;
 
 type PageMapType = 'TRANSACTIONS' | 'ACCOUNT_INFO' | 'DOCUMENT' | 'BLANK' | 'UNKNOWN';
-interface PageMapItem {
+export interface PageMapItem {
   page: number;
   pageType: PageMapType;
   rotation: 0 | 90 | 180 | 270;
@@ -28,6 +29,11 @@ interface PageMapItem {
   density: 'LOW' | 'MEDIUM' | 'HIGH';
   confidence: number;
   locallyBlank?: boolean;
+  segmentId?: string;
+  segmentStart?: number;
+  segmentEnd?: number;
+  segmentBankName?: string;
+  segmentAccountNumbers?: string[];
 }
 
 export interface QwenProgressInfo {
@@ -49,6 +55,7 @@ export interface ChunkParseResult {
   expectedTransactionCount?: number;
   countComplete?: boolean;
   usageTokens?: number;
+  globalAuditCompleted?: boolean;
   pageQuality?: Array<{ page: number; expectedCount: number; extractedCount: number; status: 'COMPLETE' | 'NEEDS_REVIEW'; pageType?: PageType }>;
 }
 
@@ -78,9 +85,11 @@ export async function parsePdfWithQwen(
     }
   }
 
-  // 2. 回退逐页本地渲染与独立对账
+  // 2. Long documents are mapped with tiny navigation thumbnails, then the
+  // original PDF pages are copied into small in-memory PDFs. Transaction
+  // extraction never uses rendered or rotated page images.
   onProgress?.({ currentPage: 0, totalPages: 0, percent: 0, totalTransactions: 0,
-    statusText: '正在本地逐页生成识别图片，原始 PDF 保持不变…' });
+    statusText: '正在扫描 PDF 页面并建立银行、账户分段…' });
   const renderer = await createPdfPageImageRenderer(file);
   const totalPages = renderer.totalPages;
   const cacheKey = `${CACHE_VERSION}|${options?.cacheIdentity || `${file.name}|${file.size}|${file.lastModified}`}|${totalPages}`;
@@ -89,11 +98,13 @@ export async function parsePdfWithQwen(
   const cachedByPage = new Map(cachedResults.map(result => [result.pageStart, result]));
   const uncachedPages = Array.from({ length: totalPages }, (_, index) => index + 1)
     .filter(page => !cachedByPage.has(page));
-  const pageMap = uncachedPages.length
+  const rawPageMap = uncachedPages.length
     ? await buildPageMap(uncachedPages, totalPages, renderer.renderPage, signal, statusText => onProgress?.({
         currentPage: 0, totalPages, percent: 1, totalTransactions: 0, statusText
       }))
     : new Map<number, PageMapItem>();
+  const pageMap = buildSegmentedPageMap(rawPageMap, cachedByPage, totalPages);
+  const segmentCount = new Set([...pageMap.values()].map(item => item.segmentId).filter(Boolean)).size;
 
   const requestGate = new AdaptiveRequestGate(totalPages);
   let completedPages = 0;
@@ -106,32 +117,109 @@ export async function parsePdfWithQwen(
     totalTransactions,
     statusText
   });
-  report(`共 ${totalPages} 页，正在建立高速逐页识别队列…`);
+  report(`共 ${totalPages} 页，已按银行和账户划分 ${segmentCount || 1} 个页段，正在分别识别…`);
 
   try {
-    const pages = Array.from({ length: totalPages }, (_, index) => index + 1);
-    await runWithConcurrency(pages, MAX_CONCURRENCY, async pageNumber => {
-      assertNotAborted(signal);
-      const cached = cachedByPage.get(pageNumber);
-      const mapped = pageMap.get(pageNumber);
-      const result = cached || (mapped?.locallyBlank
-        ? blankPageResult(pageNumber, totalPages, file.name)
-        : await parsePageWithFallback(
-            pageNumber, totalPages, file.name, renderer.renderPage, requestGate, signal, report, mapped
-          ));
-      if (!cached && !isHardFailedPage(result)) await writeCachedResults(cacheKey, [result]);
+    const completed = new Set<number>();
+    const acceptPage = async (result: ChunkParseResult, label: string) => {
+      if (completed.has(result.pageStart)) return;
+      completed.add(result.pageStart);
       results.push(result);
       completedPages += 1;
       totalTransactions += result.transactions.length;
-      report(`${cached ? '已恢复' : '已完成'}第 ${pageNumber} 页，累计提取 ${totalTransactions} 笔交易`);
+      if (!cachedByPage.has(result.pageStart) && !isHardFailedPage(result)) await writeCachedResults(cacheKey, [result]);
+      report(`${label}第 ${result.pageStart} 页，累计提取 ${totalTransactions} 笔交易`);
+    };
+
+    for (let pageNumber = 1; pageNumber <= totalPages; pageNumber += 1) {
+      const cached = cachedByPage.get(pageNumber);
+      if (cached) await acceptPage(cached, '已恢复');
+      else if (pageMap.get(pageNumber)?.locallyBlank) {
+        await acceptPage(blankPageResult(pageNumber, totalPages, file.name), '已跳过空白');
+      }
+    }
+
+    const pendingPages = Array.from({ length: totalPages }, (_, index) => index + 1)
+      .filter(page => !completed.has(page));
+    const segmentChunks = await createSegmentPdfChunks(file, pageMap, pendingPages, totalPages).catch(error => {
+      console.warn('无法建立内存分段 PDF:', error);
+      return [];
+    });
+    const chunkByPage = new Map<number, SegmentPdfChunk>();
+    for (const chunk of segmentChunks) {
+      for (const page of chunkPages(chunk)) chunkByPage.set(page, chunk);
+    }
+    report(`已生成 ${segmentChunks.length} 个银行/账户识别分段，正在逐段调用识别接口…`);
+
+    await runWithConcurrency(segmentChunks, 2, async chunk => {
+      assertNotAborted(signal);
+      let segmentPages: ChunkParseResult[] = [];
+      try {
+        const segmentResult = await parseSegmentPdfWithRetry(
+          chunk, pageMap, file.name, requestGate, signal, report, 3
+        );
+        segmentPages = splitSegmentResultByPage(segmentResult, chunk, pageMap, file.name);
+      } catch (error) {
+        segmentPages = chunkPages(chunk).map(page => failedPageResult(
+          page, totalPages, file.name, error instanceof Error ? error.message : String(error)
+        ));
+      }
+
+      for (const result of segmentPages) {
+        if (!completed.has(result.pageStart)) await acceptPage(result, '已完成');
+      }
     }, signal);
-    const globallyAudited = await auditSuspiciousPages(
-      results, totalPages, file.name, renderer.renderPage, requestGate, signal, report
-    );
-    return mergeVerifiedChunks(globallyAudited, file.name, totalPages);
+
+    // A defensive fallback keeps a malformed segment response from silently
+    // dropping pages from the final document.
+    for (const pageNumber of pendingPages.filter(page => !completed.has(page))) {
+      const result = failedPageResult(pageNumber, totalPages, file.name, '未找到对应的 PDF 分段');
+      await acceptPage(result, '已补识别');
+    }
+
+    const recoveryCandidates = results.filter(result => needsFinalPageRecovery(result, pageMap.get(result.pageStart)));
+    if (recoveryCandidates.length) {
+      const recoveryChunks = [...new Set(recoveryCandidates.map(result => chunkByPage.get(result.pageStart)).filter(Boolean))] as SegmentPdfChunk[];
+      report(`仍有 ${recoveryCandidates.length} 个疑似漏页或服务失败页，正在用原 PDF 分段低并发补偿…`);
+      await abortableDelay(5_000, signal);
+      const recoveryGate = new AdaptiveRequestGate(totalPages);
+      await runWithConcurrency(recoveryChunks, 1, async chunk => {
+        let recoveredSegment: ChunkParseResult;
+        try {
+          recoveredSegment = await parseSegmentPdfWithRetry(
+            chunk, pageMap, file.name, recoveryGate, signal, report, 2
+          );
+        } catch {
+          return;
+        }
+        for (const recovered of splitSegmentResultByPage(recoveredSegment, chunk, pageMap, file.name)) {
+          const index = results.findIndex(item => item.pageStart === recovered.pageStart);
+          if (index < 0) continue;
+          const existing = results[index];
+          if (!isHardFailedPage(existing) && qualityScore(recovered) <= qualityScore(existing)) continue;
+          results[index] = recovered;
+          totalTransactions += recovered.transactions.length - existing.transactions.length;
+          if (!isHardFailedPage(recovered)) await writeCachedResults(cacheKey, [recovered]);
+          report(`已补偿完成第 ${recovered.pageStart} 页，累计提取 ${totalTransactions} 笔交易`);
+        }
+      }, signal);
+    }
+    const finalResults = [...results].sort((a, b) => a.pageStart - b.pageStart);
+    await writeCachedResults(cacheKey, finalResults.filter(result => !isHardFailedPage(result)));
+    return mergeVerifiedChunks(finalResults, file.name, totalPages);
   } finally {
     await renderer.destroy();
   }
+}
+
+function needsFinalPageRecovery(result: ChunkParseResult, mapped?: PageMapItem): boolean {
+  // A partially extracted page has already been retried as its original PDF
+  // segment. Keep its count mismatch visible for focused human completion
+  // instead of issuing another expensive whole-segment request.
+  if (result.transactions.length > 0) return false;
+  if (result.warnings?.some(warning => warning.includes('连续识别失败'))) return true;
+  if (!mapped) return false;
+  return mapped.pageType === 'TRANSACTIONS' || mapped.density === 'HIGH';
 }
 
 async function buildPageMap(
@@ -186,6 +274,387 @@ async function buildPageMap(
   }, signal);
   for (const page of pages) if (!result.has(page)) result.set(page, unknownPageMap(page));
   return result;
+}
+
+export interface VirtualDocumentSegment {
+  id: string;
+  pageStart: number;
+  pageEnd: number;
+  pages: number[];
+  bankName: string;
+  accountNumbers: string[];
+  rotation: 0 | 90 | 180 | 270;
+}
+
+export interface SegmentPdfChunk extends PdfPageImage {
+  segmentId: string;
+  bankName: string;
+  accountNumbers: string[];
+  pages: number[];
+}
+
+export function buildSegmentedPageMap(
+  rawPageMap: Map<number, PageMapItem>,
+  cachedByPage: Map<number, ChunkParseResult>,
+  totalPages: number
+): Map<number, PageMapItem> {
+  const mappedPages = new Set(rawPageMap.keys());
+  const combined = new Map<number, PageMapItem>();
+  for (let page = 1; page <= totalPages; page += 1) {
+    const mapped = rawPageMap.get(page);
+    if (mapped) {
+      combined.set(page, { ...mapped });
+      continue;
+    }
+    const cached = cachedByPage.get(page);
+    combined.set(page, cached ? pageMapFromCachedResult(cached, page) : unknownPageMap(page));
+  }
+
+  const segments = buildVirtualDocumentSegments(combined);
+  for (const segment of segments) {
+    const rotationVotes = new Map<0 | 90 | 180 | 270, number>();
+    for (const page of segment.pages) {
+      if (!mappedPages.has(page)) continue;
+      const item = combined.get(page);
+      if (!item || item.pageType === 'BLANK' || item.confidence < 0.55) continue;
+      rotationVotes.set(item.rotation, (rotationVotes.get(item.rotation) || 0) + 1);
+    }
+    const dominantRotation = [...rotationVotes.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? segment.rotation;
+    for (const page of segment.pages) {
+      const item = combined.get(page)!;
+      combined.set(page, {
+        ...item,
+        rotation: item.confidence >= 0.55 && mappedPages.has(page) ? item.rotation : dominantRotation,
+        segmentId: segment.id,
+        segmentStart: segment.pageStart,
+        segmentEnd: segment.pageEnd,
+        segmentBankName: segment.bankName,
+        segmentAccountNumbers: segment.accountNumbers
+      });
+    }
+  }
+  return combined;
+}
+
+export function buildVirtualDocumentSegments(pageMap: Map<number, PageMapItem>): VirtualDocumentSegment[] {
+  const items = [...pageMap.values()].sort((a, b) => a.page - b.page);
+  const segments: VirtualDocumentSegment[] = [];
+  let current: VirtualDocumentSegment | undefined;
+  let currentIdentity = '';
+
+  const startSegment = (item: PageMapItem, identity: string) => {
+    const accounts = reliableMapAccounts(item);
+    const bankName = cleanMapIdentity(item.bankName);
+    current = {
+      id: `SEG_${item.page}_${stableSegmentHash(`${identity || 'unassigned'}|${item.page}`)}`,
+      pageStart: item.page,
+      pageEnd: item.page,
+      pages: [item.page],
+      bankName,
+      accountNumbers: accounts,
+      rotation: item.rotation
+    };
+    currentIdentity = identity;
+    segments.push(current);
+  };
+
+  for (const item of items) {
+    const identity = pageMapIdentity(item);
+    if (!current) {
+      startSegment(item, identity);
+      continue;
+    }
+    const shouldSplit = Boolean(identity && currentIdentity && identity !== currentIdentity);
+    if (shouldSplit) {
+      startSegment(item, identity);
+      continue;
+    }
+    current.pages.push(item.page);
+    current.pageEnd = item.page;
+    if (!currentIdentity && identity) {
+      currentIdentity = identity;
+      current.bankName = cleanMapIdentity(item.bankName);
+      current.accountNumbers = reliableMapAccounts(item);
+    }
+  }
+  return segments;
+}
+
+async function createSegmentPdfChunks(
+  sourceFile: File,
+  pageMap: Map<number, PageMapItem>,
+  pendingPages: number[],
+  totalPages: number
+): Promise<SegmentPdfChunk[]> {
+  if (!pendingPages.length) return [];
+  const { PDFDocument } = await import('pdf-lib');
+  const source = await PDFDocument.load(await sourceFile.arrayBuffer());
+  const pending = new Set(pendingPages);
+  const chunks: SegmentPdfChunk[] = [];
+
+  for (const segment of buildVirtualDocumentSegments(pageMap)) {
+    const runs = buildSegmentPageRuns(segment.pages, pending, SEGMENT_PDF_MAX_PAGES);
+    for (const [partIndex, run] of runs.entries()) {
+      const document = await PDFDocument.create();
+      const copiedPages = await document.copyPages(source, run.map(page => page - 1));
+      copiedPages.forEach(page => document.addPage(page));
+      const bytes = await document.save({ useObjectStreams: true });
+      const fileBytes = Uint8Array.from(bytes).buffer;
+      const bankLabel = safeSegmentFileLabel(segment.bankName || '待确认银行');
+      const accountLabel = safeSegmentFileLabel(segment.accountNumbers.join('-') || '待确认账号');
+      const pageStart = run[0];
+      const pageEnd = run.at(-1)!;
+      chunks.push({
+        id: `${segment.id}-PART${partIndex + 1}-P${pageStart}-${pageEnd}`,
+        segmentId: segment.id,
+        bankName: segment.bankName,
+        accountNumbers: segment.accountNumbers,
+        pages: run,
+        file: new File([fileBytes], `${bankLabel}_${accountLabel}_原第${pageStart}-${pageEnd}页.pdf`, { type: 'application/pdf' }),
+        pageStart,
+        pageEnd,
+        totalPages,
+        rotation: segment.rotation,
+        scale: 1
+      });
+    }
+  }
+  return chunks;
+}
+
+export function buildSegmentPageRuns(pages: number[], pending: Set<number>, maxPages = SEGMENT_PDF_MAX_PAGES): number[][] {
+  const firstPendingIndex = pages.findIndex(page => pending.has(page));
+  if (firstPendingIndex < 0) return [];
+  const runs: number[][] = [];
+  // Keep blank backs and already-cached neighbours inside the in-memory PDF.
+  // They preserve the original page sequence and prevent a duplex statement
+  // from degenerating back into one request per printed front page.
+  for (let index = firstPendingIndex; index < pages.length; index += maxPages) {
+    const run = pages.slice(index, index + maxPages);
+    if (run.some(page => pending.has(page))) runs.push(run);
+  }
+  return runs;
+}
+
+function safeSegmentFileLabel(value: string): string {
+  return value.replace(/[\\/:*?"<>|\s]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 48) || '未确认';
+}
+
+function segmentChunkAuditHint(chunk: SegmentPdfChunk, pageMap: Map<number, PageMapItem>): string {
+  const pageDetails = chunk.pages.map(page => {
+    const item = pageMap.get(page);
+    return `原第${page}页:${item?.pageType || 'UNKNOWN'}/${item?.density || 'LOW'}`;
+  }).join('；');
+  return `这是已按银行和本方账户隔离的独立分段。银行：${chunk.bankName || '未确认'}；本方账号：${chunk.accountNumbers.join('、') || '未确认'}；原文件页码 ${chunk.pageStart}-${chunk.pageEnd}。当前 PDF 内第1页对应原文件第${chunk.pageStart}页。不得引入其他分段的银行或账号。页面导航：${pageDetails}`;
+}
+
+async function parseSegmentPdfWithRetry(
+  chunk: SegmentPdfChunk,
+  pageMap: Map<number, PageMapItem>,
+  sourceFileName: string,
+  requestGate: AdaptiveRequestGate,
+  signal: AbortSignal | undefined,
+  report: (status: string) => void,
+  maxAttempts: number
+): Promise<ChunkParseResult> {
+  let best: ChunkParseResult | undefined;
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    if (attempt > 0 && !requestGate.takeRetry()) break;
+    let permit: AdaptivePermit | undefined;
+    try {
+      assertNotAborted(signal);
+      if (attempt > 0) {
+        report(`原第 ${chunk.pageStart}-${chunk.pageEnd} 页 PDF 分段正在进行第 ${attempt + 1} 次识别…`);
+      }
+      permit = await requestGate.acquire(signal);
+      const candidate = await requestChunkWithContext(chunk, sourceFileName, signal, {
+        auditHint: segmentChunkAuditHint(chunk, pageMap),
+        verificationMode: attempt === 0 ? 'skip' : 'always'
+      });
+      permit.success(candidate.usageTokens || 0);
+      permit = undefined;
+      if (!best || qualityScore(candidate) > qualityScore(best)) best = candidate;
+
+      const pages = splitSegmentResultByPage(candidate, chunk, pageMap, sourceFileName);
+      if (!pages.some(page => shouldRetrySegmentPdfPage(page, pageMap.get(page.pageStart)))) return candidate;
+      if (attempt < maxAttempts - 1) await abortableDelay(1_200 * (attempt + 1), signal);
+    } catch (error) {
+      lastError = error;
+      const transient = isTransientWorkerError(error);
+      permit?.failure(transient);
+      permit = undefined;
+      assertNotAborted(signal);
+      if (attempt < maxAttempts - 1) {
+        const delay = transient ? Math.min(20_000, 4_000 * 2 ** attempt) : 1_500 * (attempt + 1);
+        await abortableDelay(delay, signal);
+      }
+    }
+  }
+
+  if (best) return best;
+  throw lastError instanceof Error ? lastError : new Error(String(lastError || 'PDF 分段识别失败'));
+}
+
+function shouldRetrySegmentPdfPage(result: ChunkParseResult, mapped?: PageMapItem): boolean {
+  if (isHardFailedPage(result)) return true;
+  if (mapped?.pageType === 'TRANSACTIONS' && result.transactions.length === 0) return true;
+  const expected = result.expectedTransactionCount ?? result.pageQuality?.[0]?.expectedCount;
+  return expected !== undefined && expected > result.transactions.length;
+}
+
+function chunkPages(chunk: SegmentPdfChunk): number[] {
+  return chunk.pages.length ? chunk.pages : Array.from(
+    { length: chunk.pageEnd - chunk.pageStart + 1 }, (_, index) => chunk.pageStart + index
+  );
+}
+
+export function splitSegmentResultByPage(
+  segmentResult: ChunkParseResult,
+  chunk: SegmentPdfChunk,
+  pageMap: Map<number, PageMapItem>,
+  sourceFileName: string
+): ChunkParseResult[] {
+  const globalPages = new Set(chunkPages(chunk));
+  const usesLocalPageNumbers = segmentResult.transactions.length > 0
+    && !segmentResult.transactions.some(transaction => globalPages.has(Number(transaction.rawPageNumber)))
+    && segmentResult.transactions.every(transaction => {
+      const page = Number(transaction.rawPageNumber);
+      return Number.isInteger(page) && page >= 1 && page <= chunk.pages.length;
+    });
+  const normalizedTransactions = segmentResult.transactions.map(transaction => ({
+    ...transaction,
+    rawPageNumber: usesLocalPageNumbers
+      ? chunk.pageStart + Number(transaction.rawPageNumber) - 1
+      : transaction.rawPageNumber,
+    rawSourceFile: sourceFileName,
+    sourceFileName
+  }));
+  return chunkPages(chunk).map(page => {
+    const transactions = normalizedTransactions.filter(transaction => transaction.rawPageNumber === page)
+      .sort(compareSourceOrder);
+    const localPage = page - chunk.pageStart + 1;
+    const quality = segmentResult.pageQuality?.find(item => item.page === page || (usesLocalPageNumbers && item.page === localPage));
+    const expected = quality?.expectedCount ?? transactions.length;
+    const dates = transactions.map(transaction => transaction.transactionDate).filter(Boolean).sort();
+    const balances = transactions.filter(transaction => transaction.balanceAvailable !== false).map(transaction => transaction.balance);
+    const first = transactions[0];
+    const mapped = pageMap.get(page);
+    const pageWarnings = (segmentResult.warnings || [])
+      .map(warning => remapSegmentWarning(warning, chunk, usesLocalPageNumbers))
+      .filter(warning => warning.includes(`第 ${page} 页`) || !/第\s*\d+\s*页/.test(warning));
+    const account: BankAccount = {
+      ...segmentResult.account,
+      fileName: sourceFileName,
+      accountNumber: first?.accountNumber || mapped?.accountNumbers[0] || segmentResult.account.accountNumber,
+      accountName: first?.accountName || mapped?.accountName || segmentResult.account.accountName,
+      bankName: first?.bankName || mapped?.bankName || segmentResult.account.bankName,
+      totalIn: transactions.filter(item => item.direction === 'IN').reduce((sum, item) => sum + item.amount, 0),
+      totalOut: transactions.filter(item => item.direction === 'OUT').reduce((sum, item) => sum + item.amount, 0),
+      transactionCount: transactions.length,
+      startDate: dates[0] || '',
+      endDate: dates.at(-1) || '',
+      startBalance: balances[0] ?? 0,
+      endBalance: balances.at(-1) ?? 0,
+      balanceAvailable: balances.length > 0,
+      coveredPages: [page],
+      totalPages: chunk.totalPages,
+      parseWarnings: pageWarnings
+    };
+    return {
+      account,
+      transactions,
+      warnings: pageWarnings,
+      coveredPages: [page],
+      pageStart: page,
+      pageEnd: page,
+      totalPages: chunk.totalPages,
+      expectedTransactionCount: expected,
+      countComplete: quality ? quality.status === 'COMPLETE' : true,
+      usageTokens: page === chunk.pageStart ? segmentResult.usageTokens : 0,
+      pageQuality: [{
+        page,
+        expectedCount: expected,
+        extractedCount: transactions.length,
+        status: quality?.status || 'COMPLETE',
+        pageType: quality?.pageType || mapped?.pageType || (transactions.length ? 'TRANSACTIONS' : 'UNKNOWN')
+      }]
+    };
+  });
+}
+
+function remapSegmentWarning(warning: string, chunk: SegmentPdfChunk, usesLocalPageNumbers: boolean): string {
+  if (!usesLocalPageNumbers) return warning;
+  return warning.replace(/第\s*(\d+)\s*页/g, (match, rawPage: string) => {
+    const localPage = Number(rawPage);
+    return localPage >= 1 && localPage <= chunk.pages.length
+      ? `第 ${chunk.pageStart + localPage - 1} 页`
+      : match;
+  });
+}
+
+function shouldRefineSegmentPage(result: ChunkParseResult, mapped?: PageMapItem): boolean {
+  const quality = result.pageQuality?.[0];
+  if (isHardFailedPage(result) || quality?.status === 'NEEDS_REVIEW') return true;
+  if (result.transactions.some(transaction => transaction.dataQualityIssues?.length
+    || transaction.direction === 'UNKNOWN' || transaction.amount <= 0 || !transaction.transactionDate)) return true;
+  if (mapped?.pageType === 'TRANSACTIONS' && result.transactions.length === 0) return true;
+  return false;
+}
+
+function pageMapFromCachedResult(result: ChunkParseResult, page: number): PageMapItem {
+  const transactionIdentities = new Map<string, { count: number; bankName: string; accountName: string }>();
+  for (const transaction of result.transactions) {
+    const account = cleanMapIdentity(transaction.accountNumber);
+    if (!account || account.startsWith('待核验')) continue;
+    const current = transactionIdentities.get(account) || { count: 0, bankName: '', accountName: '' };
+    current.count += 1;
+    current.bankName ||= cleanMapIdentity(transaction.bankName);
+    current.accountName ||= cleanMapIdentity(transaction.accountName);
+    transactionIdentities.set(account, current);
+  }
+  const dominant = [...transactionIdentities.entries()].sort((a, b) => b[1].count - a[1].count)[0];
+  const fallbackAccount = cleanMapIdentity(result.account.accountNumber);
+  const accountNumbers = dominant ? [dominant[0]] : fallbackAccount && !fallbackAccount.startsWith('待核验') ? [fallbackAccount] : [];
+  return {
+    page,
+    pageType: result.pageQuality?.[0]?.pageType || (result.transactions.length ? 'TRANSACTIONS' : 'UNKNOWN'),
+    rotation: 0,
+    bankName: dominant?.[1].bankName || cleanMapIdentity(result.account.bankName),
+    accountName: dominant?.[1].accountName || cleanMapIdentity(result.account.accountName),
+    accountNumbers,
+    density: result.transactions.length >= 20 ? 'HIGH' : result.transactions.length >= 8 ? 'MEDIUM' : 'LOW',
+    confidence: accountNumbers.length ? 0.8 : 0.2,
+    locallyBlank: result.pageQuality?.[0]?.pageType === 'BLANK' && result.countComplete === true
+  };
+}
+
+function pageMapIdentity(item: PageMapItem): string {
+  if (item.pageType === 'BLANK') return '';
+  const bank = cleanMapIdentity(item.bankName).toLocaleLowerCase();
+  const accounts = reliableMapAccounts(item);
+  if (accounts.length > 1) return `meta|${bank}|${accounts.sort().join(',')}`;
+  if (accounts.length === 1) return `account|${bank}|${accounts[0]}`;
+  return bank ? `bank|${bank}` : '';
+}
+
+function reliableMapAccounts(item: PageMapItem): string[] {
+  return [...new Set((item.accountNumbers || []).map(cleanMapIdentity)
+    .filter(value => value && !value.startsWith('待核验')))];
+}
+
+function cleanMapIdentity(value: string | undefined): string {
+  return String(value || '').replace(/[\s\-_—–·•]/g, '').trim();
+}
+
+function stableSegmentHash(value: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36).toUpperCase();
 }
 
 async function analyzeThumbnailBlankness(file: File): Promise<'DEFINITE' | 'LIKELY' | 'CONTENT'> {
@@ -298,8 +767,14 @@ function uniqueRenderVariants<T extends { rotation: number; scale: number }>(var
 }
 
 function pageMapAuditHint(item?: PageMapItem): string {
-  if (!item || item.confidence < 0.55) return '';
-  return `缩略图页面地图（仅作导航，具体字段仍以高清目标页为准）：页面类型 ${item.pageType}；建议顺时针旋转 ${item.rotation} 度；银行 ${item.bankName || '未确认'}；户名 ${item.accountName || '未确认'}；本方账号 ${item.accountNumbers.join('、') || '未确认'}；表格密度 ${item.density}。不得把导航结果当作不可更改的识别事实。`;
+  if (!item) return '';
+  const segment = item.segmentId
+    ? `本页属于原文件第 ${item.segmentStart}-${item.segmentEnd} 页的同一银行/账户页段；页段银行 ${item.segmentBankName || '未确认'}；页段账号 ${(item.segmentAccountNumbers || []).join('、') || '未确认'}。`
+    : '';
+  const pageDetails = item.confidence >= 0.55
+    ? `页面类型 ${item.pageType}；建议顺时针旋转 ${item.rotation} 度；银行 ${item.bankName || '未确认'}；户名 ${item.accountName || '未确认'}；本方账号 ${item.accountNumbers.join('、') || '未确认'}；表格密度 ${item.density}。`
+    : `本页单独分类把握较低，使用页段身份辅助读取，但仍以本页高清内容为准。`;
+  return `缩略图页面地图（仅作导航，具体字段仍以高清目标页为准）：${segment}${pageDetails}不得把导航结果当作不可更改的识别事实；不得把相邻页段的账户带入本页。`;
 }
 
 async function parsePageWithFallback(
@@ -315,14 +790,10 @@ async function parsePageWithFallback(
   let lastError: unknown;
   let bestCandidate: ChunkParseResult | undefined;
   const preferredRotation = pageMap?.rotation || 0;
+  const fallbackRotation = oppositeFallbackRotation(preferredRotation);
   const variants = uniqueRenderVariants([
     { rotation: preferredRotation, scale: NORMAL_IMAGE_SCALE },
-    { rotation: preferredRotation, scale: HIGH_DETAIL_IMAGE_SCALE },
-    { rotation: 0, scale: NORMAL_IMAGE_SCALE },
-    { rotation: 0, scale: HIGH_DETAIL_IMAGE_SCALE },
-    { rotation: 90, scale: NORMAL_IMAGE_SCALE },
-    { rotation: 270, scale: NORMAL_IMAGE_SCALE },
-    { rotation: 180, scale: NORMAL_IMAGE_SCALE }
+    { rotation: fallbackRotation, scale: HIGH_DETAIL_IMAGE_SCALE }
   ]).slice(0, SINGLE_PAGE_ATTEMPTS);
 
   for (let attempt = 0; attempt < variants.length; attempt += 1) {
@@ -342,7 +813,7 @@ async function parsePageWithFallback(
       if (attempt < 2 && shouldUsePageBands(candidate)) {
         report(`第 ${pageNumber} 页交易行较密或疑似漏行，正在分段读取…`);
         const detailedImage = variant.scale >= DENSE_PAGE_BAND_SCALE
-          ? image : await renderPage(pageNumber, 0, DENSE_PAGE_BAND_SCALE);
+          ? image : await renderPage(pageNumber, variant.rotation, DENSE_PAGE_BAND_SCALE);
         const bandCandidate = await parsePageBands(detailedImage, candidate, sourceFileName, signal);
         if (bandCandidate && (!bestCandidate || qualityScore(bandCandidate) > qualityScore(bestCandidate))) {
           bestCandidate = bandCandidate;
@@ -387,6 +858,13 @@ async function parsePageWithFallback(
 
   const message = lastError instanceof Error ? lastError.message : String(lastError || '页面无法识别');
   return failedPageResult(pageNumber, totalPages, sourceFileName, message);
+}
+
+function oppositeFallbackRotation(rotation: 0 | 90 | 180 | 270): 0 | 90 | 180 | 270 {
+  if (rotation === 90) return 270;
+  if (rotation === 270) return 90;
+  if (rotation === 180) return 0;
+  return 90;
 }
 
 export function finalizeBandResult(result: ChunkParseResult, pageNumber: number): ChunkParseResult {
@@ -659,7 +1137,12 @@ function failedPageResult(pageNumber: number, totalPages: number, sourceFileName
 }
 
 function isHardFailedPage(result: ChunkParseResult): boolean {
-  return !result.transactions.length && Boolean(result.warnings?.some(warning => warning.includes('连续识别失败')));
+  if (result.transactions.length) return false;
+  const expected = result.expectedTransactionCount ?? result.pageQuality?.[0]?.expectedCount ?? 0;
+  const pageType = result.pageQuality?.[0]?.pageType;
+  return expected > 0
+    || pageType === 'TRANSACTIONS'
+    || Boolean(result.warnings?.some(warning => warning.includes('连续识别失败')));
 }
 
 async function auditSuspiciousPages(
@@ -716,7 +1199,14 @@ async function auditSuspiciousPages(
         auditHint: JSON.stringify({ reasons: item.reasons, transactions: existing.transactions, warnings: existing.warnings || [] }),
         verificationMode: 'always'
       });
-      if (preferContextAudit(existing, audited)) resultByPage.set(item.page, audited);
+      const preferred = preferContextAudit(existing, audited) ? audited : existing;
+      resultByPage.set(item.page, {
+        ...preferred,
+        globalAuditCompleted: true,
+        warnings: preferred === existing && audited.transactions.length < existing.transactions.length
+          ? [...new Set([...(existing.warnings || []), `第 ${item.page} 页跨页复核返回的明细少于现有结果，系统已保留较完整版本`])]
+          : preferred.warnings
+      });
       permit.success(audited.usageTokens || 0);
       permit = undefined;
       report(`第 ${item.page} 页已完成跨页与余额复核`);
@@ -736,7 +1226,9 @@ async function auditSuspiciousPages(
 
 function suspiciousPageScores(results: ChunkParseResult[]): Array<{ page: number; score: number; reasons: string[] }> {
   const output = new Map<number, { page: number; score: number; reasons: string[] }>();
+  const completedAudits = new Set(results.filter(result => result.globalAuditCompleted).map(result => result.pageStart));
   const add = (page: number, score: number, reason: string) => {
+    if (completedAudits.has(page)) return;
     const current = output.get(page) || { page, score: 0, reasons: [] };
     current.score += score;
     current.reasons.push(reason);
@@ -750,6 +1242,10 @@ function suspiciousPageScores(results: ChunkParseResult[]): Array<{ page: number
     if (nonTransaction && !result.transactions.length) continue;
     if (result.countComplete === false || result.pageQuality?.some(item => item.status === 'NEEDS_REVIEW')) {
       add(page, 5, '页面清点数量与逐笔结果不一致');
+    }
+    const expected = result.expectedTransactionCount ?? result.pageQuality?.[0]?.expectedCount ?? 0;
+    if (expected > 0 && result.transactions.length === 0) {
+      add(page, 50, `独立清点存在 ${expected} 笔但逐笔结果为零，禁止按空白页处理`);
     }
     const invalid = result.transactions.filter(transaction => transaction.direction === 'UNKNOWN'
       || transaction.amount <= 0 || !transaction.transactionDate || (transaction.extractionConfidence ?? 1) < 0.8);
@@ -816,11 +1312,12 @@ function dominantResultIdentity(result: ChunkParseResult): string {
   return [...counts].sort((a, b) => b[1] - a[1])[0]?.[0] || '';
 }
 
-function preferContextAudit(existing: ChunkParseResult, audited: ChunkParseResult): boolean {
-  if (!audited.transactions.length && existing.transactions.length) {
-    const type = audited.pageQuality?.[0]?.pageType;
-    return type === 'ACCOUNT_INFO' || type === 'DOCUMENT' || type === 'BLANK';
-  }
+export function preferContextAudit(existing: ChunkParseResult, audited: ChunkParseResult): boolean {
+  if (audited.transactions.length < existing.transactions.length) return false;
+  const existingIdentity = dominantResultIdentity(existing);
+  const auditedIdentity = dominantResultIdentity(audited);
+  if (existingIdentity && auditedIdentity && existingIdentity !== auditedIdentity) return false;
+  if (audited.transactions.length > existing.transactions.length) return true;
   const score = (result: ChunkParseResult) => {
     const invalid = result.transactions.filter(transaction => transaction.direction === 'UNKNOWN'
       || transaction.amount <= 0 || !transaction.transactionDate).length;
@@ -829,7 +1326,7 @@ function preferContextAudit(existing: ChunkParseResult, audited: ChunkParseResul
     const countGap = Math.abs((result.pageQuality?.[0]?.expectedCount ?? result.transactions.length) - result.transactions.length);
     return invalid * 1000 + columnShift * 5000 + countGap * 500 + continuity.currentError - continuity.currentExact * 10;
   };
-  return score(audited) < score(existing) || audited.transactions.length > existing.transactions.length;
+  return score(audited) < score(existing);
 }
 
 function looksLikeAmountBalanceColumnShift(transactions: StandardTransaction[]): boolean {

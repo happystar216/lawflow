@@ -384,7 +384,8 @@ function normalizeResult(
     || options.independentPageType === 'DOCUMENT' || options.independentPageType === 'BLANK';
   if (!isPageSlice && options.independentCount === undefined && !independentlyNonTransaction
     && !options.verificationSkippedByPolicy) warnings.push(`第 ${options.pageStart} 页未完成独立行数复核，需对照原件确认`);
-  else if (!isPageSlice && !independentlyNonTransaction && options.independentCount !== transactions.length) warnings.push(`第 ${options.pageStart} 页独立清点为 ${options.independentCount} 笔，逐笔明细为 ${transactions.length} 笔，需对照原件确认`);
+  else if (!isPageSlice && !independentlyNonTransaction && options.independentCount !== undefined
+    && options.independentCount !== transactions.length) warnings.push(`第 ${options.pageStart} 页独立清点为 ${options.independentCount} 笔，逐笔明细为 ${transactions.length} 笔，需对照原件确认`);
   const hasInvalidStructuredRow = transactions.some(transaction => transaction.dataQualityIssues.length > 0
     || transaction.extractionConfidence < 0.8);
   if (!isPageSlice && options.independentReadability === 'UNCERTAIN'

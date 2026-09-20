@@ -48,12 +48,16 @@ export function mergeQwenChunkResults(
   const reconciled = reconcileGlobalTransactions(inheritedTransactions);
   const transactions = reconciled.transactions;
   const pageQualityWarnings = results.flatMap(result => result.pageQuality || [])
-    .filter(page => page.status === 'NEEDS_REVIEW')
+    .filter(page => page.status === 'NEEDS_REVIEW' && Number.isFinite(page.expectedCount))
     .map(page => `第 ${page.page} 页页面计数为 ${page.expectedCount} 笔，逐笔提取为 ${page.extractedCount} 笔；两者尚未核实，请对照原件确认`);
+  const invalidCountWarnings = results.flatMap(result => result.pageQuality || [])
+    .filter(page => page.status === 'NEEDS_REVIEW' && !Number.isFinite(page.expectedCount))
+    .map(page => `第 ${page.page} 页未能完成独立行数清点，当前已提取 ${page.extractedCount} 笔；请仅在发现日期、金额或余额异常时对照原件核对`);
   const warnings = [...new Set([
-    ...results.flatMap(result => result.warnings || []),
+    ...results.flatMap(result => result.warnings || []).filter(warning => !/\bundefined\b/i.test(warning)),
     ...reconciled.warnings,
     ...pageQualityWarnings,
+    ...invalidCountWarnings,
     ...(!transactions.length ? ['整份文件未提取到交易明细，请逐页对照原件确认是否为空白页、非流水页或读取失败'] : [])
   ])];
   const accounts = buildAccountSummaries(transactions, results, warnings, sourceFileName, totalPages);

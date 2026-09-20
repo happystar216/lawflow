@@ -29,6 +29,7 @@ interface DebugRun {
   startedAt?: string;
   completedAt?: string;
   target: string;
+  apiTarget?: string;
   respondentName: string;
   fileNames: string[];
   filePaths: string[];
@@ -90,6 +91,8 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
   if (url.pathname === '/debug/runs' && method === 'POST') {
     const form = await readMultipartForm(request);
     const target = validateTarget(textField(form, 'target') || DEFAULT_TARGET);
+    const apiTargetText = textField(form, 'apiTarget');
+    const apiTarget = apiTargetText ? validateTarget(apiTargetText) : undefined;
     const respondentName = textField(form, 'respondentName') || '自动化调试案件';
     const files = [...form.entries()]
       .filter(([key, value]) => (key === 'file' || key === 'files') && typeof value !== 'string')
@@ -123,6 +126,7 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
       status: 'QUEUED',
       createdAt: new Date().toISOString(),
       target,
+      apiTarget,
       respondentName,
       fileNames,
       filePaths,
@@ -201,10 +205,15 @@ async function executeRun(run: DebugRun): Promise<void> {
   let context: BrowserContext | undefined;
   let activePage: Page | undefined;
   let monitor: NodeJS.Timeout | undefined;
+  const browserProfileDir = join(BROWSER_PROFILE_ROOT, run.id);
   const diagnostics: BrowserDiagnostic[] = [];
   try {
     const executablePath = await findChromeExecutable();
-    context = await chromium.launchPersistentContext(BROWSER_PROFILE_ROOT, {
+    // Every run gets an isolated profile. A killed long-running import can
+    // otherwise leave Chrome singleton locks behind and make every later
+    // automated reproduction fail before the upload even starts.
+    await mkdir(browserProfileDir, { recursive: true });
+    context = await chromium.launchPersistentContext(browserProfileDir, {
       executablePath,
       headless: process.env.LAWFLOW_DEBUG_HEADFUL === '1' ? false : true,
       args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
@@ -213,6 +222,17 @@ async function executeRun(run: DebugRun): Promise<void> {
     const page = context.pages()[0] || await context.newPage();
     activePage = page;
     installDiagnostics(page, diagnostics);
+    if (run.apiTarget) await installApiProxy(page, run.apiTarget, diagnostics);
+    page.on('dialog', dialog => {
+      // The evidence-review screen asks whether unresolved items should be
+      // carried forward. Automation must preserve them, never impersonate a
+      // lawyer's confirmation, so accept only the explicit carry-forward flow.
+      if (dialog.type() === 'confirm' && dialog.message().includes('作为数据限制保留')) {
+        void dialog.accept();
+      } else {
+        void dialog.dismiss();
+      }
+    });
     await seedAutomationUser(page, run.id);
 
     const targetUrl = new URL(run.target);
@@ -257,7 +277,7 @@ async function executeRun(run: DebugRun): Promise<void> {
     const uploadSnapshot = await page.evaluate(() => (window as any).__LAWFLOW_AUTOMATION__ || null) as any;
     if ((uploadSnapshot?.app?.transactions?.length || 0) > 0) {
       if (!await clickButtonContaining(page, '下一步：核对原件')) throw new Error('识别完成后没有找到“下一步：核对原件”按钮');
-      await page.waitForFunction(() => (window as any).__LAWFLOW_AUTOMATION__?.app?.currentStep === 2, undefined, { timeout: 30_000 });
+      await waitForWorkflowStep(page, 2, '银行流水数据准确性复核');
       await new Promise(resolve => setTimeout(resolve, 1000));
       const reviewText = await page.evaluate(() => document.body.innerText.slice(0, 100_000));
       await page.screenshot({ path: join(run.outputDir, 'evidence-review.png'), fullPage: true });
@@ -268,9 +288,9 @@ async function executeRun(run: DebugRun): Promise<void> {
       const continued = await clickButtonContaining(page, '保留未处理事项并继续')
         || await clickButtonContaining(page, '完成核对，进入下一步');
       if (continued) {
-        await page.waitForFunction(() => (window as any).__LAWFLOW_AUTOMATION__?.app?.currentStep === 3, undefined, { timeout: 30_000 });
+        await waitForWorkflowStep(page, 3, '账户归属认领、时间轴对齐与财产申报录入');
         if (await clickButtonContaining(page, '进入步骤四：运行核心算法计算')) {
-          await page.waitForFunction(() => (window as any).__LAWFLOW_AUTOMATION__?.app?.currentStep === 4, undefined, { timeout: 30_000 });
+          await waitForWorkflowStep(page, 4, '资金流向与待核查线索分析');
           await page.waitForFunction(() => Boolean((window as any).__LAWFLOW_AUTOMATION__?.app?.evaluationReport), undefined, { timeout: 60_000 });
           await new Promise(resolve => setTimeout(resolve, 1000));
           const analysisText = await page.evaluate(() => document.body.innerText.slice(0, 100_000));
@@ -287,6 +307,7 @@ async function executeRun(run: DebugRun): Promise<void> {
     run.result = {
       runId: run.id,
       target: run.target,
+      apiTarget: run.apiTarget,
       startedAt: run.startedAt,
       completedAt: new Date().toISOString(),
       files: run.fileNames,
@@ -325,8 +346,53 @@ async function executeRun(run: DebugRun): Promise<void> {
   } finally {
     if (monitor) clearInterval(monitor);
     await context?.close().catch(() => undefined);
+    await rm(browserProfileDir, { recursive: true, force: true }).catch(() => undefined);
     await persistRun(run);
   }
+}
+
+async function waitForWorkflowStep(page: Page, step: number, marker: string): Promise<void> {
+  await page.waitForFunction((marker: string) => document.body.innerText.includes(marker), marker, { timeout: 30_000, polling: 250 });
+}
+
+async function installApiProxy(page: Page, apiTarget: string, diagnostics: BrowserDiagnostic[]): Promise<void> {
+  const apiBase = new URL(apiTarget);
+  await page.route('**/api/**', async route => {
+    const request = route.request();
+    const sourceUrl = new URL(request.url());
+    const upstreamUrl = new URL(`${sourceUrl.pathname}${sourceUrl.search}`, apiBase).href;
+    try {
+      const response = await route.fetch({
+        url: upstreamUrl,
+        timeout: RUN_TIMEOUT_MS,
+        headers: {
+          ...request.headers(),
+          host: apiBase.host,
+          origin: apiBase.origin,
+          referer: apiBase.href
+        }
+      });
+      diagnostics.push({
+        at: new Date().toISOString(),
+        type: 'api-proxy',
+        message: `proxied ${response.status()}`,
+        url: upstreamUrl,
+        method: request.method(),
+        status: response.status(),
+        requestId: response.headers()['x-lawflow-request-id']
+      });
+      await route.fulfill({ response });
+    } catch (error) {
+      diagnostics.push({
+        at: new Date().toISOString(),
+        type: 'api-proxy-error',
+        message: error instanceof Error ? error.message : String(error),
+        url: upstreamUrl,
+        method: request.method()
+      });
+      await route.abort('failed');
+    }
+  });
 }
 
 function installDiagnostics(page: Page, diagnostics: BrowserDiagnostic[]): void {
@@ -503,6 +569,7 @@ function publicRun(run: DebugRun): object {
     startedAt: run.startedAt,
     completedAt: run.completedAt,
     target: run.target,
+    apiTarget: run.apiTarget,
     files: run.fileNames,
     progress: run.progress,
     error: run.error,
