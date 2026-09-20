@@ -1,5 +1,5 @@
 import { BankAccount, StandardTransaction } from '../types/transaction';
-import { createPdfPageImageRenderer, PdfPageImage } from './pdfPageImageRenderer';
+import { createPdfPageImageRenderer, getPdfPageCount, PdfPageImage } from './pdfPageImageRenderer';
 import { mergeQwenChunkResults as mergeVerifiedChunks } from './qwenResultMerger';
 export { mergeQwenChunkResults } from './qwenResultMerger';
 
@@ -49,14 +49,16 @@ export async function parsePdfWithQwen(
   onProgress?: (info: QwenProgressInfo) => void,
   signal?: AbortSignal
 ): Promise<{ account: BankAccount; accounts: BankAccount[]; transactions: StandardTransaction[] }> {
-  // 1. 优先尝试原生多模态直接流式直传（不卡顿主线程、零切图等待、实时推送捕获笔数）
-  try {
-    const directResult = await parsePdfDirectStream(file, onProgress, signal);
-    if (directResult && directResult.transactions.length > 0) {
-      return directResult;
+  const pageCount = await getPdfPageCount(file);
+  // Small documents can use the low-latency direct path. Long documents must
+  // be page-audited so one output limit or timeout cannot discard the volume.
+  if (pageCount <= 20) {
+    try {
+      const directResult = await parsePdfDirectStream(file, pageCount, onProgress, signal);
+      if (directResult && directResult.transactions.length > 0) return directResult;
+    } catch (err: any) {
+      console.warn('整份直传未完成，切换至逐页识别:', err.message);
     }
-  } catch (err: any) {
-    console.warn('原生直传流式解析未命中或服务不可用，平滑回退至逐页渲染模式:', err.message);
   }
 
   // 2. 回退逐页本地渲染与独立对账
@@ -672,6 +674,7 @@ async function requestChunkWithContext(
 
 async function parsePdfDirectStream(
   file: File,
+  totalPages: number,
   onProgress?: (info: QwenProgressInfo) => void,
   signal?: AbortSignal
 ): Promise<{ account: BankAccount; accounts: BankAccount[]; transactions: StandardTransaction[] } | null> {
@@ -682,12 +685,12 @@ async function parsePdfDirectStream(
   formData.append('file', file);
   formData.append('sourceFileName', file.name);
   formData.append('pageStart', '1');
-  formData.append('pageEnd', '128');
-  formData.append('totalPages', '128');
+  formData.append('pageEnd', String(totalPages));
+  formData.append('totalPages', String(totalPages));
 
   onProgress?.({
     currentPage: 0,
-    totalPages: 128,
+    totalPages,
     percent: 5,
     totalTransactions: 0,
     statusText: '正在连接识别服务，准备读取流水…'
@@ -728,7 +731,7 @@ async function parsePdfDirectStream(
         if (payload.type === 'progress') {
           onProgress?.({
             currentPage: payload.currentPage || 0,
-            totalPages: payload.totalPages || 128,
+            totalPages: payload.totalPages || totalPages,
             percent: payload.percent || 0,
             totalTransactions: payload.totalTransactions || 0,
             statusText: payload.statusText
@@ -736,7 +739,7 @@ async function parsePdfDirectStream(
         } else if (payload.type === 'heartbeat') {
           onProgress?.({
             currentPage: 0,
-            totalPages: 128,
+            totalPages,
             percent: Math.min(88, 15 + Math.floor(((payload.secondsElapsed || 0) / 160) * 73)),
             totalTransactions: 0,
             statusText: payload.statusText

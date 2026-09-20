@@ -22,6 +22,31 @@ test('Gemini parser reports an explicit output-limit diagnostic', async () => {
   }
 });
 
+test('Gemini parser accepts compact printed bank dates without unnecessary lawyer review', async () => {
+  const originalFetch = globalThis.fetch;
+  const modelJson = JSON.stringify({
+    totalExtracted: 2,
+    pagesCovered: [123],
+    pageChecks: [{ pageNumber: 123, transactionCount: 2, pageType: 'TRANSACTIONS' }],
+    transactions: [
+      { p: 123, r: 1, bk: '绵阳市商业银行', ac: '6223670100008876178', tm: '20230621 030302', dir: 'IN', amt: 0.57, bal: 686.45 },
+      { p: 123, r: 2, bk: '绵阳市商业银行', ac: '6223670100008876178', tm: '20230921', dir: 'IN', amt: 0.53, bal: 686.98 }
+    ]
+  });
+  globalThis.fetch = async () => new Response(`data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: modelJson }] }, finishReason: 'STOP' }] })}\n\n`);
+  try {
+    const result = await parsePdfWithGeminiStream(
+      new File(['pdf'], 'compact-dates.pdf', { type: 'application/pdf' }),
+      { GEMINI_API_KEY: 'test' }, undefined, undefined, { totalPages: 123 }
+    );
+    assert.equal(result.transactions[0].transactionTime, '2023-06-21 03:03:02');
+    assert.equal(result.transactions[1].transactionDate, '2023-09-21');
+    assert.equal(result.transactions[0].dataQualityIssues?.includes('INVALID_DATE'), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('Gemini parser keeps invalid fields pending and reports missing page coverage', async () => {
   const originalFetch = globalThis.fetch;
   const modelJson = JSON.stringify({

@@ -14,6 +14,12 @@ export interface GeminiParserClientOptions {
   totalPages?: number;
 }
 
+const DIRECT_PDF_MAX_PAGES = 20;
+
+export function recognitionModeForPdf(totalPages: number): 'DIRECT' | 'PAGE_BY_PAGE' {
+  return totalPages > DIRECT_PDF_MAX_PAGES ? 'PAGE_BY_PAGE' : 'DIRECT';
+}
+
 export class RecognitionImportError extends Error {
   constructor(
     message: string,
@@ -53,6 +59,21 @@ export async function parsePdfWithGemini(
   const totalPages = options?.totalPages && options.totalPages > 0
     ? options.totalPages
     : await getPdfPageCount(file);
+  if (recognitionModeForPdf(totalPages) === 'PAGE_BY_PAGE') {
+    onProgress?.({
+      statusText: `长卷宗共 ${totalPages} 页，正在启动逐页清点与断点保存…`,
+      totalTransactions: 0,
+      percent: 2,
+      isStreaming: true
+    });
+    const { parsePdfWithQwen } = await import('./qwenPdfParser');
+    return parsePdfWithQwen(file, info => onProgress?.({
+      statusText: info.statusText || `正在逐页识别，已完成 ${info.currentPage}/${info.totalPages} 页…`,
+      totalTransactions: info.totalTransactions,
+      percent: info.percent,
+      isStreaming: info.percent < 100
+    }), signal);
+  }
   formData.append('file', file);
   formData.append('sourceFileName', file.name);
   formData.append('pageStart', '1');

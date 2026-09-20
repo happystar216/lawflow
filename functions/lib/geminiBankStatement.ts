@@ -396,6 +396,18 @@ export async function parsePdfWithGeminiStream(
   const pagesCovered = [...new Set([...reportedPages, ...checkedPages, ...transactionPages])].sort((a, b) => a - b);
   const missingPages = Array.from({ length: expectedPages }, (_, index) => index + 1).filter(page => !pagesCovered.includes(page));
   const pageChecks = Array.isArray(parsedResult.pageChecks) ? parsedResult.pageChecks : [];
+  const extractedCountByPage = new Map<number, number>();
+  transactions.forEach((transaction: any) => {
+    const page = Number(transaction.rawPageNumber);
+    if (Number.isInteger(page) && page > 0) extractedCountByPage.set(page, (extractedCountByPage.get(page) || 0) + 1);
+  });
+  const countMismatches: Array<{ page: number; expectedCount: number; extractedCount: number }> = pageChecks.flatMap((item: any) => {
+    const page = Number(item?.pageNumber);
+    const expectedCount = Number(item?.transactionCount);
+    if (!Number.isInteger(page) || page < 1 || !Number.isInteger(expectedCount) || expectedCount < 0) return [];
+    const extractedCount = extractedCountByPage.get(page) || 0;
+    return expectedCount === extractedCount ? [] : [{ page, expectedCount, extractedCount }];
+  });
   const allCheckedPagesReportZero = pageChecks.length > 0
     && pageChecks.every((item: any) => Number(item?.transactionCount) === 0);
   const warnings = [
@@ -406,7 +418,9 @@ export async function parsePdfWithGeminiStream(
         ? '原件各页均未识别到交易明细；请确认所选查询期间是否确无流水'
         : '未识别到流水明细，且页面覆盖可能不完整；请对照原件确认是否存在漏识别']
       : []),
-    ...(missingPages.length ? [`页面覆盖不完整，缺少第 ${missingPages.join('、')} 页的结构化确认`] : [])
+    ...(missingPages.length ? [`页面覆盖不完整，缺少第 ${missingPages.join('、')} 页的结构化确认`] : []),
+    ...countMismatches.map(({ page, expectedCount, extractedCount }) =>
+      `第 ${page} 页独立清点为 ${expectedCount} 笔，但结构化结果只有 ${extractedCount} 笔；该页可能漏识别或重复合并`)
   ];
 
   // 生成聚合银行账户摘要
@@ -552,7 +566,7 @@ export async function parsePdfWithGeminiStream(
     totalCount: transactions.length,
     pagesCovered,
     warnings,
-    countComplete: missingPages.length === 0 && pagesCovered.length === expectedPages
+    countComplete: missingPages.length === 0 && pagesCovered.length === expectedPages && countMismatches.length === 0
   };
 }
 
@@ -667,8 +681,12 @@ function normalizeGeminiDirection(value: unknown): 'IN' | 'OUT' | 'UNKNOWN' {
 }
 
 function normalizeGeminiDateTime(value: unknown): string {
-  const text = String(value || '').trim().replace(/\//g, '-');
-  const match = text.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T](\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?/);
+  const rawText = String(value || '').trim().replace(/[／/\.年月]/g, '-').replace(/[日号]/g, '').replace(/\s+/g, ' ');
+  const compact = rawText.match(/^(\d{4})(\d{2})(\d{2})(?:[ T]?(\d{2})(\d{2})(\d{2})?)?$/);
+  const text = compact
+    ? `${compact[1]}-${compact[2]}-${compact[3]}${compact[4] ? ` ${compact[4]}:${compact[5]}:${compact[6] || '00'}` : ''}`
+    : rawText;
+  const match = text.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T](\d{1,2}):?(\d{2})(?::?(\d{2}))?)?$/);
   if (!match) return '';
   const year = Number(match[1]);
   const month = Number(match[2]);

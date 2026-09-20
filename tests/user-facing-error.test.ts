@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { importErrorForUser } from '../src/utils/userFacingError';
+import { recognitionModeForPdf } from '../src/parsers/geminiPdfParser';
 
 test('upload errors hide service internals and explain impact', () => {
   const result = importErrorForUser(
@@ -31,4 +32,10 @@ test('premature stream completion exposes a concrete diagnostic instead of blami
   assert.match(result.message, /最终结果生成前结束/);
   assert.match(result.diagnosis || '', /486.*128.*100/);
   assert.doesNotMatch(result.message, /清晰/);
+});
+
+test('long PDFs use page-by-page recognition instead of one unbounded response', () => {
+  assert.equal(recognitionModeForPdf(20), 'DIRECT');
+  assert.equal(recognitionModeForPdf(21), 'PAGE_BY_PAGE');
+  assert.equal(recognitionModeForPdf(300), 'PAGE_BY_PAGE');
 });
