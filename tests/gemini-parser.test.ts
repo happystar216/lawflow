@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { parsePdfWithGeminiStream } from '../functions/lib/geminiBankStatement';
+import { normalizeRecognizedData } from '../src/utils/recognizedDataNormalizer';
 
 test('Gemini parser keeps invalid fields pending and reports missing page coverage', async () => {
   const originalFetch = globalThis.fetch;
@@ -109,6 +110,67 @@ test('Gemini parser preserves row accounts on a consolidated page containing mul
       '255301100017262', '240101100859012', '255301100006216'
     ]);
     assert.equal(result.accounts.length, 3);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('account-list page keeps five accounts while three consolidated-ledger groups receive transactions', async () => {
+  const originalFetch = globalThis.fetch;
+  const listedAccounts = [
+    '22240101100859012',
+    '22240201100609597',
+    '22253101100348085',
+    '22255301100006216',
+    '22255301100017262'
+  ];
+  const modelJson = JSON.stringify({
+    totalExtracted: 3,
+    pagesCovered: [1, 2, 3],
+    pageChecks: [
+      { pageNumber: 1, transactionCount: 0, pageType: 'DOCUMENT' },
+      {
+        pageNumber: 2,
+        transactionCount: 0,
+        pageType: 'ACCOUNT_INFO',
+        bankName: '四川农信',
+        accountName: '胡艳红',
+        accountNumber: '',
+        accountNumbers: listedAccounts
+      },
+      {
+        pageNumber: 3,
+        transactionCount: 3,
+        pageType: 'TRANSACTIONS',
+        bankName: '四川农信',
+        accountName: '胡艳红',
+        accountNumber: '',
+        accountNumbers: ['255301100017262', '240101100859012', '255301100006216']
+      }
+    ],
+    transactions: [
+      { p: 3, bk: '四川农信', ac: '255301100017262', tm: '2023-06-21', dir: 'IN', amt: 0.03, bal: 57.46, sm: '结息' },
+      { p: 3, bk: '四川农信', ac: '240101100859012', tm: '2023-06-21', dir: 'IN', amt: 16.07, bal: 31461.44, sm: '结息' },
+      { p: 3, bk: '四川农信', ac: '255301100006216', tm: '2023-06-21', dir: 'IN', amt: 2.78, bal: 5442.19, sm: '结息' }
+    ]
+  });
+  globalThis.fetch = async () => new Response(`data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: modelJson }] } }] })}\n\n`);
+  try {
+    const parsed = await parsePdfWithGeminiStream(
+      new File(['pdf'], '06_中国农业银行.pdf', { type: 'application/pdf' }),
+      { GEMINI_API_KEY: 'test' }, undefined, undefined, { totalPages: 3, respondentName: '胡艳红' }
+    );
+    const normalized = normalizeRecognizedData(parsed.accounts, parsed.transactions);
+    assert.deepEqual(
+      normalized.accounts.map(account => account.accountNumber).sort(),
+      [...listedAccounts].sort()
+    );
+    assert.equal(normalized.accounts.filter(account => account.transactionCount > 0).length, 3);
+    assert.equal(normalized.accounts.filter(account => account.transactionCount === 0).length, 2);
+    assert.deepEqual(
+      normalized.transactions.map(transaction => transaction.accountNumber).sort(),
+      ['22255301100017262', '22240101100859012', '22255301100006216'].sort()
+    );
   } finally {
     globalThis.fetch = originalFetch;
   }

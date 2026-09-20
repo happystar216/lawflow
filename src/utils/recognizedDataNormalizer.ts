@@ -135,10 +135,9 @@ export function normalizeRecognizedData(
   // Keep a real, visible import record for files that contain account information
   // but no transaction rows. Without this, normalization turns a legitimate
   // zero-transaction result into a synthetic “待归属页面” account or drops it.
-  const transactionSourceFiles = new Set(transactions.map(item => item.rawSourceFile));
   for (const original of publicAccounts) {
     if (original.transactionCount !== 0 || isDocumentReviewAccount(original)) continue;
-    if (transactionSourceFiles.has(original.fileName)) continue;
+    if (transactionsByAccount.has(accountIdentityKey(original))) continue;
     const alreadyPreserved = accounts.some(account => (
       account.fileName === original.fileName
       && accountIdentityKey(account) === accountIdentityKey(original)
@@ -369,8 +368,10 @@ function stabilizePageAccountIdentities(input: StandardTransaction[]): StandardT
   for (const [page, pageTransactions] of [...pages.entries()].sort((a, b) => a[0] - b[0])) {
     const reliable = pageTransactions.filter(item => isReliableAccountNumber(item.accountNumber));
     const reliableKeys = new Set(reliable.map(accountNumberKey));
-    if (reliableKeys.size >= 1) {
-      // Unify all rows on a single page to the dominant reliable account
+    if (reliableKeys.size === 1) {
+      // A genuinely single-account page may contain a few rows whose account
+      // cell was not read. Fill only those pages; never collapse a consolidated
+      // page that already contains two or more reliable owner accounts.
       const counts = new Map<string, { item: StandardTransaction; count: number }>();
       for (const item of reliable) {
         const k = accountNumberKey(item);

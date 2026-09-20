@@ -258,6 +258,10 @@ export async function parsePdfWithGeminiStream(
         .filter(isReliableExtractedAccountNumber))]
     });
   }
+  const documentAccountNumbers = [...new Set([...pageIdentities.values()].flatMap(identity => [
+    ...identity.accountNumbers,
+    ...(isReliableExtractedAccountNumber(identity.accountNumber) ? [identity.accountNumber] : [])
+  ]))];
 
   // A page-level identity is useful for ordinary single-account statements and
   // protects against a model carrying the previous page's account forward. It
@@ -287,10 +291,13 @@ export async function parsePdfWithGeminiStream(
     const pageIdentity = pageIdentities.get(rawPageNumber);
     const rowAccountNumber = normalizeExtractedAccountNumber(tx.ac);
     const isMultiAccountPage = (transactionAccountsByPage.get(rawPageNumber)?.size || 0) > 1;
-    const resolvedAccountNumber = consolidatedPageResolution.accountByTransactionIndex.get(idx)
+    const resolvedAccountNumber = canonicalDocumentAccountNumber(
+      consolidatedPageResolution.accountByTransactionIndex.get(idx)
       || (isMultiAccountPage && isReliableExtractedAccountNumber(rowAccountNumber)
         ? rowAccountNumber
-        : pageIdentity?.accountNumber || rowAccountNumber);
+        : pageIdentity?.accountNumber || rowAccountNumber),
+      documentAccountNumbers
+    );
     const dataQualityIssues: Array<'INVALID_DATE' | 'INVALID_AMOUNT' | 'UNKNOWN_DIRECTION'> = [];
     if (!transactionTime) dataQualityIssues.push('INVALID_DATE');
     if (!Number.isFinite(rawAmount) || amount <= 0) dataQualityIssues.push('INVALID_AMOUNT');
@@ -384,6 +391,47 @@ export async function parsePdfWithGeminiStream(
     acc.endBalance = t.balance !== null ? t.balance : acc.endBalance;
   }
 
+  // Account-list pages are evidence in their own right. Keep every listed
+  // account even when only some of them have transaction rows elsewhere in the
+  // document. Short detail-page numbers are reconciled to a unique longer
+  // account-list number above, so the three active accounts are not duplicated.
+  for (const identity of pageIdentities.values()) {
+    const listed = [...new Set([
+      ...identity.accountNumbers,
+      ...(isReliableExtractedAccountNumber(identity.accountNumber) ? [identity.accountNumber] : [])
+    ])];
+    for (const listedNumber of listed) {
+      const accountNumber = canonicalDocumentAccountNumber(listedNumber, documentAccountNumbers);
+      if (!isReliableExtractedAccountNumber(accountNumber)) continue;
+      const existing = [...accountMap.values()].find(account =>
+        areEquivalentDocumentAccountNumbers(account.accountNumber, accountNumber)
+      );
+      if (existing) continue;
+      const bankName = identity.bankName
+        || [...accountMap.values()][0]?.bankName
+        || '待核对银行';
+      const key = `${bankName}_${accountNumber}`;
+      accountMap.set(key, {
+        accountNumber,
+        accountName: identity.accountName || expectedHolder || '待核对户名',
+        bankName,
+        ownerType: 'DEBTOR_MAIN',
+        fileName: file.name,
+        fileType: 'pdf',
+        totalIn: 0,
+        totalOut: 0,
+        transactionCount: 0,
+        startDate: '',
+        endDate: '',
+        startBalance: 0,
+        endBalance: 0,
+        isBalanced: false,
+        balanceDiff: 0,
+        balanceAvailable: false
+      });
+    }
+  }
+
   if (transactions.length === 0) {
     for (const identity of pageIdentities.values()) {
       if (!identity.bankName && !identity.accountName && !identity.accountNumber) continue;
@@ -459,6 +507,30 @@ export async function parsePdfWithGeminiStream(
 
 function normalizeExtractedAccountNumber(value: unknown): string {
   return String(value || '').replace(/[\s\-_—–·•]/g, '');
+}
+
+function canonicalDocumentAccountNumber(value: string, candidates: string[]): string {
+  const normalized = normalizeExtractedAccountNumber(value);
+  if (!isReliableExtractedAccountNumber(normalized)) return normalized;
+  const matches = [...new Set(candidates
+    .map(normalizeExtractedAccountNumber)
+    .filter(candidate => areEquivalentDocumentAccountNumbers(candidate, normalized)))];
+  if (!matches.length) return normalized;
+  const maxLength = Math.max(...matches.map(candidate => candidate.length));
+  const longest = matches.filter(candidate => candidate.length === maxLength);
+  return longest.length === 1 ? longest[0] : normalized;
+}
+
+function areEquivalentDocumentAccountNumbers(left: string, right: string): boolean {
+  const a = normalizeExtractedAccountNumber(left);
+  const b = normalizeExtractedAccountNumber(right);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  if (!/^\d+$/.test(a) || !/^\d+$/.test(b)) return false;
+  const longer = a.length >= b.length ? a : b;
+  const shorter = a.length >= b.length ? b : a;
+  const prefixLength = longer.length - shorter.length;
+  return shorter.length >= 10 && prefixLength >= 1 && prefixLength <= 4 && longer.endsWith(shorter);
 }
 
 function resolveConsolidatedPageAccounts(
