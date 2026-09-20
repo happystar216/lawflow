@@ -244,6 +244,37 @@ async function executeRun(run: DebugRun): Promise<void> {
     }, undefined, { timeout: 30_000, polling: 500 }).catch(() => undefined);
     await new Promise(resolve => setTimeout(resolve, 1500));
 
+    const workflowScreens: Record<string, { text: string; screenshot: string }> = {};
+    const uploadText = await page.evaluate(() => document.body.innerText.slice(0, 100_000));
+    await page.screenshot({ path: join(run.outputDir, 'upload-result.png'), fullPage: true });
+    workflowScreens.upload = { text: uploadText, screenshot: `/debug/runs/${run.id}/artifacts/upload-result.png` };
+
+    const uploadSnapshot = await page.evaluate(() => (window as any).__LAWFLOW_AUTOMATION__ || null) as any;
+    if ((uploadSnapshot?.app?.transactions?.length || 0) > 0) {
+      if (!await clickButtonContaining(page, '下一步：核对原件')) throw new Error('识别完成后没有找到“下一步：核对原件”按钮');
+      await page.waitForFunction(() => (window as any).__LAWFLOW_AUTOMATION__?.app?.currentStep === 2, undefined, { timeout: 30_000 });
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      const reviewText = await page.evaluate(() => document.body.innerText.slice(0, 100_000));
+      await page.screenshot({ path: join(run.outputDir, 'evidence-review.png'), fullPage: true });
+      workflowScreens.review = { text: reviewText, screenshot: `/debug/runs/${run.id}/artifacts/evidence-review.png` };
+
+      // This is an isolated automation case. Preserve every unresolved item and
+      // continue without pretending that a lawyer confirmed any field.
+      const continued = await clickButtonContaining(page, '保留未处理事项并继续')
+        || await clickButtonContaining(page, '完成核对，进入下一步');
+      if (continued) {
+        await page.waitForFunction(() => (window as any).__LAWFLOW_AUTOMATION__?.app?.currentStep === 3, undefined, { timeout: 30_000 });
+        if (await clickButtonContaining(page, '进入步骤四：运行核心算法计算')) {
+          await page.waitForFunction(() => (window as any).__LAWFLOW_AUTOMATION__?.app?.currentStep === 4, undefined, { timeout: 30_000 });
+          await page.waitForFunction(() => Boolean((window as any).__LAWFLOW_AUTOMATION__?.app?.evaluationReport), undefined, { timeout: 60_000 });
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          const analysisText = await page.evaluate(() => document.body.innerText.slice(0, 100_000));
+          await page.screenshot({ path: join(run.outputDir, 'analysis.png'), fullPage: true });
+          workflowScreens.analysis = { text: analysisText, screenshot: `/debug/runs/${run.id}/artifacts/analysis.png` };
+        }
+      }
+    }
+
     const snapshot = await page.evaluate(() => (window as any).__LAWFLOW_AUTOMATION__ || null) as any;
     const bodyText = await page.evaluate(() => document.body.innerText.slice(0, 100_000));
     await page.screenshot({ path: join(run.outputDir, 'final.png'), fullPage: true });
@@ -257,19 +288,25 @@ async function executeRun(run: DebugRun): Promise<void> {
       summary: {
         accountCount: app?.accounts.length || 0,
         transactionCount: app?.transactions.length || 0,
-        reviewIssueCount: app?.accounts.reduce((sum: number, account: any) => sum + (account.reviewIssues?.length || 0), 0) || 0,
+        reviewIssueCount: app?.reviewIssues?.length || 0,
         unbalancedAccountCount: Object.values(app?.evaluationReport?.accountAudits || {}).filter((audit: any) => audit.isAuditable && !audit.isBalanced).length
       },
       import: snapshot?.import || null,
       caseMetadata: app?.caseMetadata || null,
       accounts: app?.accounts || [],
       transactions: app?.transactions || [],
-      reviewIssues: app?.accounts.flatMap((account: any) => account.reviewIssues || []) || [],
+      reviewIssues: app?.reviewIssues || [],
       balanceAudits: app?.evaluationReport?.accountAudits || {},
       evaluationReport: app?.evaluationReport || null,
       browserDiagnostics: diagnostics,
       renderedText: bodyText,
-      artifacts: { screenshot: `/debug/runs/${run.id}/artifacts/final.png` }
+      workflowScreens,
+      artifacts: {
+        screenshot: `/debug/runs/${run.id}/artifacts/final.png`,
+        upload: `/debug/runs/${run.id}/artifacts/upload-result.png`,
+        review: workflowScreens.review?.screenshot,
+        analysis: workflowScreens.analysis?.screenshot
+      }
     };
     run.status = 'SUCCESS';
     run.completedAt = new Date().toISOString();

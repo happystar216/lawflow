@@ -179,7 +179,10 @@ function chunkOptions(formData: FormData, file: File) {
     contextAfter: contextAfter instanceof File ? contextAfter : undefined,
     auditHint: String(formData.get('auditHint') || ''),
     respondentName: String(formData.get('respondentName') || '').trim(),
-    isPageSlice: String(formData.get('isPageSlice') || '') === 'true'
+    isPageSlice: String(formData.get('isPageSlice') || '') === 'true',
+    verificationMode: formData.get('verificationMode') === 'auto'
+      ? 'auto' as const
+      : formData.get('verificationMode') === 'skip' ? 'skip' as const : 'always' as const
   };
 }
 

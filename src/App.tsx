@@ -16,6 +16,7 @@ import { getCurrentSessionUser, logoutUser } from './store/authStore';
 import { CaseRecord, saveCaseRecord, listSavedCases } from './store/caseStore';
 import { normalizeRecognizedData } from './utils/recognizedDataNormalizer';
 import { publishAutomationAppState } from './debug/automationBridge';
+import { buildEvidenceReviewIssues } from './review/buildEvidenceReviewIssues';
 
 const Step1Upload = lazy(() => import('./components/Step1Upload').then(module => ({ default: module.Step1Upload })));
 const Step4Compute = lazy(() => import('./components/Step4Compute').then(module => ({ default: module.Step4Compute })));
@@ -254,6 +255,7 @@ export const App: React.FC = () => {
       caseMetadata: caseMeta,
       accounts,
       transactions,
+      reviewIssues: accounts.flatMap(account => buildEvidenceReviewIssues(account, transactions)),
       evaluationReport: freshEvaluationReport
     });
   }, [currentUser, hydratedUserId, currentStep, caseMeta, accounts, transactions, freshEvaluationReport]);

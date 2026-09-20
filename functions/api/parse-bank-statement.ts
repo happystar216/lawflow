@@ -24,6 +24,7 @@ export async function onRequestPost(context: any) {
       contextAfter: contextAfter instanceof File ? contextAfter : undefined,
       auditHint: String(formData.get('auditHint') || ''),
       isPageSlice: String(formData.get('isPageSlice') || '') === 'true',
+      verificationMode: verificationMode(formData.get('verificationMode')),
       signal: context.request.signal
     });
     const { model: _internalModel, ...publicResult } = result;
@@ -31,6 +32,10 @@ export async function onRequestPost(context: any) {
   } catch (error: any) {
     return json({ error: publicErrorMessage(error) }, 502);
   }
+}
+
+function verificationMode(value: FormDataEntryValue | null): 'always' | 'auto' | 'skip' {
+  return value === 'auto' || value === 'skip' ? value : 'always';
 }
 
 function publicErrorMessage(error: unknown): string {

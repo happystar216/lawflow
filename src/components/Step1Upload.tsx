@@ -8,6 +8,7 @@ import { accountIdentityKey, transactionBelongsToAccount } from '../utils/accoun
 import { importErrorForUser } from '../utils/userFacingError';
 import { attachSourceProvenance, createExtractionRun, identifySourceDocument, sourceFilesWithoutTransactions, sourceIdentity, transactionCountsBySource } from '../utils/evidenceProvenance';
 import { publishAutomationImportState } from '../debug/automationBridge';
+import { normalizeRecognizedData } from '../utils/recognizedDataNormalizer';
 
 interface Step1Props {
   caseId: string;
@@ -189,11 +190,12 @@ export const Step1Upload: React.FC<Step1Props> = ({
             console.warn('Source document storage unavailable; continuing recognition', storageError);
           }
           const annotated = attachSourceProvenance([account], parsedTx, source, extractionRun);
+          const canonical = normalizeRecognizedData(annotated.accounts, annotated.transactions);
           removePreviousVersion();
-          newAccounts.push(...annotated.accounts);
-          newTransactions.push(...annotated.transactions);
-          importedTransactionCount = parsedTx.length;
-          importedAccountCount = 1;
+          newAccounts.push(...canonical.accounts);
+          newTransactions.push(...canonical.transactions);
+          importedTransactionCount = canonical.transactions.length;
+          importedAccountCount = canonical.accounts.filter(item => item.ownerType !== 'UNKNOWN').length;
         } else if (name.endsWith('.pdf')) {
           const controller = new AbortController();
           abortControllerRef.current = controller;
@@ -206,7 +208,8 @@ export const Step1Upload: React.FC<Step1Props> = ({
             },
             controller.signal,
             {
-              respondentName: caseRespondentName
+              respondentName: caseRespondentName,
+              sourceContentHash: source.contentHash
             }
           );
           let sourceStored = true;
@@ -220,15 +223,16 @@ export const Step1Upload: React.FC<Step1Props> = ({
             console.warn('Source document storage unavailable; continuing recognition', storageError);
           }
           const annotated = attachSourceProvenance(parsedAccounts, parsedTx, source, extractionRun);
+          const canonical = normalizeRecognizedData(annotated.accounts, annotated.transactions);
           removePreviousVersion();
-          newAccounts.push(...annotated.accounts.map(account => sourceStored ? account : {
+          newAccounts.push(...canonical.accounts.map(account => sourceStored ? account : {
             ...account,
             parseStatus: 'NEEDS_REVIEW' as const,
             parseWarnings: [...new Set([...(account.parseWarnings || []), '原始文件未能持久保存，请在本次会话中完成原件核对或重新上传'])]
           }));
-          newTransactions.push(...annotated.transactions);
-          importedTransactionCount = parsedTx.length;
-          importedAccountCount = parsedAccounts.length;
+          newTransactions.push(...canonical.transactions);
+          importedTransactionCount = canonical.transactions.length;
+          importedAccountCount = canonical.accounts.filter(item => item.ownerType !== 'UNKNOWN').length;
         } else {
           throw new Error('不支持的文件格式');
         }

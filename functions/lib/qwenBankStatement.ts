@@ -34,7 +34,13 @@ interface QwenDocumentResult {
     startBalance?: number | string | null;
     endBalance?: number | string | null;
   };
-  pageChecks?: Array<{ pageNumber?: number; transactionCount?: number; pageType?: string; note?: string }>;
+  pageChecks?: Array<{
+    pageNumber?: number;
+    transactionCount?: number;
+    pageType?: string;
+    note?: string;
+    ownerAccounts?: Array<{ bankName?: string; accountName?: string; accountNumber?: string }>;
+  }>;
   transactions?: QwenRawTransaction[];
   warnings?: string[];
 }
@@ -50,6 +56,7 @@ export interface QwenChunkOptions {
   contextAfter?: File;
   auditHint?: string;
   isPageSlice?: boolean;
+  verificationMode?: 'always' | 'auto' | 'skip';
   signal?: AbortSignal;
 }
 
@@ -86,16 +93,18 @@ const extractionPrompt = (expectedPages: number, inputKind: 'pdf' | 'image', isP
    中国工商银行信用卡历史明细中的【借贷标志】必须按银行表格含义读取：1 为借记/消费/支出（OUT），2 为贷记/还款/冲正/收入（IN）。
 4. 同一交易跨行展示时合并为一笔；不要把页眉、页脚、合计、小计、期初余额、期末余额当作交易。
 5. rawPageNumber 必须使用本分片内的 1 起始页码，范围是 1 到 ${expectedPages}；不要猜测原文件页码。${isPageSlice ? ' 本图只是原页的一段：只输出本段中可见且有交易序号、日期或关键字段的交易；跨出图像边缘的续行不得虚构，也不要把表头当交易。rawRowIndex 按本段从上到下排列即可。' : ''}
-6. pageChecks 必须严格包含 ${expectedPages} 项，每页一项；即使没有交易，也必须输出 transactionCount: 0。pageType 必须填写 TRANSACTIONS（交易明细）、ACCOUNT_INFO（开户/账户信息）、DOCUMENT（法院或银行文书）、BLANK（空白）或 UNKNOWN。
+6. pageChecks 必须严格包含 ${expectedPages} 项，每页一项；即使没有交易，也必须输出 transactionCount: 0。pageType 必须填写 TRANSACTIONS（交易明细）、ACCOUNT_INFO（开户/账户信息）、DOCUMENT（法院或银行文书）、BLANK（空白）或 UNKNOWN。ownerAccounts 必须列出该页页眉或“账号/卡号”本方栏明确标示的所有流水所属账户；单账户页只能有 1 项，多账户汇总页逐个列出，不能把对手方账号、贷款账号、客户号、凭证号或同表中的银行卡辅助列当成本方账户。
 7. rawRowIndex 使用该页交易明细的 1 起始顺序。transactions 数量必须等于各页有效交易数之和。box 是交易整行在当前页面的位置，按 [上,左,下,右] 输出，以页面左上角为原点，四个值均为 0 至 1000 的整数；只有确实无法定位时才填 null。
-8. 一个分片可能同时包含多家银行或多个账户。每笔 transaction 的 bankName、accountName、accountNumber 必须填写“流水所属的本方账户”（通常来自页眉、账户信息栏或银行卡号），绝不能填写收款人、付款人或对手方的银行与账号。向多家不同银行转账仍然归属于发起交易的同一个本方账户；对方信息只能放入 counterpartyName、counterpartyAccount、counterpartyBank。
+8. 一个分片可能同时包含多家银行或多个账户。每笔 transaction 的 bankName、accountName、accountNumber 必须填写“流水所属的本方账户”（优先读取表格最左侧反复出现的本方账号列或页眉明确写出的账号），绝不能填写收款人、付款人、对手方、贷款账号、客户号、凭证号，也不能把同一行中右侧的银行卡号/辅助账号列误当成本方账户。向多家不同银行转账仍然归属于发起交易的同一个本方账户；对方信息只能放入 counterpartyName、counterpartyAccount、counterpartyBank。
 9. 不得把不同本方银行或不同本方账号的交易统一归入 document 中的单一账户。页面切换本方账户时，按该页实际抬头填写。
 10. 严格区分表格中【发生额/交易金额】列与【摘要/备注】栏的文字数字：摘要常有批次号或协议额（如 @2640.00@），若账户余额不足发生部分划扣，必须严格以表格【发生额】列印刷的真实扣款额（如 0.84）为准，严禁将摘要中的应扣额当成实际发生额。
+11. bankName 只能来自银行抬头、印章或表单机构名称，不得依据户名拼造银行名称。例如户名为“张三”时，绝不能输出“张三商业银行”；看不清则留空。注意准确区分城市商业银行名称（如“绵阳市商业银行”）与客户姓名。
+12. 日期年份必须以原件印刷值为准，并结合本页及相邻行的查询期间复核。若单笔年份远离同页主要年份（例如同页均为 2023–2025 年却读成 2029 年），降低 confidence 并在 rawText 保留原文，禁止凭空接受明显异常年份。
 
 严格输出以下结构：
 {
   "document":{"bankName":"","accountName":"","accountNumber":"","startBalance":null,"endBalance":null},
-  "pageChecks":[{"pageNumber":1,"transactionCount":0,"pageType":"TRANSACTIONS","note":""}],
+  "pageChecks":[{"pageNumber":1,"transactionCount":0,"pageType":"TRANSACTIONS","ownerAccounts":[{"bankName":"","accountName":"","accountNumber":""}],"note":""}],
   "transactions":[{"bankName":"","accountName":"","accountNumber":"","transactionTime":"YYYY-MM-DD HH:mm:ss；没有时间则 YYYY-MM-DD","transactionDate":"YYYY-MM-DD","direction":"IN、OUT 或 UNKNOWN","amount":0,"balance":null,"counterpartyName":"","counterpartyAccount":"","counterpartyBank":"","summary":"","rawText":"原始行文字","confidence":0.95,"rawPageNumber":1,"rawRowIndex":1,"box":[100,40,135,960]}],
   "warnings":[]
 }`;
@@ -193,11 +202,17 @@ export async function parseBankStatementWithQwen(
   const payload = await extractionResponse.json() as any;
   const content = payload?.choices?.[0]?.message?.content;
   if (typeof content !== 'string' || !content.trim()) throw new Error('页面解析结果为空');
-  const verificationSettled = await callService(verificationContent, 512).then(async response => {
-      if (!response.ok) throw new Error(String(response.status));
-      return response.json() as Promise<any>;
-    }).then(payload => ({ payload }))
-      .catch(error => ({ error }));
+  const parsedContent = parseJsonContent(content);
+  const verificationMode = options.verificationMode || 'always';
+  const shouldVerify = verificationMode === 'always'
+    || (verificationMode === 'auto' && extractionNeedsIndependentCheck(parsedContent, expectedPages));
+  const verificationSettled = shouldVerify
+    ? await callService(verificationContent, 512).then(async response => {
+        if (!response.ok) throw new Error(String(response.status));
+        return response.json() as Promise<any>;
+      }).then(payload => ({ payload }))
+        .catch(error => ({ error }))
+    : { skipped: true as const };
   let independentCount: number | undefined;
   let independentReadability: string | undefined;
   let independentPageType: PageType | undefined;
@@ -215,7 +230,7 @@ export async function parseBankStatementWithQwen(
     }
   }
   onActivity?.(`第 ${pageStart}–${pageEnd} 页结构化结果已返回，正在校验…`);
-  return normalizeResult(parseJsonContent(content), model, {
+  return normalizeResult(parsedContent, model, {
     ...options,
     pageStart,
     pageEnd,
@@ -225,7 +240,25 @@ export async function parseBankStatementWithQwen(
     independentCount,
     independentReadability,
     independentPageType,
+    verificationSkippedByPolicy: !shouldVerify,
     usageTokens: nonNegativeInteger(payload?.usage?.total_tokens) + verificationUsage
+  });
+}
+
+function extractionNeedsIndependentCheck(raw: QwenDocumentResult, expectedPages: number): boolean {
+  const transactions = Array.isArray(raw.transactions) ? raw.transactions : [];
+  const checks = Array.isArray(raw.pageChecks) ? raw.pageChecks : [];
+  if (checks.length !== expectedPages) return true;
+  const reportedCount = checks.reduce((sum, item) => sum + nonNegativeInteger(item.transactionCount), 0);
+  if (reportedCount !== transactions.length || reportedCount >= 25) return true;
+  if (checks.some(item => normalizePageType(item.pageType) === 'UNKNOWN')) return true;
+  if (checks.some(item => normalizePageType(item.pageType) === 'TRANSACTIONS' && nonNegativeInteger(item.transactionCount) === 0)) return true;
+  return transactions.some(item => {
+    const amount = money(item.amount);
+    return !normalizeDate(item.transactionDate || item.transactionTime)
+      || !isValidMoney(item.amount) || amount <= 0
+      || normalizeDirection(item.direction) === 'UNKNOWN'
+      || confidence(item.confidence) < 0.8;
   });
 }
 
@@ -242,21 +275,36 @@ function parseJsonContent(content: string): QwenDocumentResult {
 function normalizeResult(
   raw: QwenDocumentResult,
   model: string,
-  options: QwenChunkOptions & { sourceFileName: string; pageStart: number; pageEnd: number; totalPages: number; inputKind: 'pdf' | 'image'; independentCount?: number; independentReadability?: string; independentPageType?: PageType; usageTokens?: number }
+  options: QwenChunkOptions & { sourceFileName: string; pageStart: number; pageEnd: number; totalPages: number; inputKind: 'pdf' | 'image'; independentCount?: number; independentReadability?: string; independentPageType?: PageType; verificationSkippedByPolicy?: boolean; usageTokens?: number }
 ): QwenParseResult {
   const document = raw.document || {};
   const expectedPages = options.pageEnd - options.pageStart + 1;
-  const accountNumber = cleanText(document.accountNumber) || `待核验-${options.sourceFileName.replace(/\.[^.]+$/, '')}`;
-  const accountName = cleanText(document.accountName) || options.sourceFileName.replace(/\.[^.]+$/, '');
-  const bankName = cleanText(document.bankName) || '待核验银行';
+  const pageChecks = Array.isArray(raw.pageChecks) ? raw.pageChecks : [];
+  const declaredOwners = uniqueOwnerAccounts(pageChecks
+    .flatMap(page => Array.isArray(page.ownerAccounts) ? page.ownerAccounts : [])
+    .filter(owner => isReliableOwnerAccountNumber(owner.accountNumber)));
+  const soleDeclaredOwner = declaredOwners.length === 1 ? declaredOwners[0] : undefined;
+  const accountNumber = cleanText(soleDeclaredOwner?.accountNumber) || cleanText(document.accountNumber)
+    || `待核验-${options.sourceFileName.replace(/\.[^.]+$/, '')}`;
+  const accountName = cleanText(soleDeclaredOwner?.accountName) || cleanText(document.accountName)
+    || options.sourceFileName.replace(/\.[^.]+$/, '');
+  const bankName = cleanText(soleDeclaredOwner?.bankName) || cleanText(document.bankName) || '待核验银行';
   const transactions = (Array.isArray(raw.transactions) ? raw.transactions : []).map((item, index) => {
-    const rowBankName = cleanText(item.bankName) || bankName;
-    const rowAccountName = cleanText(item.accountName) || accountName;
-    const rowAccountNumber = cleanText(item.accountNumber) || cleanText(document.accountNumber)
+    const localPage = positiveInteger(item.rawPageNumber) || 1;
+    const pageOwners = pageChecks
+      .filter(page => positiveInteger(page.pageNumber) === localPage)
+      .flatMap(page => Array.isArray(page.ownerAccounts) ? page.ownerAccounts : [])
+      .filter(owner => isReliableOwnerAccountNumber(owner.accountNumber));
+    // A page-level header is stronger evidence than a repeated secondary card,
+    // counterparty or loan-account column.  Consolidated pages deliberately list
+    // more than one owner and therefore keep each row's own identity.
+    const solePageOwner = uniqueOwnerAccounts(pageOwners).length === 1 ? uniqueOwnerAccounts(pageOwners)[0] : undefined;
+    const rowBankName = cleanText(solePageOwner?.bankName) || cleanText(item.bankName) || bankName;
+    const rowAccountName = cleanText(solePageOwner?.accountName) || cleanText(item.accountName) || accountName;
+    const rowAccountNumber = cleanText(solePageOwner?.accountNumber) || cleanText(item.accountNumber) || cleanText(document.accountNumber)
       || `待核验-${rowBankName}-${options.sourceFileName.replace(/\.[^.]+$/, '')}`;
     const transactionTime = normalizeDateTime(item.transactionTime || item.transactionDate);
     const transactionDate = normalizeDate(item.transactionDate || transactionTime);
-    const localPage = positiveInteger(item.rawPageNumber) || 1;
     if (localPage > expectedPages) throw new Error(`解析结果出现超出当前范围的页码 ${localPage}`);
     const page = options.pageStart + localPage - 1;
     const row = positiveInteger(item.rawRowIndex) || index + 1;
@@ -283,7 +331,6 @@ function normalizeResult(
     };
   });
 
-  const pageChecks = Array.isArray(raw.pageChecks) ? raw.pageChecks : [];
   const isPageSlice = Boolean(options.isPageSlice);
   // Free-form model comments are intentionally not exposed as lawyer review tasks. They are often
   // speculative or self-contradictory; only the structured fields and deterministic checks below
@@ -335,7 +382,8 @@ function normalizeResult(
   });
   const independentlyNonTransaction = options.independentPageType === 'ACCOUNT_INFO'
     || options.independentPageType === 'DOCUMENT' || options.independentPageType === 'BLANK';
-  if (!isPageSlice && options.independentCount === undefined && !independentlyNonTransaction) warnings.push(`第 ${options.pageStart} 页未完成独立行数复核，需对照原件确认`);
+  if (!isPageSlice && options.independentCount === undefined && !independentlyNonTransaction
+    && !options.verificationSkippedByPolicy) warnings.push(`第 ${options.pageStart} 页未完成独立行数复核，需对照原件确认`);
   else if (!isPageSlice && !independentlyNonTransaction && options.independentCount !== transactions.length) warnings.push(`第 ${options.pageStart} 页独立清点为 ${options.independentCount} 笔，逐笔明细为 ${transactions.length} 笔，需对照原件确认`);
   const hasInvalidStructuredRow = transactions.some(transaction => transaction.dataQualityIssues.length > 0
     || transaction.extractionConfidence < 0.8);
@@ -392,6 +440,20 @@ async function fileDataUrl(file: File): Promise<string> {
   return `data:${mimeType};base64,${arrayBufferToBase64(await file.arrayBuffer())}`;
 }
 function cleanText(value: unknown): string { return value == null ? '' : String(value).trim(); }
+function isReliableOwnerAccountNumber(value: unknown): boolean {
+  const normalized = cleanText(value).replace(/[^0-9A-Za-z]/g, '');
+  return normalized.length >= 10 && normalized.length <= 32 && /\d{8}/.test(normalized);
+}
+function uniqueOwnerAccounts(
+  owners: Array<{ bankName?: string; accountName?: string; accountNumber?: string }>
+): Array<{ bankName?: string; accountName?: string; accountNumber?: string }> {
+  const unique = new Map<string, { bankName?: string; accountName?: string; accountNumber?: string }>();
+  for (const owner of owners) {
+    const key = cleanText(owner.accountNumber).replace(/[^0-9A-Za-z]/g, '').toUpperCase();
+    if (key && !unique.has(key)) unique.set(key, owner);
+  }
+  return [...unique.values()];
+}
 function money(value: unknown): number { return Math.abs(signedMoney(value)); }
 function signedMoney(value: unknown): number {
   if (value == null || value === '') return 0;

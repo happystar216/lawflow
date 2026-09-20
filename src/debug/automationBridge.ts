@@ -1,6 +1,6 @@
 import type { CaseMetadata } from '../types/case';
 import type { CaseEvaluationReport } from '../types/evidence';
-import type { BankAccount, StandardTransaction } from '../types/transaction';
+import type { BankAccount, EvidenceReviewIssue, StandardTransaction } from '../types/transaction';
 
 export interface AutomationImportTask {
   id: string;
@@ -34,6 +34,7 @@ export interface AutomationAppState {
   caseMetadata: CaseMetadata;
   accounts: BankAccount[];
   transactions: StandardTransaction[];
+  reviewIssues: EvidenceReviewIssue[];
   evaluationReport: CaseEvaluationReport | null;
 }
 

@@ -3,16 +3,31 @@ import { createPdfPageImageRenderer, getPdfPageCount, PdfPageImage } from './pdf
 import { mergeQwenChunkResults as mergeVerifiedChunks } from './qwenResultMerger';
 export { mergeQwenChunkResults } from './qwenResultMerger';
 
-const MAX_CONCURRENCY = 10;
-const INITIAL_CONCURRENCY = 5;
+const MAX_CONCURRENCY = 5;
+const INITIAL_CONCURRENCY = 3;
 const MIN_CONCURRENCY = 2;
 const SINGLE_PAGE_ATTEMPTS = 5;
 const REQUEST_TIMEOUT_MS = 150_000;
-const CACHE_VERSION = 'page-image-v4-dense-page-slices';
+const CACHE_VERSION = 'page-image-v5-document-map-selective-audit';
 const NORMAL_IMAGE_SCALE = 2.35;
 const HIGH_DETAIL_IMAGE_SCALE = 3;
 const DENSE_PAGE_BAND_SCALE = 3;
 const DENSE_PAGE_BAND_COUNT = 4;
+const PAGE_MAP_BATCH_SIZE = 8;
+const THUMBNAIL_SCALE = 0.42;
+
+type PageMapType = 'TRANSACTIONS' | 'ACCOUNT_INFO' | 'DOCUMENT' | 'BLANK' | 'UNKNOWN';
+interface PageMapItem {
+  page: number;
+  pageType: PageMapType;
+  rotation: 0 | 90 | 180 | 270;
+  bankName: string;
+  accountName: string;
+  accountNumbers: string[];
+  density: 'LOW' | 'MEDIUM' | 'HIGH';
+  confidence: number;
+  locallyBlank?: boolean;
+}
 
 export interface QwenProgressInfo {
   currentPage: number;
@@ -47,7 +62,8 @@ class IncompleteCountError extends Error {
 export async function parsePdfWithQwen(
   file: File,
   onProgress?: (info: QwenProgressInfo) => void,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  options?: { cacheIdentity?: string }
 ): Promise<{ account: BankAccount; accounts: BankAccount[]; transactions: StandardTransaction[] }> {
   const pageCount = await getPdfPageCount(file);
   // Small documents can use the low-latency direct path. Long documents must
@@ -66,10 +82,17 @@ export async function parsePdfWithQwen(
     statusText: '正在本地逐页生成识别图片，原始 PDF 保持不变…' });
   const renderer = await createPdfPageImageRenderer(file);
   const totalPages = renderer.totalPages;
-  const cacheKey = `${CACHE_VERSION}|${file.name}|${file.size}|${file.lastModified}|${totalPages}`;
+  const cacheKey = `${CACHE_VERSION}|${options?.cacheIdentity || `${file.name}|${file.size}|${file.lastModified}`}|${totalPages}`;
   const results: ChunkParseResult[] = [];
   const cachedResults = await readCachedResults(cacheKey);
   const cachedByPage = new Map(cachedResults.map(result => [result.pageStart, result]));
+  const uncachedPages = Array.from({ length: totalPages }, (_, index) => index + 1)
+    .filter(page => !cachedByPage.has(page));
+  const pageMap = uncachedPages.length
+    ? await buildPageMap(uncachedPages, totalPages, renderer.renderPage, signal, statusText => onProgress?.({
+        currentPage: 0, totalPages, percent: 1, totalTransactions: 0, statusText
+      }))
+    : new Map<number, PageMapItem>();
 
   const requestGate = new AdaptiveRequestGate(totalPages);
   let completedPages = 0;
@@ -89,9 +112,12 @@ export async function parsePdfWithQwen(
     await runWithConcurrency(pages, MAX_CONCURRENCY, async pageNumber => {
       assertNotAborted(signal);
       const cached = cachedByPage.get(pageNumber);
-      const result = cached || await parsePageWithFallback(
-        pageNumber, totalPages, file.name, renderer.renderPage, requestGate, signal, report
-      );
+      const mapped = pageMap.get(pageNumber);
+      const result = cached || (mapped?.locallyBlank
+        ? blankPageResult(pageNumber, totalPages, file.name)
+        : await parsePageWithFallback(
+            pageNumber, totalPages, file.name, renderer.renderPage, requestGate, signal, report, mapped
+          ));
       if (!cached && !isHardFailedPage(result)) await writeCachedResults(cacheKey, [result]);
       results.push(result);
       completedPages += 1;
@@ -107,6 +133,174 @@ export async function parsePdfWithQwen(
   }
 }
 
+async function buildPageMap(
+  pages: number[],
+  totalPages: number,
+  renderPage: (pageNumber: number, rotation?: number, scale?: number) => Promise<PdfPageImage>,
+  signal: AbortSignal | undefined,
+  report: (status: string) => void
+): Promise<Map<number, PageMapItem>> {
+  report(`正在快速扫描 ${pages.length} 个未缓存页面，过滤空白页并建立文档地图…`);
+  const thumbnails = new Map<number, PdfPageImage>();
+  const definiteBlank = new Set<number>();
+  const likelyBlank = new Set<number>();
+  await runWithConcurrency(pages, 4, async page => {
+    assertNotAborted(signal);
+    const thumbnail = await renderPage(page, 0, THUMBNAIL_SCALE);
+    thumbnails.set(page, thumbnail);
+    const blankness = await analyzeThumbnailBlankness(thumbnail.file);
+    if (blankness === 'DEFINITE') definiteBlank.add(page);
+    if (blankness !== 'CONTENT') likelyBlank.add(page);
+  }, signal);
+
+  const result = new Map<number, PageMapItem>();
+  for (const page of definiteBlank) {
+    result.set(page, {
+      page, pageType: 'BLANK', rotation: 0, bankName: '', accountName: '', accountNumbers: [],
+      density: 'LOW', confidence: 1, locallyBlank: true
+    });
+  }
+  const visiblePages = pages.filter(page => !definiteBlank.has(page));
+  const batches: number[][] = [];
+  for (let index = 0; index < visiblePages.length; index += PAGE_MAP_BATCH_SIZE) {
+    batches.push(visiblePages.slice(index, index + PAGE_MAP_BATCH_SIZE));
+  }
+  let completed = 0;
+  await runWithConcurrency(batches, 2, async batch => {
+    assertNotAborted(signal);
+    try {
+      const sheet = await createThumbnailSheet(batch.map(page => thumbnails.get(page)!));
+      const mapped = await requestPageMap(sheet, batch, signal);
+      for (const item of mapped) {
+        result.set(item.page, {
+          ...item,
+          locallyBlank: item.pageType === 'BLANK' && item.confidence >= 0.97 && likelyBlank.has(item.page)
+        });
+      }
+    } catch {
+      for (const page of batch) result.set(page, unknownPageMap(page));
+    }
+    completed += batch.length;
+    report(`文档地图已分析 ${completed}/${visiblePages.length} 个非空白页面…`);
+  }, signal);
+  for (const page of pages) if (!result.has(page)) result.set(page, unknownPageMap(page));
+  return result;
+}
+
+async function analyzeThumbnailBlankness(file: File): Promise<'DEFINITE' | 'LIKELY' | 'CONTENT'> {
+  const bitmap = await createImageBitmap(file);
+  try {
+    const width = 96;
+    const height = Math.max(96, Math.round(width * bitmap.height / Math.max(1, bitmap.width)));
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext('2d', { willReadFrequently: true });
+    if (!context) return 'CONTENT';
+    context.drawImage(bitmap, 0, 0, width, height);
+    const pixels = context.getImageData(0, 0, width, height).data;
+    let ink = 0;
+    let dark = 0;
+    for (let offset = 0; offset < pixels.length; offset += 16) {
+      const luminance = pixels[offset] * 0.2126 + pixels[offset + 1] * 0.7152 + pixels[offset + 2] * 0.0722;
+      if (luminance < 242) ink += 1;
+      if (luminance < 205) dark += 1;
+    }
+    const samples = pixels.length / 16;
+    const inkRatio = ink / samples;
+    const darkRatio = dark / samples;
+    if (inkRatio < 0.0015 && darkRatio < 0.00025) return 'DEFINITE';
+    if (inkRatio < 0.02 && darkRatio < 0.004) return 'LIKELY';
+    return 'CONTENT';
+  } finally {
+    bitmap.close();
+  }
+}
+
+async function createThumbnailSheet(images: PdfPageImage[]): Promise<File> {
+  const columns = Math.min(4, images.length);
+  const rows = Math.ceil(images.length / columns);
+  const tileWidth = 300;
+  const tileHeight = 390;
+  const headerHeight = 30;
+  const canvas = document.createElement('canvas');
+  canvas.width = columns * tileWidth;
+  canvas.height = rows * tileHeight;
+  const context = canvas.getContext('2d', { alpha: false });
+  if (!context) throw new Error('无法生成页面地图缩略图');
+  context.fillStyle = '#ffffff';
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.font = 'bold 18px sans-serif';
+  context.textAlign = 'center';
+  context.textBaseline = 'middle';
+  for (let index = 0; index < images.length; index += 1) {
+    const image = images[index];
+    const bitmap = await createImageBitmap(image.file);
+    try {
+      const x = (index % columns) * tileWidth;
+      const y = Math.floor(index / columns) * tileHeight;
+      context.fillStyle = '#111827';
+      context.fillText(`原PDF第 ${image.pageStart} 页`, x + tileWidth / 2, y + headerHeight / 2);
+      const availableHeight = tileHeight - headerHeight - 8;
+      const scale = Math.min((tileWidth - 8) / bitmap.width, availableHeight / bitmap.height);
+      const width = bitmap.width * scale;
+      const height = bitmap.height * scale;
+      context.drawImage(bitmap, x + (tileWidth - width) / 2, y + headerHeight + (availableHeight - height) / 2, width, height);
+      context.strokeStyle = '#94a3b8';
+      context.strokeRect(x + 1, y + 1, tileWidth - 2, tileHeight - 2);
+    } finally {
+      bitmap.close();
+    }
+  }
+  const blob = await canvasBlob(canvas, 'image/jpeg', 0.82);
+  canvas.width = 1;
+  canvas.height = 1;
+  return new File([blob], `page-map-${images[0]?.pageStart || 1}.jpg`, { type: 'image/jpeg' });
+}
+
+async function requestPageMap(file: File, pages: number[], signal?: AbortSignal): Promise<PageMapItem[]> {
+  const formData = new FormData();
+  formData.append('file', file);
+  formData.append('pageNumbers', pages.join(','));
+  const response = await fetch('/api/classify-bank-pages', { method: 'POST', body: formData, signal });
+  if (!response.ok) throw new Error(`页面地图服务暂时不可用（${response.status}）`);
+  const payload = await response.json() as { pages?: PageMapItem[] };
+  return Array.isArray(payload.pages) ? payload.pages : [];
+}
+
+function unknownPageMap(page: number): PageMapItem {
+  return { page, pageType: 'UNKNOWN', rotation: 0, bankName: '', accountName: '', accountNumbers: [], density: 'LOW', confidence: 0 };
+}
+
+function blankPageResult(pageNumber: number, totalPages: number, sourceFileName: string): ChunkParseResult {
+  return {
+    account: {
+      accountNumber: `待核验-${sourceFileName.replace(/\.[^.]+$/, '')}`, accountName: sourceFileName.replace(/\.[^.]+$/, ''),
+      bankName: '待核验银行', ownerType: 'DEBTOR_MAIN', fileName: sourceFileName, fileType: 'pdf', totalIn: 0, totalOut: 0,
+      transactionCount: 0, startDate: '', endDate: '', startBalance: 0, endBalance: 0, isBalanced: false, balanceDiff: 0,
+      balanceAvailable: false, parseStatus: 'COMPLETE'
+    },
+    transactions: [], warnings: [], coveredPages: [pageNumber], pageStart: pageNumber, pageEnd: pageNumber, totalPages,
+    expectedTransactionCount: 0, countComplete: true,
+    pageQuality: [{ page: pageNumber, expectedCount: 0, extractedCount: 0, status: 'COMPLETE', pageType: 'BLANK' }]
+  };
+}
+
+function uniqueRenderVariants<T extends { rotation: number; scale: number }>(variants: T[]): T[] {
+  const seen = new Set<string>();
+  return variants.filter(variant => {
+    const key = `${variant.rotation}|${variant.scale}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function pageMapAuditHint(item?: PageMapItem): string {
+  if (!item || item.confidence < 0.55) return '';
+  return `缩略图页面地图（仅作导航，具体字段仍以高清目标页为准）：页面类型 ${item.pageType}；建议顺时针旋转 ${item.rotation} 度；银行 ${item.bankName || '未确认'}；户名 ${item.accountName || '未确认'}；本方账号 ${item.accountNumbers.join('、') || '未确认'}；表格密度 ${item.density}。不得把导航结果当作不可更改的识别事实。`;
+}
+
 async function parsePageWithFallback(
   pageNumber: number,
   totalPages: number,
@@ -114,17 +308,21 @@ async function parsePageWithFallback(
   renderPage: (pageNumber: number, rotation?: number, scale?: number) => Promise<PdfPageImage>,
   requestGate: AdaptiveRequestGate,
   signal: AbortSignal | undefined,
-  report: (status: string) => void
+  report: (status: string) => void,
+  pageMap?: PageMapItem
 ): Promise<ChunkParseResult> {
   let lastError: unknown;
   let bestCandidate: ChunkParseResult | undefined;
-  const variants = [
+  const preferredRotation = pageMap?.rotation || 0;
+  const variants = uniqueRenderVariants([
+    { rotation: preferredRotation, scale: NORMAL_IMAGE_SCALE },
+    { rotation: preferredRotation, scale: HIGH_DETAIL_IMAGE_SCALE },
     { rotation: 0, scale: NORMAL_IMAGE_SCALE },
     { rotation: 0, scale: HIGH_DETAIL_IMAGE_SCALE },
     { rotation: 90, scale: NORMAL_IMAGE_SCALE },
     { rotation: 270, scale: NORMAL_IMAGE_SCALE },
     { rotation: 180, scale: NORMAL_IMAGE_SCALE }
-  ].slice(0, SINGLE_PAGE_ATTEMPTS);
+  ]).slice(0, SINGLE_PAGE_ATTEMPTS);
 
   for (let attempt = 0; attempt < variants.length; attempt += 1) {
     if (attempt > 0 && !requestGate.takeRetry()) break;
@@ -135,7 +333,10 @@ async function parsePageWithFallback(
       if (attempt) report(`第 ${pageNumber} 页正在进行第 ${attempt + 1} 次页面复核…`);
       permit = await requestGate.acquire(signal);
       const image = await renderPage(pageNumber, variant.rotation, variant.scale);
-      const candidate = await requestChunk(image, sourceFileName, signal);
+      const candidate = await requestChunkWithContext(image, sourceFileName, signal, {
+        auditHint: pageMapAuditHint(pageMap),
+        verificationMode: attempt === 0 ? 'auto' : 'always'
+      });
       if (!bestCandidate || qualityScore(candidate) > qualityScore(bestCandidate)) bestCandidate = candidate;
       if (attempt < 2 && shouldUsePageBands(candidate)) {
         report(`第 ${pageNumber} 页交易行较密或疑似漏行，正在分段读取…`);
@@ -156,6 +357,7 @@ async function parsePageWithFallback(
       permit = undefined;
       return complete;
     } catch (error) {
+      lastError = error;
       permit?.failure(isTransientWorkerError(error));
       permit = undefined;
       assertNotAborted(signal);
@@ -342,7 +544,7 @@ class AdaptiveRequestGate {
   private active = 0;
   private limit = INITIAL_CONCURRENCY;
   private successes = 0;
-  private consecutiveTransientFailures = 0;
+  private transientFailures: number[] = [];
   private cooldownUntil = 0;
   private retriesUsed = 0;
   private readonly retryBudget: number;
@@ -380,14 +582,14 @@ class AdaptiveRequestGate {
   }
 
   private noteSuccess(usageTokens: number): void {
-    this.consecutiveTransientFailures = 0;
     this.successes += 1;
     if (usageTokens > 0) this.tokenSamples.push({ at: Date.now(), tokens: usageTokens });
     this.trimTokenSamples();
+    this.trimTransientFailures();
     const recentTokens = this.tokenSamples.reduce((sum, sample) => sum + sample.tokens, 0);
     if (recentTokens > 1_500_000) this.limit = Math.max(MIN_CONCURRENCY, Math.floor(this.limit * 0.75));
-    else if (this.successes >= 12 && this.limit < MAX_CONCURRENCY) {
-      this.limit = Math.min(MAX_CONCURRENCY, this.limit + 4);
+    else if (this.successes >= 24 && this.limit < MAX_CONCURRENCY && this.transientFailures.length === 0) {
+      this.limit = Math.min(MAX_CONCURRENCY, this.limit + 1);
       this.successes = 0;
     }
   }
@@ -395,17 +597,23 @@ class AdaptiveRequestGate {
   private noteFailure(transient: boolean): void {
     this.successes = 0;
     if (!transient) return;
-    this.consecutiveTransientFailures += 1;
-    this.limit = Math.max(MIN_CONCURRENCY, Math.floor(this.limit / 2));
-    if (this.consecutiveTransientFailures >= 6) {
-      this.cooldownUntil = Date.now() + 15_000;
-      this.consecutiveTransientFailures = 0;
-    }
+    const now = Date.now();
+    this.transientFailures.push(now);
+    this.trimTransientFailures();
+    this.limit = Math.max(MIN_CONCURRENCY, this.limit - 1);
+    const burstSize = this.transientFailures.length;
+    const cooldown = burstSize >= 6 ? 30_000 : burstSize >= 3 ? 15_000 : 4_000;
+    this.cooldownUntil = Math.max(this.cooldownUntil, now + cooldown);
   }
 
   private trimTokenSamples(): void {
     const cutoff = Date.now() - 60_000;
     this.tokenSamples = this.tokenSamples.filter(sample => sample.at >= cutoff);
+  }
+
+  private trimTransientFailures(): void {
+    const cutoff = Date.now() - 60_000;
+    this.transientFailures = this.transientFailures.filter(at => at >= cutoff);
   }
 
 }
@@ -463,10 +671,12 @@ async function auditSuspiciousPages(
     let permit: AdaptivePermit | undefined;
     try {
       permit = await requestGate.acquire(signal);
+      const beforePage = nearestTransactionPage(sorted, item.page, -1);
+      const afterPage = nearestTransactionPage(sorted, item.page, 1);
       const [current, before, after] = await Promise.all([
         getImage(item.page),
-        item.page > 1 ? getImage(item.page - 1) : Promise.resolve(undefined),
-        item.page < totalPages ? getImage(item.page + 1) : Promise.resolve(undefined)
+        beforePage ? getImage(beforePage) : Promise.resolve(undefined),
+        afterPage ? getImage(afterPage) : Promise.resolve(undefined)
       ]);
       const existing = resultByPage.get(item.page);
       if (!existing) {
@@ -476,7 +686,8 @@ async function auditSuspiciousPages(
       }
       const audited = await requestChunkWithContext(current, sourceFileName, signal, {
         before, after,
-        auditHint: JSON.stringify({ reasons: item.reasons, transactions: existing.transactions, warnings: existing.warnings || [] })
+        auditHint: JSON.stringify({ reasons: item.reasons, transactions: existing.transactions, warnings: existing.warnings || [] }),
+        verificationMode: 'always'
       });
       if (preferContextAudit(existing, audited)) resultByPage.set(item.page, audited);
       permit.success(audited.usageTokens || 0);
@@ -524,6 +735,28 @@ function suspiciousPageScores(results: ChunkParseResult[]): Array<{ page: number
     }
   }
 
+  // Duplex exports commonly put a blank back between two transaction fronts.
+  // Look across those backs so a failed rotated/dense front page cannot hide as
+  // a zero-row BLANK result.
+  for (let index = 0; index < results.length; index += 1) {
+    if (results[index].transactions.length) continue;
+    const previous = [...results.slice(Math.max(0, index - 3), index)].reverse().find(result => result.transactions.length);
+    const next = results.slice(index + 1, index + 4).find(result => result.transactions.length);
+    if (!previous || !next) continue;
+    const gap = next.pageStart - previous.pageStart;
+    // A single page between two transaction pages is the ordinary blank back
+    // in a duplex export.  A missed front creates a wider gap; when both known
+    // fronts share parity, audit only the zero page on that same parity.
+    if (gap <= 2) continue;
+    if (previous.pageStart % 2 === next.pageStart % 2
+      && results[index].pageStart % 2 !== previous.pageStart % 2) continue;
+    const previousIdentity = dominantResultIdentity(previous);
+    const nextIdentity = dominantResultIdentity(next);
+    if (previousIdentity && previousIdentity === nextIdentity) {
+      add(results[index].pageStart, 40, '前后同一账户均有流水，本页零笔结果可能是旋转或密集表格漏识别');
+    }
+  }
+
   for (let index = 1; index < results.length; index += 1) {
     const previous = [...results[index - 1].transactions].sort(compareSourceOrder).at(-1);
     const current = [...results[index].transactions].sort(compareSourceOrder)[0];
@@ -538,6 +771,22 @@ function suspiciousPageScores(results: ChunkParseResult[]): Array<{ page: number
     }
   }
   return [...output.values()];
+}
+
+function nearestTransactionPage(results: ChunkParseResult[], page: number, direction: -1 | 1): number | undefined {
+  const ordered = direction < 0 ? [...results].reverse() : results;
+  return ordered.find(result => direction < 0
+    ? result.pageStart < page && page - result.pageStart <= 3 && result.transactions.length > 0
+    : result.pageStart > page && result.pageStart - page <= 3 && result.transactions.length > 0)?.pageStart;
+}
+
+function dominantResultIdentity(result: ChunkParseResult): string {
+  const counts = new Map<string, number>();
+  for (const transaction of result.transactions) {
+    const key = normalizedAccount(transaction.accountNumber);
+    if (key) counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  return [...counts].sort((a, b) => b[1] - a[1])[0]?.[0] || '';
 }
 
 function preferContextAudit(existing: ChunkParseResult, audited: ChunkParseResult): boolean {
@@ -603,15 +852,17 @@ function compareSourceOrder(a: StandardTransaction, b: StandardTransaction): num
   return (a.rawPageNumber || 0) - (b.rawPageNumber || 0) || (a.rawRowIndex || 0) - (b.rawRowIndex || 0);
 }
 
-async function requestChunk(chunk: PdfPageImage, sourceFileName: string, signal?: AbortSignal): Promise<ChunkParseResult> {
-  return requestChunkWithContext(chunk, sourceFileName, signal);
-}
-
 async function requestChunkWithContext(
   chunk: PdfPageImage,
   sourceFileName: string,
   signal?: AbortSignal,
-  context?: { before?: PdfPageImage; after?: PdfPageImage; auditHint?: string; isPageSlice?: boolean }
+  context?: {
+    before?: PdfPageImage;
+    after?: PdfPageImage;
+    auditHint?: string;
+    isPageSlice?: boolean;
+    verificationMode?: 'always' | 'auto' | 'skip';
+  }
 ): Promise<ChunkParseResult> {
   const formData = new FormData();
   formData.append('file', chunk.file);
@@ -624,6 +875,7 @@ async function requestChunkWithContext(
   if (context?.after) formData.append('contextAfter', context.after.file);
   if (context?.auditHint) formData.append('auditHint', context.auditHint);
   if (context?.isPageSlice) formData.append('isPageSlice', 'true');
+  formData.append('verificationMode', context?.verificationMode || (context?.isPageSlice ? 'skip' : 'auto'));
 
   const requestController = new AbortController();
   const timeout = setTimeout(() => requestController.abort(new DOMException('页面解析等待超时', 'TimeoutError')), REQUEST_TIMEOUT_MS);
@@ -779,7 +1031,7 @@ async function parsePdfDirectStream(
 const CACHE_DB = 'lawflow-pdf-recovery';
 
 const CACHE_STORE = 'ranges';
-const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 async function readCachedResults(cacheKey: string): Promise<ChunkParseResult[]> {
   try {

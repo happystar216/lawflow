@@ -20,7 +20,9 @@ export function normalizeRecognizedData(
     ...transaction,
     accountNumber: canonicalStoredAccountNumber(transaction.accountNumber, transaction.rawSourceFile, transaction.sourceDocumentId, aliasCandidates)
   })));
-  const stabilized = healSummaryOverriddenAmounts(stabilizePageAccountIdentities(preparedTransactions));
+  const stabilized = repairOutlierOcrYears(restorePrintedDatesFromRawText(
+    healSummaryOverriddenAmounts(stabilizePageAccountIdentities(preparedTransactions))
+  ));
   const { transactions: deduped, mergedPagesByAccount } = deduplicateTransactions(stabilized);
   const settlementRepaired = repairPeriodicSettlementRows(deduped);
   const calibrated = calibrateDirectionsByBalanceMath(settlementRepaired);
@@ -85,9 +87,10 @@ export function normalizeRecognizedData(
       });
     const parseWarnings = [...new Set([...scopedPageWarnings, ...accountUnscopedWarnings])];
     const representative = bestOriginal(originals) || minimalAccount(accountTransactions[0]);
-    const bankName = mostFrequent(accountTransactions.map(item => item.bankName).filter(isUsefulBankName))
-      || representative.bankName || '待核验银行';
     const accountName = cleanAccountHolderName(mostFrequent(accountTransactions.map(item => item.accountName)) || representative.accountName);
+    const bankName = normalizeBankName(mostFrequent(accountTransactions.map(item => item.bankName).filter(name => isUsefulBankName(name, accountName)))
+      || (isUsefulBankName(representative.bankName, accountName) ? representative.bankName : '')
+      || '待核验银行');
     const totalIn = sum(accountTransactions.filter(item => item.direction === 'IN').map(item => item.amount));
     const totalOut = sum(accountTransactions.filter(item => item.direction === 'OUT').map(item => item.amount));
     const dates = accountTransactions.map(item => item.transactionDate).filter(Boolean).sort();
@@ -272,6 +275,76 @@ function repairPeriodicSettlementRows(transactions: StandardTransaction[]): Stan
   return transactions;
 }
 
+/**
+ * Repairs a single implausible OCR year only when the rest of the same account
+ * establishes a compact statement period.  This deliberately does not clamp
+ * genuine long-running statements or alter month/day values.
+ */
+function repairOutlierOcrYears(transactions: StandardTransaction[]): StandardTransaction[] {
+  const groups = new Map<string, StandardTransaction[]>();
+  for (const transaction of transactions) {
+    const key = accountIdentityKey(transaction);
+    groups.set(key, [...(groups.get(key) || []), transaction]);
+  }
+  for (const rows of groups.values()) {
+    if (rows.length < 5) continue;
+    const dated = rows.map(row => ({ row, date: parseIsoDate(row.transactionDate) })).filter(
+      (item): item is { row: StandardTransaction; date: Date } => Boolean(item.date)
+    );
+    if (dated.length < 5) continue;
+    for (const candidate of dated) {
+      const peerYears = dated.filter(item => item !== candidate).map(item => item.date.getUTCFullYear());
+      const peerMin = Math.min(...peerYears);
+      const peerMax = Math.max(...peerYears);
+      if (peerMax - peerMin > 3) continue;
+      const currentYear = candidate.date.getUTCFullYear();
+      if (currentYear >= peerMin - 2 && currentYear <= peerMax + 2) continue;
+      const ordered = [...rows].sort(compareSourceOrder);
+      const index = ordered.indexOf(candidate.row);
+      const neighbours = [ordered[index - 1], ordered[index + 1]]
+        .map(row => parseIsoDate(row?.transactionDate))
+        .filter((date): date is Date => date !== undefined)
+        .filter(date => date.getUTCFullYear() >= peerMin && date.getUTCFullYear() <= peerMax);
+      const possible = Array.from({ length: peerMax - peerMin + 1 }, (_, offset) => peerMin + offset)
+        .map(year => new Date(Date.UTC(year, candidate.date.getUTCMonth(), candidate.date.getUTCDate())))
+        .filter(date => date.getUTCMonth() === candidate.date.getUTCMonth() && date.getUTCDate() === candidate.date.getUTCDate());
+      if (!possible.length) continue;
+      const repaired = possible.sort((a, b) => yearCandidateScore(a, neighbours) - yearCandidateScore(b, neighbours))[0];
+      const repairedDate = isoDate(repaired);
+      const timeSuffix = candidate.row.transactionTime.match(/(?:T|\s)(\d{2}:\d{2}(?::\d{2})?)$/)?.[1];
+      candidate.row.transactionDate = repairedDate;
+      candidate.row.transactionTime = timeSuffix ? `${repairedDate} ${timeSuffix}` : repairedDate;
+      candidate.row.correctionReason = appendCorrectionReason(candidate.row.correctionReason, '系统依据同账户主要时间范围修正异常年份');
+      if (!candidate.row.dataQualityIssues?.length) candidate.row.reviewStatus = 'AUTO_PASSED';
+    }
+  }
+  return transactions;
+}
+
+function restorePrintedDatesFromRawText(transactions: StandardTransaction[]): StandardTransaction[] {
+  for (const transaction of transactions) {
+    const current = parseIsoDate(transaction.transactionDate);
+    if (!current || !transaction.rawText) continue;
+    const printed = [...transaction.rawText.matchAll(/(?<!\d)(20\d{2})(\d{2})(\d{2})(?!\d)/g)]
+      .map(match => `${match[1]}-${match[2]}-${match[3]}`)
+      .filter(date => Boolean(parseIsoDate(date)));
+    if (!printed.length || printed.includes(transaction.transactionDate)) continue;
+    const sameMonthDay = printed.find(date => date.slice(5) === transaction.transactionDate.slice(5));
+    if (!sameMonthDay || Math.abs(Number(sameMonthDay.slice(0, 4)) - current.getUTCFullYear()) < 2) continue;
+    const timeSuffix = transaction.transactionTime.match(/(?:T|\s)(\d{2}:\d{2}(?::\d{2})?)$/)?.[1];
+    transaction.transactionDate = sameMonthDay;
+    transaction.transactionTime = timeSuffix ? `${sameMonthDay} ${timeSuffix}` : sameMonthDay;
+    transaction.correctionReason = appendCorrectionReason(transaction.correctionReason, '系统依据原始行印刷日期恢复异常年份');
+    if (!transaction.dataQualityIssues?.length) transaction.reviewStatus = 'AUTO_PASSED';
+  }
+  return transactions;
+}
+
+function yearCandidateScore(candidate: Date, neighbours: Date[]): number {
+  if (!neighbours.length) return 0;
+  return neighbours.reduce((sum, date) => sum + Math.abs(candidate.getTime() - date.getTime()), 0);
+}
+
 function isPeriodicSettlement(transaction: StandardTransaction): boolean {
   const text = `${transaction.summary || ''} ${transaction.counterpartyName || ''} ${transaction.rawText || ''}`;
   return /结息|利息结算|计息/.test(text);
@@ -314,6 +387,10 @@ function repairSettlementYear(
   const currentDate = parseIsoDate(transaction.transactionDate);
   const previousDate = parseIsoDate(previous.transactionDate);
   if (!currentDate || !previousDate) return;
+  // Never move away from a date that is explicitly printed in the preserved
+  // source row.  Balance blocks from another account can otherwise make a
+  // consolidated statement look like one impossible chronological sequence.
+  if (transaction.correctionReason?.includes('依据原始行印刷日期恢复异常年份')) return;
   const alreadyOrdered = direction === 1
     ? currentDate.getTime() > previousDate.getTime()
     : currentDate.getTime() < previousDate.getTime();
@@ -474,7 +551,13 @@ function unifyInterleavedStatementAccounts(transactions: StandardTransaction[]):
           }
         }
 
-        if (continuousHits > 0 || transitions >= 2) {
+        // Never merge two merely interleaved accounts.  They may be separate
+        // owner accounts printed in alternating sections, or an owner-account
+        // and card-number column.  Alias repair is allowed only when the account
+        // strings themselves are an obvious OCR variant and the page sequence
+        // also provides corroborating continuity.
+        const duplicateHits = crossAccountDuplicateHits(combined, acc1, acc2);
+        if (areLikelyOcrAccountAliases(acc1, acc2) && (continuousHits > 0 || transitions >= 2 || duplicateHits >= 2)) {
           const count1 = combined.filter(t => normalizeAccountIdentityPart(t.accountNumber) === acc1).length;
           const count2 = combined.filter(t => normalizeAccountIdentityPart(t.accountNumber) === acc2).length;
           const targetAcc = count1 >= count2 ? acc1 : acc2;
@@ -493,6 +576,54 @@ function unifyInterleavedStatementAccounts(transactions: StandardTransaction[]):
   }
 
   return transactions;
+}
+
+function areLikelyOcrAccountAliases(left: string, right: string): boolean {
+  if (left === right) return true;
+  if (!/^\d+$/.test(left) || !/^\d+$/.test(right)) return false;
+  if (Math.abs(left.length - right.length) > 1 || Math.min(left.length, right.length) < 14) return false;
+  if (left.slice(-4) !== right.slice(-4)) return false;
+  return boundedEditDistance(left, right, 2) <= 2;
+}
+
+function boundedEditDistance(left: string, right: string, limit: number): number {
+  if (Math.abs(left.length - right.length) > limit) return limit + 1;
+  let previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+  for (let i = 1; i <= left.length; i++) {
+    const current = [i];
+    let rowMinimum = i;
+    for (let j = 1; j <= right.length; j++) {
+      const value = Math.min(
+        previous[j] + 1,
+        current[j - 1] + 1,
+        previous[j - 1] + (left[i - 1] === right[j - 1] ? 0 : 1)
+      );
+      current.push(value);
+      rowMinimum = Math.min(rowMinimum, value);
+    }
+    if (rowMinimum > limit) return limit + 1;
+    previous = current;
+  }
+  return previous[right.length];
+}
+
+function crossAccountDuplicateHits(rows: StandardTransaction[], first: string, second: string): number {
+  const left = rows.filter(row => normalizeAccountIdentityPart(row.accountNumber) === first);
+  const right = rows.filter(row => normalizeAccountIdentityPart(row.accountNumber) === second);
+  let hits = 0;
+  const used = new Set<number>();
+  for (const candidate of left) {
+    const index = right.findIndex((row, rowIndex) => !used.has(rowIndex)
+      && row.transactionDate === candidate.transactionDate
+      && row.direction === candidate.direction
+      && Math.abs(row.amount - candidate.amount) < 0.01
+      && (row.balanceAvailable === false || candidate.balanceAvailable === false || Math.abs(row.balance - candidate.balance) < 0.01));
+    if (index >= 0) {
+      used.add(index);
+      hits += 1;
+    }
+  }
+  return hits;
 }
 
 function healSummaryOverriddenAmounts(transactions: StandardTransaction[]): StandardTransaction[] {
@@ -620,8 +751,23 @@ function creditCardAccountKeys(transactions: StandardTransaction[]): Set<string>
   return new Set([...groups].filter(([, rows]) => isCreditCardStatement(rows)).map(([key]) => key));
 }
 
-function isUsefulBankName(value: string): boolean {
-  return Boolean(value) && !/待核验|待核对|未知/.test(value) && !/^[\u4e00-\u9fa5]{2,4}$/.test(value);
+function isUsefulBankName(value: string, accountName = ''): boolean {
+  const normalized = (value || '').trim();
+  if (!normalized || /待核验|待核对|未知/.test(normalized)) return false;
+  const owner = cleanAccountHolderName(accountName || '');
+  // A common OCR hallucination concatenates the customer's name with
+  // “商业银行”.  It is safer to show 待核验银行 than attribute evidence to a
+  // non-existent institution.
+  if (owner.length >= 2 && normalized.includes(owner) && /银行/.test(normalized)) return false;
+  return /银行|农信|信用社|农商|邮储|财务公司/.test(normalized);
+}
+
+function normalizeBankName(value: string): string {
+  const normalized = (value || '').trim();
+  const aliases: Record<string, string> = {
+    '绵阳商业银行': '绵阳市商业银行'
+  };
+  return aliases[normalized] || normalized;
 }
 
 function mostFrequent(values: string[]): string {

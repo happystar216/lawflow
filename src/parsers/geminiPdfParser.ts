@@ -12,6 +12,7 @@ export interface GeminiProgressInfo {
 export interface GeminiParserClientOptions {
   respondentName?: string;
   totalPages?: number;
+  sourceContentHash?: string;
 }
 
 const DIRECT_PDF_MAX_PAGES = 20;
@@ -72,7 +73,7 @@ export async function parsePdfWithGemini(
       totalTransactions: info.totalTransactions,
       percent: info.percent,
       isStreaming: info.percent < 100
-    }), signal);
+    }), signal, { cacheIdentity: options?.sourceContentHash });
   }
   formData.append('file', file);
   formData.append('sourceFileName', file.name);
