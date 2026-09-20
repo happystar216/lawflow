@@ -15,6 +15,7 @@ import { Step5PostAnnotation } from './components/Step5PostAnnotation';
 import { getCurrentSessionUser, logoutUser } from './store/authStore';
 import { CaseRecord, saveCaseRecord, listSavedCases } from './store/caseStore';
 import { normalizeRecognizedData } from './utils/recognizedDataNormalizer';
+import { publishAutomationAppState } from './debug/automationBridge';
 
 const Step1Upload = lazy(() => import('./components/Step1Upload').then(module => ({ default: module.Step1Upload })));
 const Step4Compute = lazy(() => import('./components/Step4Compute').then(module => ({ default: module.Step4Compute })));
@@ -245,6 +246,17 @@ export const App: React.FC = () => {
     setTransactions(processedTransactions);
     setEvaluationReport(report);
   };
+
+  useEffect(() => {
+    publishAutomationAppState({
+      ready: Boolean(currentUser && hydratedUserId === currentUser.id),
+      currentStep,
+      caseMetadata: caseMeta,
+      accounts,
+      transactions,
+      evaluationReport: freshEvaluationReport
+    });
+  }, [currentUser, hydratedUserId, currentStep, caseMeta, accounts, transactions, freshEvaluationReport]);
 
   if (!currentUser) {
     return <AuthScreen onAuthenticated={user => setCurrentUser(user)} />;

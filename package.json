@@ -5,9 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.functions.json",
+    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.functions.json && tsc -p tsconfig.scripts.json",
     "build": "npm run typecheck && vite build",
     "test": "tsx --test tests/**/*.test.ts",
+    "debug:online": "tsx scripts/onlineDebugServer.ts",
     "preview": "vite preview",
     "deploy": "npm run build && wrangler pages deploy dist --project-name=lawflow"
   },
@@ -33,6 +34,7 @@
     "@types/react-dom": "^18.3.5",
     "@vitejs/plugin-react": "^4.3.4",
     "autoprefixer": "^10.4.20",
+    "playwright-core": "^1.55.0",
     "postcss": "^8.4.49",
     "tailwindcss": "^3.4.16",
     "tsx": "^4.23.12",

@@ -7,6 +7,7 @@ import { deleteSourceDocument, saveSourceDocument } from '../store/sourceDocumen
 import { accountIdentityKey, transactionBelongsToAccount } from '../utils/accountIdentity';
 import { importErrorForUser } from '../utils/userFacingError';
 import { attachSourceProvenance, createExtractionRun, identifySourceDocument, sourceFilesWithoutTransactions, sourceIdentity, transactionCountsBySource } from '../utils/evidenceProvenance';
+import { publishAutomationImportState } from '../debug/automationBridge';
 
 interface Step1Props {
   caseId: string;
@@ -81,6 +82,32 @@ export const Step1Upload: React.FC<Step1Props> = ({
     window.addEventListener('beforeunload', warnBeforeLeaving);
     return () => window.removeEventListener('beforeunload', warnBeforeLeaving);
   }, [isProcessing]);
+
+  useEffect(() => {
+    publishAutomationImportState({
+      isProcessing,
+      statusText,
+      progress: progressInfo ? {
+        percent: progressInfo.percent,
+        totalTransactions: progressInfo.totalTransactions,
+        statusText: progressInfo.statusText,
+        currentBank: progressInfo.currentBank
+      } : null,
+      tasks: importTasks.map(task => ({
+        id: task.id,
+        fileName: task.file.name,
+        status: task.status,
+        title: task.title,
+        message: task.message,
+        impact: task.impact,
+        details: task.details,
+        transactionCount: task.transactionCount,
+        accountCount: task.accountCount,
+        diagnosticCode: task.diagnosticCode,
+        diagnosis: task.diagnosis
+      }))
+    });
+  }, [isProcessing, statusText, progressInfo, importTasks]);
 
   const handleCancelProcessing = () => {
     if (abortControllerRef.current) {
