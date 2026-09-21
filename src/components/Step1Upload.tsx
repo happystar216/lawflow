@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { UploadCloud, FileSpreadsheet, FileText, FileImage, CheckCircle2, ArrowRight, ArrowLeft, Trash2, PlusCircle, AlertCircle, ShieldCheck, Sparkles, StopCircle, RotateCcw, CircleSlash2 } from 'lucide-react';
+import { UploadCloud, FileSpreadsheet, FileText, FileImage, CheckCircle2, ArrowRight, ArrowLeft, Trash2, PlusCircle, AlertCircle, ShieldCheck, Sparkles, StopCircle, RotateCcw, CircleSlash2, Scissors, X } from 'lucide-react';
 import { BankAccount, StandardTransaction } from '../types/transaction';
 import { parseExcelBankStatement } from '../parsers/excelParser';
 import { parsePdfWithGemini, GeminiProgressInfo } from '../parsers/geminiPdfParser';
@@ -10,6 +10,12 @@ import { attachSourceProvenance, createExtractionRun, identifySourceDocument, so
 import { publishAutomationImportState } from '../debug/automationBridge';
 import { normalizeRecognizedData } from '../utils/recognizedDataNormalizer';
 import { businessAccounts, incompleteRecognitionPages, isDocumentReviewAccount } from '../review/recognitionCompleteness';
+import {
+  createBankSplitFiles,
+  PdfBankSplitPlan,
+  preparePdfBankSplitPlan,
+  validateBankGroups
+} from '../parsers/pdfBankSplitter';
 
 interface Step1Props {
   caseId: string;
@@ -58,6 +64,8 @@ export const Step1Upload: React.FC<Step1Props> = ({
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isCancellable, setIsCancellable] = useState(false);
   const [importTasks, setImportTasks] = useState<ImportTask[]>([]);
+  const [pendingPdfPlans, setPendingPdfPlans] = useState<PdfBankSplitPlan[]>([]);
+  const [splitValidationErrors, setSplitValidationErrors] = useState<Record<string, string[]>>({});
 
   const abortControllerRef = useRef<AbortController | null>(null);
   const zeroTransactionFiles = sourceFilesWithoutTransactions(accounts, transactions);
@@ -108,9 +116,15 @@ export const Step1Upload: React.FC<Step1Props> = ({
         accountCount: task.accountCount,
         diagnosticCode: task.diagnosticCode,
         diagnosis: task.diagnosis
+      })),
+      pdfSplitPlans: pendingPdfPlans.map(plan => ({
+        fileName: plan.sourceFile.name,
+        totalPages: plan.totalPages,
+        groups: plan.groups.map(group => ({ bankName: group.bankName, pageSelection: group.pageSelection })),
+        validationErrors: splitValidationErrors[plan.id] || []
       }))
     });
-  }, [isProcessing, statusText, progressInfo, importTasks]);
+  }, [isProcessing, statusText, progressInfo, importTasks, pendingPdfPlans, splitValidationErrors]);
 
   const handleCancelProcessing = () => {
     if (abortControllerRef.current) {
@@ -120,7 +134,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
     setStatusText('正在停止当前文件解析…');
   };
 
-  const handleFiles = async (files: FileList | File[]) => {
+  const processFiles = async (files: FileList | File[]) => {
     if (isProcessing) {
       setErrorMessage('当前文件仍在处理中，请等待完成或停止后再添加文件。');
       return;
@@ -317,6 +331,124 @@ export const Step1Upload: React.FC<Step1Props> = ({
     onDataUpdated(newAccounts, newTransactions);
   };
 
+  const preparePdfPlans = async (files: File[]) => {
+    if (!files.length) return;
+    setIsProcessing(true);
+    setErrorMessage(null);
+    setProgressInfo(null);
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+    setIsCancellable(true);
+    try {
+      for (const [fileIndex, file] of files.entries()) {
+        setStatusText(`正在扫描“${file.name}”的银行和页码…`);
+        const plan = await preparePdfBankSplitPlan(file, (message, completedPages, totalPages) => {
+          const fileBase = fileIndex / files.length;
+          const fileProgress = totalPages ? completedPages / totalPages / files.length : 0;
+          setProgressInfo({
+            statusText: message,
+            totalTransactions: 0,
+            percent: Math.min(99, Math.round((fileBase + fileProgress) * 100)),
+            isStreaming: true
+          });
+          setStatusText(message);
+        }, controller.signal);
+        setPendingPdfPlans(current => {
+          const next = new Map(current.map(item => [item.id, item]));
+          next.set(plan.id, plan);
+          return [...next.values()];
+        });
+      }
+    } catch (error) {
+      if (controller.signal.aborted) setStatusText('已停止 PDF 分拣，尚未开始识别。');
+      else setErrorMessage(`PDF 分拣失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      abortControllerRef.current = null;
+      setIsCancellable(false);
+      setIsProcessing(false);
+      setProgressInfo(null);
+      if (!controller.signal.aborted) setStatusText(null);
+    }
+  };
+
+  const handleFiles = async (files: FileList | File[]) => {
+    if (isProcessing) {
+      setErrorMessage('当前文件仍在处理中，请等待完成或停止后再添加文件。');
+      return;
+    }
+    const selected = Array.from(files);
+    const pdfFiles = selected.filter(file => file.name.toLowerCase().endsWith('.pdf'));
+    const electronicFiles = selected.filter(file => !file.name.toLowerCase().endsWith('.pdf'));
+    if (electronicFiles.length) await processFiles(electronicFiles);
+    if (pdfFiles.length) await preparePdfPlans(pdfFiles);
+  };
+
+  const updatePdfGroup = (planId: string, groupId: string, patch: { bankName?: string; pageSelection?: string }) => {
+    setPendingPdfPlans(current => current.map(plan => plan.id !== planId ? plan : {
+      ...plan,
+      groups: plan.groups.map(group => group.id === groupId ? { ...group, ...patch } : group)
+    }));
+    setSplitValidationErrors(current => ({ ...current, [planId]: [] }));
+  };
+
+  const addPdfGroup = (planId: string) => {
+    setPendingPdfPlans(current => current.map(plan => plan.id !== planId ? plan : {
+      ...plan,
+      groups: [...plan.groups, {
+        id: `MANUAL_${Date.now()}_${plan.groups.length + 1}`,
+        bankName: '',
+        suggestedBankName: '',
+        pages: [],
+        pageSelection: '',
+        confidence: 1,
+        pageTypes: []
+      }]
+    }));
+    setSplitValidationErrors(current => ({ ...current, [planId]: [] }));
+  };
+
+  const removePdfGroup = (planId: string, groupId: string) => {
+    setPendingPdfPlans(current => current.map(plan => plan.id !== planId ? plan : {
+      ...plan,
+      groups: plan.groups.filter(group => group.id !== groupId)
+    }));
+    setSplitValidationErrors(current => ({ ...current, [planId]: [] }));
+  };
+
+  const discardPdfPlan = (planId: string) => {
+    setPendingPdfPlans(current => current.filter(plan => plan.id !== planId));
+    setSplitValidationErrors(current => {
+      const next = { ...current };
+      delete next[planId];
+      return next;
+    });
+  };
+
+  const confirmPdfPlans = async () => {
+    const errors = Object.fromEntries(pendingPdfPlans.map(plan => [plan.id, validateBankGroups(plan.groups, plan.totalPages)]));
+    setSplitValidationErrors(errors);
+    if (Object.values(errors).some(items => items.length)) {
+      setErrorMessage('分拣方案仍有未确认、漏页或重复页，请按红色提示修改后再开始识别。');
+      return;
+    }
+    setErrorMessage(null);
+    setIsProcessing(true);
+    setStatusText('正在生成各银行独立 PDF…');
+    try {
+      const splitFiles: File[] = [];
+      for (const plan of pendingPdfPlans) splitFiles.push(...await createBankSplitFiles(plan));
+      setPendingPdfPlans([]);
+      setSplitValidationErrors({});
+      setIsProcessing(false);
+      setStatusText(null);
+      await processFiles(splitFiles);
+    } catch (error) {
+      setIsProcessing(false);
+      setStatusText(null);
+      setErrorMessage(`无法生成银行分文件：${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
@@ -371,7 +503,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
           上传银行流水证据文件
         </h1>
         <p className="text-sm text-slate-500 mt-1">
-          支持各大商业银行导出的 Excel/CSV 电子流水及多页 PDF 扫描件。文件将通过已配置的云端识别服务提取交易明细，完成后请对照原件复核。
+          Excel/CSV 会直接读取；PDF 会先按银行和页码生成分拣方案，经你确认后再分别识别。完成后请对照原件复核。
         </p>
       </div>
 
@@ -459,7 +591,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
                   <div className="flex justify-between items-center text-[11px] text-slate-600 font-medium pt-0.5">
                     <div className="flex items-center space-x-1.5">
                       <span className="inline-block w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-                      <span><strong>正在识别文件内容</strong></span>
+                      <span><strong>{pendingPdfPlans.length ? '正在处理文件' : '正在扫描或识别文件'}</strong></span>
                       {progressInfo.currentBank && (
                         <span className="ml-1 px-1.5 py-0.5 rounded bg-blue-100 text-blue-800 text-[10px] font-semibold">
                           {progressInfo.currentBank}
@@ -483,6 +615,126 @@ export const Step1Upload: React.FC<Step1Props> = ({
           )}
         </div>
       </div>
+
+      {pendingPdfPlans.length > 0 && (
+        <div className="bg-white rounded-2xl border border-blue-200 shadow-sm overflow-hidden">
+          <div className="px-5 py-4 bg-blue-50/80 border-b border-blue-200 flex items-start justify-between gap-4">
+            <div className="flex items-start gap-3">
+              <div className="p-2 rounded-xl bg-blue-100 text-blue-700">
+                <Scissors className="w-5 h-5" />
+              </div>
+              <div>
+                <h2 className="text-sm font-semibold text-slate-900">确认 PDF 分拣方案</h2>
+                <p className="text-xs text-slate-600 mt-1 leading-relaxed">
+                  系统目前只完成了页面分拣，还没有识别流水。请确认每个银行和对应原文件页码；确认后才会生成独立 PDF 并逐个识别。
+                </p>
+              </div>
+            </div>
+            <span className="text-[11px] font-medium text-blue-700 bg-white border border-blue-200 rounded-full px-2.5 py-1 flex-shrink-0">
+              待确认 {pendingPdfPlans.length} 个原文件
+            </span>
+          </div>
+
+          <div className="p-5 space-y-5">
+            {pendingPdfPlans.map(plan => {
+              const planErrors = splitValidationErrors[plan.id] || [];
+              return (
+                <section key={plan.id} className="rounded-xl border border-slate-200 overflow-hidden">
+                  <div className="px-4 py-3 bg-slate-50 border-b border-slate-200 flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="text-sm font-semibold text-slate-900 truncate" title={plan.sourceFile.name}>{plan.sourceFile.name}</div>
+                      <div className="text-[11px] text-slate-500 mt-0.5">共 {plan.totalPages} 页 · 建议拆成 {plan.groups.length} 个银行文件</div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => discardPdfPlan(plan.id)}
+                      disabled={isProcessing}
+                      className="inline-flex items-center gap-1 text-xs text-slate-500 hover:text-rose-600 px-2 py-1.5 rounded-lg hover:bg-rose-50 disabled:opacity-50"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      移除
+                    </button>
+                  </div>
+
+                  <div className="p-4 space-y-3">
+                    <div className="hidden sm:grid grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)_auto] gap-3 px-1 text-[11px] font-medium text-slate-500">
+                      <span>银行名称</span>
+                      <span>原文件页码</span>
+                      <span className="w-8" />
+                    </div>
+                    {plan.groups.map((group, groupIndex) => (
+                      <div key={group.id} className="grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)_auto] gap-3 items-start rounded-lg sm:rounded-none border sm:border-0 border-slate-200 p-3 sm:p-0">
+                        <label className="space-y-1">
+                          <span className="sm:hidden text-[11px] font-medium text-slate-500">银行名称</span>
+                          <input
+                            value={group.bankName}
+                            onChange={event => updatePdfGroup(plan.id, group.id, { bankName: event.target.value })}
+                            placeholder="例如：中国工商银行"
+                            className={`w-full rounded-lg border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-200 ${/待确认|待核验|未知/.test(group.bankName) || !group.bankName.trim() ? 'border-amber-300 bg-amber-50' : 'border-slate-300 bg-white'}`}
+                          />
+                          {group.bankName === group.suggestedBankName && group.confidence < 0.55 && (
+                            <span className="block text-[10px] text-amber-700">银行名称把握较低，请对照原件确认</span>
+                          )}
+                        </label>
+                        <label className="space-y-1">
+                          <span className="sm:hidden text-[11px] font-medium text-slate-500">原文件页码</span>
+                          <input
+                            value={group.pageSelection}
+                            onChange={event => updatePdfGroup(plan.id, group.id, { pageSelection: event.target.value })}
+                            placeholder="例如：1-12,15"
+                            className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-mono outline-none focus:ring-2 focus:ring-blue-200"
+                          />
+                          <span className="block text-[10px] text-slate-400">连续页用“-”，不连续页用逗号</span>
+                        </label>
+                        <button
+                          type="button"
+                          onClick={() => removePdfGroup(plan.id, group.id)}
+                          disabled={plan.groups.length === 1 || isProcessing}
+                          className="w-8 h-8 inline-flex items-center justify-center rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 disabled:opacity-30"
+                          title={plan.groups.length === 1 ? '至少保留一个分组' : `删除第 ${groupIndex + 1} 个分组`}
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      </div>
+                    ))}
+
+                    <button
+                      type="button"
+                      onClick={() => addPdfGroup(plan.id)}
+                      disabled={isProcessing}
+                      className="inline-flex items-center gap-1.5 text-xs font-medium text-blue-600 hover:text-blue-700 disabled:opacity-50"
+                    >
+                      <PlusCircle className="w-4 h-4" />
+                      添加银行分组
+                    </button>
+
+                    {planErrors.length > 0 && (
+                      <div role="alert" className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-[11px] text-rose-900 space-y-1">
+                        {planErrors.map(error => <div key={error}>• {error}</div>)}
+                      </div>
+                    )}
+                  </div>
+                </section>
+              );
+            })}
+
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 pt-1">
+              <p className="text-[11px] text-slate-500 leading-relaxed">
+                确认时会检查 1 到末页是否全部覆盖且没有重复；名称相同的银行会自动合并。生成的分文件保留原 PDF 页面内容，不转成图片。
+              </p>
+              <button
+                type="button"
+                onClick={confirmPdfPlans}
+                disabled={isProcessing || pendingPdfPlans.length === 0}
+                className="inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold shadow-sm disabled:opacity-50 flex-shrink-0"
+              >
+                <CheckCircle2 className="w-4 h-4" />
+                确认分拣并开始识别
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {zeroTransactionFiles.length > 0 && (
         <div className="flex items-start gap-3 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-amber-950">
@@ -550,7 +802,9 @@ export const Step1Upload: React.FC<Step1Props> = ({
                     {task.retryable && !isActive && (
                       <button
                         type="button"
-                        onClick={() => handleFiles([task.file])}
+                        onClick={() => task.file.type === 'application/pdf'
+                          ? processFiles([task.file])
+                          : handleFiles([task.file])}
                         disabled={isProcessing}
                         className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-slate-300 bg-white text-slate-700 hover:bg-slate-50 text-[11px] font-medium disabled:opacity-50 flex-shrink-0"
                       >
@@ -672,15 +926,23 @@ export const Step1Upload: React.FC<Step1Props> = ({
 
         <button
           onClick={onNext}
-          disabled={!hasTransactions || isProcessing}
+          disabled={!hasTransactions || isProcessing || pendingPdfPlans.length > 0}
           className={`inline-flex items-center space-x-2 px-6 py-2.5 rounded-xl text-sm font-medium transition shadow-sm ${
-            hasTransactions && !isProcessing
+            hasTransactions && !isProcessing && pendingPdfPlans.length === 0
               ? 'bg-blue-600 hover:bg-blue-700 text-white shadow-blue-500/20'
               : 'bg-slate-200 text-slate-400 cursor-not-allowed'
           }`}
-          title={!hasTransactions && accounts.length > 0 ? '当前文件没有可分析的流水明细，请继续添加文件或核对原件' : undefined}
+          title={pendingPdfPlans.length > 0
+            ? '请先确认 PDF 分拣方案并完成识别'
+            : !hasTransactions && accounts.length > 0
+              ? '当前文件没有可分析的流水明细，请继续添加文件或核对原件'
+              : undefined}
         >
-          <span>{!hasTransactions && accounts.length > 0 ? '请先添加含流水明细的文件' : '下一步：核对原件'}</span>
+          <span>{pendingPdfPlans.length > 0
+            ? '请先确认 PDF 分拣方案'
+            : !hasTransactions && accounts.length > 0
+              ? '请先添加含流水明细的文件'
+              : '下一步：核对原件'}</span>
           <ArrowRight className="w-4 h-4" />
         </button>
       </div>

@@ -26,6 +26,12 @@ export interface AutomationImportState {
     currentBank?: string;
   } | null;
   tasks: AutomationImportTask[];
+  pdfSplitPlans?: Array<{
+    fileName: string;
+    totalPages: number;
+    groups: Array<{ bankName: string; pageSelection: string }>;
+    validationErrors: string[];
+  }>;
 }
 
 export interface AutomationAppState {

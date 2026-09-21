@@ -274,6 +274,33 @@ async function buildPageMap(
   return result;
 }
 
+export async function discoverPdfPageMap(
+  file: File,
+  onProgress?: (message: string, completedPages: number, totalPages: number) => void,
+  signal?: AbortSignal
+): Promise<{ totalPages: number; pageMap: Map<number, PageMapItem> }> {
+  const renderer = await createPdfPageImageRenderer(file);
+  const totalPages = renderer.totalPages;
+  try {
+    const pages = Array.from({ length: totalPages }, (_, index) => index + 1);
+    let lastCompleted = 0;
+    const pageMap = await buildPageMap(
+      pages,
+      totalPages,
+      renderer.renderPage,
+      signal,
+      message => {
+        const match = message.match(/(\d+)\/(\d+)/);
+        if (match) lastCompleted = Number(match[1]);
+        onProgress?.(message, lastCompleted, totalPages);
+      }
+    );
+    return { totalPages, pageMap };
+  } finally {
+    await renderer.destroy();
+  }
+}
+
 export type VirtualDocumentSegment = LogicalDocumentSegment;
 
 export interface SegmentPdfChunk extends PdfPageImage {

@@ -257,6 +257,20 @@ async function executeRun(run: DebugRun): Promise<void> {
     monitor.unref();
 
     await uploadInput.setInputFiles(run.filePaths);
+    // PDF imports now stop after bank/page sorting so a person can confirm the
+    // generated sub-files before recognition. In an isolated debug case the
+    // automation may accept the displayed proposal, but it never edits fields
+    // or impersonates a lawyer's later evidence confirmation.
+    const splitConfirmation = page.getByRole('button', { name: '确认分拣并开始识别' });
+    await Promise.race([
+      splitConfirmation.waitFor({ state: 'visible', timeout: RUN_TIMEOUT_MS }),
+      page.waitForFunction(({ expectedTasks, terminalStatuses }: { expectedTasks: number; terminalStatuses: string[] }) => {
+        const state = (window as any).__LAWFLOW_AUTOMATION__?.import;
+        if (!state || state.isProcessing || state.tasks.length < expectedTasks) return false;
+        return state.tasks.every((task: { status: string }) => terminalStatuses.includes(task.status));
+      }, { expectedTasks: run.filePaths.length, terminalStatuses: [...TERMINAL_TASK_STATUSES] }, { timeout: RUN_TIMEOUT_MS, polling: 1000 })
+    ]);
+    if (await splitConfirmation.isVisible().catch(() => false)) await splitConfirmation.click();
     await page.waitForFunction(({ expectedTasks, terminalStatuses }: { expectedTasks: number; terminalStatuses: string[] }) => {
       const state = (window as any).__LAWFLOW_AUTOMATION__?.import;
       if (!state || state.isProcessing || state.tasks.length < expectedTasks) return false;
