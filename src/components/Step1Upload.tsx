@@ -785,7 +785,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
               <div>
                 <h2 className="text-sm font-semibold text-slate-900">确认 PDF 页面时间线</h2>
                 <p className="text-xs text-slate-600 mt-1 leading-relaxed">
-                  上方直接阅读原始 PDF，下方像视频剪辑一样调整银行片段、页面类型和识别范围；确认后才会分别识别流水。
+                  先在剪辑式时间线上调整银行区间和识别范围；点击页面帧后，下方同步显示对应的原始 PDF 单页。
                 </p>
               </div>
             </div>

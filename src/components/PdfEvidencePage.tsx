@@ -32,6 +32,7 @@ export const PdfEvidencePage: React.FC<PdfEvidencePageProps> = ({ file, pageNumb
   const [rotation, setRotation] = useState(0);
   const [status, setStatus] = useState<'LOADING' | 'READY' | 'MISSING' | 'ERROR'>(file ? 'LOADING' : 'MISSING');
   const [pageCount, setPageCount] = useState(0);
+  const [pdfDocument, setPdfDocument] = useState<any>(null);
   const displayedRegion = useMemo(
     () => sourceRegion ? rotateSourceRegion(sourceRegion, rotation) : undefined,
     [sourceRegion, rotation]
@@ -40,12 +41,15 @@ export const PdfEvidencePage: React.FC<PdfEvidencePageProps> = ({ file, pageNumb
   useEffect(() => {
     let cancelled = false;
     let loadingTask: any = undefined;
-    let renderTask: any = undefined;
     if (!file) {
       setStatus('MISSING');
+      setPdfDocument(null);
+      setPageCount(0);
       return;
     }
     setStatus('LOADING');
+    setPdfDocument(null);
+    setPageCount(0);
     (async () => {
       try {
         const pdfjs = await getPdfjs();
@@ -53,8 +57,27 @@ export const PdfEvidencePage: React.FC<PdfEvidencePageProps> = ({ file, pageNumb
         const document = await loadingTask.promise;
         if (cancelled) return;
         setPageCount(document.numPages);
-        const safePage = Math.min(Math.max(pageNumber, 1), document.numPages);
-        const page = await document.getPage(safePage);
+        setPdfDocument(document);
+      } catch (error: any) {
+        if (!cancelled && error?.name !== 'RenderingCancelledException') setStatus('ERROR');
+      }
+    })();
+    return () => {
+      cancelled = true;
+      loadingTask?.destroy();
+    };
+  }, [file]);
+
+  useEffect(() => {
+    if (!pdfDocument) return;
+    let cancelled = false;
+    let renderTask: any = undefined;
+    let page: any = undefined;
+    setStatus('LOADING');
+    (async () => {
+      try {
+        const safePage = Math.min(Math.max(pageNumber, 1), pdfDocument.numPages);
+        page = await pdfDocument.getPage(safePage);
         if (cancelled || !canvasRef.current) return;
         const viewport = page.getViewport({ scale, rotation: (page.rotate + rotation) % 360 });
         const ratio = Math.min(window.devicePixelRatio || 1, 2);
@@ -65,9 +88,8 @@ export const PdfEvidencePage: React.FC<PdfEvidencePageProps> = ({ file, pageNumb
         canvas.style.height = `${viewport.height}px`;
         const context = canvas.getContext('2d');
         if (!context) throw new Error('无法创建页面画布');
-        const activeRenderTask = page.render({ canvasContext: context, viewport, transform: ratio === 1 ? undefined : [ratio, 0, 0, ratio, 0, 0] });
-        renderTask = activeRenderTask;
-        await activeRenderTask.promise;
+        renderTask = page.render({ canvasContext: context, viewport, transform: ratio === 1 ? undefined : [ratio, 0, 0, ratio, 0, 0] });
+        await renderTask.promise;
         if (!cancelled) setStatus('READY');
       } catch (error: any) {
         if (!cancelled && error?.name !== 'RenderingCancelledException') setStatus('ERROR');
@@ -76,9 +98,9 @@ export const PdfEvidencePage: React.FC<PdfEvidencePageProps> = ({ file, pageNumb
     return () => {
       cancelled = true;
       renderTask?.cancel();
-      loadingTask?.destroy();
+      page?.cleanup?.();
     };
-  }, [file, pageNumber, scale, rotation]);
+  }, [pdfDocument, pageNumber, scale, rotation]);
 
   useEffect(() => {
     if (status !== 'READY' || !displayedRegion || !scrollRef.current || !pageRef.current || !highlightRef.current) return;

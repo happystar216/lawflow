@@ -9,7 +9,6 @@ test('PDF timeline editor exposes the original document, bank tracks and frame c
   const plan: PdfBankSplitPlan = {
     id: 'timeline-plan',
     sourceFile: new File([new Uint8Array([1])], '测试卷宗.pdf', { type: 'application/pdf' }),
-    sourcePdfUrl: 'blob:original-pdf',
     totalPages: 4,
     groups: [
       {
@@ -45,9 +44,11 @@ test('PDF timeline editor exposes the original document, bank tracks and frame c
     onApplySuggestedSelection: () => undefined
   }));
 
-  assert.match(markup, /原文件 · 第 1 页/);
-  assert.match(markup, /blob:original-pdf#page=1/);
   assert.match(markup, /PDF 页面时间线/);
+  assert.match(markup, /当前查看：第 1 页/);
+  assert.match(markup, /原始PDF第 1 页/);
+  assert.doesNotMatch(markup, /<iframe/);
+  assert.ok(markup.indexOf('PDF 页面时间线') < markup.indexOf('原始PDF第 1 页'));
   assert.match(markup, /中国工商银行/);
   assert.match(markup, /第 1-2 页/);
   assert.match(markup, /按住时间轴左右拖动/);

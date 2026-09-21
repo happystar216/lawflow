@@ -27,7 +27,6 @@ export interface PdfPageClassification {
 export interface PdfBankSplitPlan {
   id: string;
   sourceFile: File;
-  sourcePdfUrl: string;
   totalPages: number;
   groups: PdfBankGroup[];
   pages: PdfPageClassification[];
@@ -82,7 +81,6 @@ export async function preparePdfBankSplitPlan(
   return {
     id: splitPlanId(file),
     sourceFile: file,
-    sourcePdfUrl: URL.createObjectURL(file),
     totalPages,
     groups,
     pages
@@ -306,7 +304,6 @@ export function releasePdfSplitPlanPreviews(plan: PdfBankSplitPlan): void {
   for (const page of plan.pages) {
     if (page.thumbnailUrl) URL.revokeObjectURL(page.thumbnailUrl);
   }
-  if (plan.sourcePdfUrl) URL.revokeObjectURL(plan.sourcePdfUrl);
 }
 
 export function parsePageSelection(value: string, totalPages: number): number[] {

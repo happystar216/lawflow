@@ -141,7 +141,6 @@ test('split PDF contains only pages selected for the recognition stage', async (
   const files = await createBankSplitFiles({
     id: 'plan',
     sourceFile,
-    sourcePdfUrl: '',
     totalPages: 4,
     groups: [{
       id: 'segment', bankName: '工商银行', suggestedBankName: '工商银行', pages: [1, 2, 3, 4],

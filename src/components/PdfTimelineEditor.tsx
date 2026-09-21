@@ -1,11 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { CheckCircle2, CircleSlash2, ExternalLink, Minus, Plus, Scissors, Trash2 } from 'lucide-react';
+import { CheckCircle2, CircleSlash2, Minus, Plus, Scissors, Trash2 } from 'lucide-react';
 import {
   parsePageSelection,
   PdfBankGroup,
   PdfBankSplitPlan,
   PdfPageClassification
 } from '../parsers/pdfBankSplitter';
+import { PdfEvidencePage } from './PdfEvidencePage';
 
 interface PdfTimelineEditorProps {
   plan: PdfBankSplitPlan;
@@ -95,7 +96,6 @@ export const PdfTimelineEditor: React.FC<PdfTimelineEditorProps> = ({
   const frameWidth = Math.round(86 * timelineZoom);
   const frameHeight = Math.round(96 * timelineZoom);
   const timelineWidth = Math.max(frameWidth, plan.totalPages * frameWidth);
-  const pdfPageUrl = activePage ? `${plan.sourcePdfUrl}#page=${activePage.page}&zoom=page-fit&toolbar=1&navpanes=0` : plan.sourcePdfUrl;
   const canSplitAtActivePage = Boolean(activeSegment && activePage && activePage.page > (activeSegment.pages[0] || 1));
 
   const beginTimelinePan = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -151,78 +151,6 @@ export const PdfTimelineEditor: React.FC<PdfTimelineEditorProps> = ({
 
   return (
     <div className="space-y-4">
-      <div className="overflow-hidden rounded-2xl border border-slate-300 bg-slate-900 shadow-sm">
-        <div className="flex flex-col gap-2 border-b border-slate-700 bg-slate-950 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
-          <div className="min-w-0">
-            <div className="truncate text-sm font-semibold text-white">原文件 · 第 {activePage?.page || 1} 页</div>
-            <div className="mt-0.5 text-[11px] text-slate-400">这里直接显示原始 PDF，可缩放、搜索和翻页；下方缩略图仅用于定位。</div>
-          </div>
-          <a
-            href={pdfPageUrl}
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex flex-shrink-0 items-center gap-1.5 self-start rounded-lg border border-white/15 bg-white/10 px-3 py-1.5 text-[11px] font-medium text-white hover:bg-white/15 sm:self-auto"
-          >
-            <ExternalLink className="h-3.5 w-3.5" />
-            独立打开原文件
-          </a>
-        </div>
-        <iframe
-          key={activePage?.page || 1}
-          src={pdfPageUrl}
-          title={`${plan.sourceFile.name} 第 ${activePage?.page || 1} 页原文`}
-          className="h-[620px] w-full bg-slate-800"
-        />
-      </div>
-
-      {activePage && (
-        <div className="flex flex-col gap-3 rounded-xl border border-slate-200 bg-white p-3.5 sm:flex-row sm:items-center">
-          <div className="min-w-0 flex-1">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="text-sm font-semibold text-slate-900">第 {activePage.page} 页</span>
-              <span
-                className="rounded-full px-2 py-0.5 text-[10px] font-semibold"
-                style={{ backgroundColor: activeSegment?.color.soft || '#e2e8f0', color: activeSegment?.color.text || '#334155' }}
-              >
-                {activeSegment?.group.bankName || '待确认银行'}
-              </span>
-              {activePage.confidence < 0.55 && <span className="text-[10px] text-amber-700">页面分类把握较低</span>}
-            </div>
-            <div className="mt-1 text-[11px] text-slate-500">
-              系统建议：{activePage.suggestedForRecognition ? '进入识别' : '不进入识别'} · 当前已选择 {selectedCount}/{plan.totalPages} 页
-            </div>
-          </div>
-          <select
-            value={activePage.pageType}
-            onChange={event => onPageTypeChange(activePage.page, event.target.value as PdfPageClassification['pageType'])}
-            disabled={disabled}
-            aria-label={`第 ${activePage.page} 页内容类型`}
-            className={`rounded-lg border px-3 py-2 text-xs outline-none ${activePage.pageType === 'UNKNOWN' ? 'border-amber-300 bg-amber-50 text-amber-900' : 'border-slate-300 bg-white text-slate-800'}`}
-          >
-            {PAGE_TYPE_OPTIONS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
-          </select>
-          <button
-            type="button"
-            onClick={() => onTogglePageSelection(activePage.page)}
-            disabled={disabled}
-            className={`inline-flex items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-xs font-semibold ${activePage.selectedForRecognition ? 'bg-blue-600 text-white hover:bg-blue-700' : 'border border-slate-300 bg-white text-slate-700 hover:bg-slate-50'}`}
-          >
-            {activePage.selectedForRecognition ? <CheckCircle2 className="h-4 w-4" /> : <CircleSlash2 className="h-4 w-4" />}
-            {activePage.selectedForRecognition ? '进入识别' : '不进入识别'}
-          </button>
-          <button
-            type="button"
-            onClick={() => onSplitAtPage(activePage.page)}
-            disabled={disabled || !canSplitAtActivePage}
-            title={canSplitAtActivePage ? '让当前页成为下一个银行材料区间的第一页' : '请选择当前银行区间第一张之后的页面'}
-            className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40"
-          >
-            <Scissors className="h-4 w-4" />
-            从本页切开银行区间
-          </button>
-        </div>
-      )}
-
       <div className="rounded-2xl border border-slate-200 bg-slate-950 p-3.5 shadow-inner">
         <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <div>
@@ -370,6 +298,60 @@ export const PdfTimelineEditor: React.FC<PdfTimelineEditorProps> = ({
           </div>
         </div>
       </div>
+
+      {activePage && (
+        <>
+          <div className="flex flex-col gap-3 rounded-xl border border-slate-200 bg-white p-3.5 sm:flex-row sm:items-center">
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-sm font-semibold text-slate-900">当前查看：第 {activePage.page} 页</span>
+                <span
+                  className="rounded-full px-2 py-0.5 text-[10px] font-semibold"
+                  style={{ backgroundColor: activeSegment?.color.soft || '#e2e8f0', color: activeSegment?.color.text || '#334155' }}
+                >
+                  {activeSegment?.group.bankName || '待确认银行'}
+                </span>
+                {activePage.confidence < 0.55 && <span className="text-[10px] text-amber-700">页面分类把握较低</span>}
+              </div>
+              <div className="mt-1 text-[11px] text-slate-500">
+                下方只显示时间轴当前页；切换页面请点击上方时间轴。系统建议：{activePage.suggestedForRecognition ? '进入识别' : '不进入识别'} · 已选择 {selectedCount}/{plan.totalPages} 页
+              </div>
+            </div>
+            <select
+              value={activePage.pageType}
+              onChange={event => onPageTypeChange(activePage.page, event.target.value as PdfPageClassification['pageType'])}
+              disabled={disabled}
+              aria-label={`第 ${activePage.page} 页内容类型`}
+              className={`rounded-lg border px-3 py-2 text-xs outline-none ${activePage.pageType === 'UNKNOWN' ? 'border-amber-300 bg-amber-50 text-amber-900' : 'border-slate-300 bg-white text-slate-800'}`}
+            >
+              {PAGE_TYPE_OPTIONS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+            </select>
+            <button
+              type="button"
+              onClick={() => onTogglePageSelection(activePage.page)}
+              disabled={disabled}
+              className={`inline-flex items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-xs font-semibold ${activePage.selectedForRecognition ? 'bg-blue-600 text-white hover:bg-blue-700' : 'border border-slate-300 bg-white text-slate-700 hover:bg-slate-50'}`}
+            >
+              {activePage.selectedForRecognition ? <CheckCircle2 className="h-4 w-4" /> : <CircleSlash2 className="h-4 w-4" />}
+              {activePage.selectedForRecognition ? '进入识别' : '不进入识别'}
+            </button>
+            <button
+              type="button"
+              onClick={() => onSplitAtPage(activePage.page)}
+              disabled={disabled || !canSplitAtActivePage}
+              title={canSplitAtActivePage ? '让当前页成为下一个银行材料区间的第一页' : '请选择当前银行区间第一张之后的页面'}
+              className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40"
+            >
+              <Scissors className="h-4 w-4" />
+              从本页切开银行区间
+            </button>
+          </div>
+
+          <div className="overflow-hidden rounded-2xl border border-slate-300 bg-slate-100 shadow-sm">
+            <PdfEvidencePage file={plan.sourceFile} pageNumber={activePage.page} />
+          </div>
+        </>
+      )}
 
     </div>
   );
