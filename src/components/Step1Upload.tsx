@@ -12,6 +12,7 @@ import { normalizeRecognizedData } from '../utils/recognizedDataNormalizer';
 import { businessAccounts, incompleteRecognitionPages, isDocumentReviewAccount } from '../review/recognitionCompleteness';
 import {
   createBankSplitFiles,
+  buildPdfBankSplitSuggestion,
   getRecognitionSplitMetadata,
   isPageRecommendedForRecognition,
   PdfBankSplitPlan,
@@ -22,6 +23,7 @@ import {
   releasePdfSplitPlanPreviews,
   validateBankGroups
 } from '../parsers/pdfBankSplitter';
+import { discoverPdfPageMapWithMinerU } from '../parsers/mineruPdfParser';
 import { PdfTimelineEditor } from './PdfTimelineEditor';
 
 interface Step1Props {
@@ -83,6 +85,29 @@ function withSyncedPdfAssignments(plan: PdfBankSplitPlan, groups: PdfBankSplitPl
   };
 }
 
+const StrategySummary: React.FC<{
+  label: string;
+  groups: PdfBankSplitPlan['groups'];
+  message?: string;
+}> = ({ label, groups, message }) => (
+  <div className="rounded-lg border border-slate-200 bg-white px-3 py-2">
+    <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">{label}</div>
+    {groups.length > 0 ? (
+      <div className="mt-1.5 space-y-1 text-[11px] text-slate-700">
+        {groups.slice(0, 6).map(group => (
+          <div key={group.id} className="flex items-center justify-between gap-3">
+            <span className="truncate" title={group.bankName}>{group.bankName}</span>
+            <span className="flex-shrink-0 font-mono text-slate-500">第 {group.pageSelection} 页</span>
+          </div>
+        ))}
+        {groups.length > 6 && <div className="text-slate-400">另有 {groups.length - 6} 个区间…</div>}
+      </div>
+    ) : (
+      <div className="mt-1.5 text-[11px] leading-relaxed text-slate-500">{message || '正在生成对照方案…'}</div>
+    )}
+  </div>
+);
+
 export const Step1Upload: React.FC<Step1Props> = ({
   caseId,
   caseRespondentName,
@@ -103,6 +128,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
   const [splitValidationErrors, setSplitValidationErrors] = useState<Record<string, string[]>>({});
 
   const abortControllerRef = useRef<AbortController | null>(null);
+  const mineruControllersRef = useRef<Map<string, AbortController>>(new Map());
   const pendingPdfPlansRef = useRef<PdfBankSplitPlan[]>([]);
   const zeroTransactionFiles = sourceFilesWithoutTransactions(accounts, transactions);
   const sourceTransactionCounts = transactionCountsBySource(transactions);
@@ -136,6 +162,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
 
   useEffect(() => () => {
     pendingPdfPlansRef.current.forEach(releasePdfSplitPlanPreviews);
+    mineruControllersRef.current.forEach(controller => controller.abort());
   }, []);
 
   useEffect(() => {
@@ -384,6 +411,59 @@ export const Step1Upload: React.FC<Step1Props> = ({
     onDataUpdated(newAccounts, newTransactions);
   };
 
+  const startMineruComparison = (file: File, plan: PdfBankSplitPlan) => {
+    mineruControllersRef.current.get(plan.id)?.abort();
+    const controller = new AbortController();
+    mineruControllersRef.current.set(plan.id, controller);
+    void (async () => {
+      try {
+        const mineruPageMap = await discoverPdfPageMapWithMinerU(file, plan.totalPages, progress => {
+          setPendingPdfPlans(current => current.map(item => item.id !== plan.id ? item : {
+            ...item,
+            comparison: item.comparison ? {
+              ...item.comparison,
+              mineruStatus: 'PROCESSING',
+              mineruMessage: progress.message
+            } : item.comparison
+          }));
+        }, controller.signal);
+        const mineru = buildPdfBankSplitSuggestion('MINERU', mineruPageMap, plan);
+        setPendingPdfPlans(current => current.map(item => item.id !== plan.id ? item : {
+          ...item,
+          comparison: {
+            ...(item.comparison || {
+              activeStrategy: 'CURRENT' as const,
+              current: { strategy: 'CURRENT' as const, groups: item.groups, pages: item.pages }
+            }),
+            mineru,
+            mineruStatus: 'READY' as const,
+            mineruMessage: `MinerU 已形成 ${mineru.groups.length} 个连续银行区间`
+          }
+        }));
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        const coded = error as Error & { code?: string };
+        const unavailable = coded.code === 'MINERU_NOT_CONFIGURED';
+        const message = unavailable
+          ? '尚未配置 MinerU 凭据；现有方案可正常使用'
+          : `MinerU 对照失败：${error instanceof Error ? error.message : String(error)}`;
+        setPendingPdfPlans(current => current.map(item => item.id !== plan.id ? item : {
+          ...item,
+          comparison: {
+            ...(item.comparison || {
+              activeStrategy: 'CURRENT' as const,
+              current: { strategy: 'CURRENT' as const, groups: item.groups, pages: item.pages }
+            }),
+            mineruStatus: unavailable ? 'UNAVAILABLE' as const : 'ERROR' as const,
+            mineruMessage: message
+          }
+        }));
+      } finally {
+        if (mineruControllersRef.current.get(plan.id) === controller) mineruControllersRef.current.delete(plan.id);
+      }
+    })();
+  };
+
   const preparePdfPlans = async (files: File[]) => {
     if (!files.length) return;
     setIsProcessing(true);
@@ -413,6 +493,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
           next.set(plan.id, plan);
           return [...next.values()];
         });
+        startMineruComparison(file, plan);
       }
     } catch (error) {
       if (controller.signal.aborted) setStatusText('已停止 PDF 分拣，尚未开始识别。');
@@ -424,6 +505,27 @@ export const Step1Upload: React.FC<Step1Props> = ({
       setProgressInfo(null);
       if (!controller.signal.aborted) setStatusText(null);
     }
+  };
+
+  const selectPdfStrategy = (planId: string, strategy: 'CURRENT' | 'MINERU') => {
+    setPendingPdfPlans(current => current.map(plan => {
+      if (plan.id !== planId || !plan.comparison || plan.comparison.activeStrategy === strategy) return plan;
+      const activeSnapshot = {
+        strategy: plan.comparison.activeStrategy,
+        groups: plan.groups,
+        pages: plan.pages
+      };
+      const comparison = {
+        ...plan.comparison,
+        current: plan.comparison.activeStrategy === 'CURRENT' ? activeSnapshot : plan.comparison.current,
+        mineru: plan.comparison.activeStrategy === 'MINERU' ? activeSnapshot : plan.comparison.mineru,
+        activeStrategy: strategy
+      };
+      const target = strategy === 'CURRENT' ? comparison.current : comparison.mineru;
+      if (!target) return plan;
+      return { ...plan, groups: target.groups, pages: target.pages, comparison };
+    }));
+    setSplitValidationErrors(current => ({ ...current, [planId]: [] }));
   };
 
   const handleFiles = async (files: FileList | File[]) => {
@@ -568,6 +670,8 @@ export const Step1Upload: React.FC<Step1Props> = ({
   };
 
   const discardPdfPlan = (planId: string) => {
+    mineruControllersRef.current.get(planId)?.abort();
+    mineruControllersRef.current.delete(planId);
     setPendingPdfPlans(current => {
       current.filter(plan => plan.id === planId).forEach(releasePdfSplitPlanPreviews);
       return current.filter(plan => plan.id !== planId);
@@ -589,6 +693,8 @@ export const Step1Upload: React.FC<Step1Props> = ({
       setErrorMessage('分拣方案仍有未确认、漏页或重复页，请按红色提示修改后再开始识别。');
       return;
     }
+    mineruControllersRef.current.forEach(controller => controller.abort());
+    mineruControllersRef.current.clear();
     setErrorMessage(null);
     setIsProcessing(true);
     setStatusText('正在生成各银行独立 PDF…');
@@ -819,6 +925,57 @@ export const Step1Upload: React.FC<Step1Props> = ({
                   </div>
 
                   <div className="p-4 space-y-3">
+                    {plan.comparison && (
+                      <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                          <div>
+                            <div className="text-xs font-semibold text-slate-800">分档方案对比</div>
+                            <p className="mt-1 text-[11px] leading-relaxed text-slate-500">
+                              两套方案只负责判断页面类型和银行切换位置；确认后仅采用当前选中的一套进入流水识别。
+                            </p>
+                          </div>
+                          <div className="flex flex-wrap gap-2">
+                            <button
+                              type="button"
+                              disabled={isProcessing}
+                              onClick={() => selectPdfStrategy(plan.id, 'CURRENT')}
+                              className={`rounded-lg border px-3 py-2 text-left text-[11px] transition ${plan.comparison.activeStrategy === 'CURRENT'
+                                ? 'border-blue-500 bg-blue-50 text-blue-800 shadow-sm'
+                                : 'border-slate-200 bg-white text-slate-600 hover:border-blue-300'}`}
+                            >
+                              <span className="block font-semibold">现有视觉方案</span>
+                              <span className="mt-0.5 block">{plan.comparison.current.groups.length} 个区间</span>
+                            </button>
+                            <button
+                              type="button"
+                              disabled={isProcessing || plan.comparison.mineruStatus !== 'READY'}
+                              onClick={() => selectPdfStrategy(plan.id, 'MINERU')}
+                              className={`rounded-lg border px-3 py-2 text-left text-[11px] transition disabled:cursor-not-allowed disabled:opacity-60 ${plan.comparison.activeStrategy === 'MINERU'
+                                ? 'border-emerald-500 bg-emerald-50 text-emerald-800 shadow-sm'
+                                : 'border-slate-200 bg-white text-slate-600 hover:border-emerald-300'}`}
+                            >
+                              <span className="block font-semibold">MinerU 结构化方案</span>
+                              <span className="mt-0.5 block">
+                                {plan.comparison.mineruStatus === 'READY'
+                                  ? `${plan.comparison.mineru?.groups.length || 0} 个区间`
+                                  : plan.comparison.mineruStatus === 'PROCESSING' ? '正在生成…' : '暂不可用'}
+                              </span>
+                            </button>
+                          </div>
+                        </div>
+                        <div className="mt-3 grid gap-2 md:grid-cols-2">
+                          <StrategySummary
+                            label="现有视觉方案"
+                            groups={plan.comparison.activeStrategy === 'CURRENT' ? plan.groups : plan.comparison.current.groups}
+                          />
+                          <StrategySummary
+                            label="MinerU 结构化方案"
+                            groups={plan.comparison.activeStrategy === 'MINERU' ? plan.groups : plan.comparison.mineru?.groups || []}
+                            message={plan.comparison.mineruMessage}
+                          />
+                        </div>
+                      </div>
+                    )}
                     <PdfTimelineEditor
                       plan={plan}
                       disabled={isProcessing}

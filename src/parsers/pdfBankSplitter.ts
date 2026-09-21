@@ -30,6 +30,23 @@ export interface PdfBankSplitPlan {
   totalPages: number;
   groups: PdfBankGroup[];
   pages: PdfPageClassification[];
+  comparison?: PdfBankSplitComparison;
+}
+
+export type PdfSplitStrategy = 'CURRENT' | 'MINERU';
+
+export interface PdfBankSplitSuggestion {
+  strategy: PdfSplitStrategy;
+  groups: PdfBankGroup[];
+  pages: PdfPageClassification[];
+}
+
+export interface PdfBankSplitComparison {
+  activeStrategy: PdfSplitStrategy;
+  current: PdfBankSplitSuggestion;
+  mineru?: PdfBankSplitSuggestion;
+  mineruStatus: 'PROCESSING' | 'READY' | 'UNAVAILABLE' | 'ERROR';
+  mineruMessage?: string;
 }
 
 export interface RecognitionSplitMetadata {
@@ -83,8 +100,67 @@ export async function preparePdfBankSplitPlan(
     sourceFile: file,
     totalPages,
     groups,
-    pages
+    pages,
+    comparison: {
+      activeStrategy: 'CURRENT',
+      current: { strategy: 'CURRENT', groups, pages },
+      mineruStatus: 'PROCESSING'
+    }
   };
+}
+
+export function buildPdfBankSplitSuggestion(
+  strategy: PdfSplitStrategy,
+  pageMap: Map<number, PageMapItem>,
+  plan: PdfBankSplitPlan
+): PdfBankSplitSuggestion {
+  const currentByPage = new Map(plan.pages.map(page => [page.page, page]));
+  const fusedPageMap = new Map<number, PageMapItem>();
+  for (let page = 1; page <= plan.totalPages; page += 1) {
+    const item = pageMap.get(page) || unknownPage(page);
+    const current = currentByPage.get(page);
+    const visualBank = cleanBankName(current?.detectedBankName || current?.assignedBankName);
+    const mineruBank = cleanBankName(item.bankName);
+    fusedPageMap.set(page, {
+      ...item,
+      // MinerU is strongest at page structure and table text, while the
+      // existing thumbnail pass can still see a bank logo/header that OCR
+      // omitted. Only fill an absent bank; never overwrite MinerU evidence.
+      bankName: mineruBank && !isPlaceholderBank(mineruBank)
+        ? item.bankName
+        : visualBank && !isPlaceholderBank(visualBank) ? visualBank : item.bankName
+    });
+  }
+  let groups = buildBankGroups(fusedPageMap, plan.totalPages);
+  const assignedBankByPage = new Map(groups.flatMap(group => group.pages.map(page => [page, group.bankName] as const)));
+  const pages = Array.from({ length: plan.totalPages }, (_, index) => {
+    const page = index + 1;
+    const item = fusedPageMap.get(page) || unknownPage(page);
+    const current = currentByPage.get(page);
+    const suggestedForRecognition = isPageRecommendedForRecognition(item.pageType);
+    return {
+      page,
+      pageType: item.pageType,
+      detectedBankName: cleanBankName(item.bankName),
+      assignedBankName: assignedBankByPage.get(page) || '待确认银行',
+      confidence: item.confidence,
+      thumbnailUrl: current?.thumbnailUrl || '',
+      suggestedForRecognition,
+      selectedForRecognition: suggestedForRecognition,
+      selectionModifiedByUser: false
+    };
+  });
+  const fileNameBank = bankNameFromFileName(plan.sourceFile.name);
+  if (fileNameBank && groups.length === 1 && isPlaceholderBank(groups[0].bankName)) {
+    groups = [{
+      ...groups[0],
+      bankName: fileNameBank,
+      suggestedBankName: fileNameBank,
+      confidence: Math.max(groups[0].confidence, 0.45)
+    }];
+    pages.forEach(page => { page.assignedBankName = fileNameBank; });
+  }
+  return { strategy, groups, pages };
 }
 
 export function buildBankGroups(pageMap: Map<number, PageMapItem>, totalPages: number): PdfBankGroup[] {

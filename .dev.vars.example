@@ -2,3 +2,5 @@
 DASHSCOPE_API_KEY=sk-your-key
 DASHSCOPE_BASE_URL=https://your-workspace-id.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
 QWEN_MODEL=qwen3.8-flash
+# Optional comparison pipeline. Create the token at https://mineru.net/apiManage
+MINERU_API_TOKEN=your-mineru-token
