@@ -75,7 +75,7 @@ export const PdfTimelineEditor: React.FC<PdfTimelineEditorProps> = ({
   const [isPanning, setIsPanning] = useState(false);
   const timelineViewportRef = useRef<HTMLDivElement>(null);
   const timelineContentRef = useRef<HTMLDivElement>(null);
-  const panRef = useRef<{ pointerId: number; startX: number; startScrollLeft: number; moved: boolean }>();
+  const panRef = useRef<{ pointerId: number; startX: number; startScrollLeft: number; moved: boolean; captured: boolean }>();
   const boundaryDragRef = useRef<{ pointerId: number; boundaryIndex: number }>();
   const ignoreFrameClickRef = useRef(false);
   const activePage = orderedPages.find(page => page.page === activePageNumber) || orderedPages[0];
@@ -102,8 +102,9 @@ export const PdfTimelineEditor: React.FC<PdfTimelineEditorProps> = ({
     if ((event.target as HTMLElement).closest('[data-timeline-control="true"]')) return;
     const viewport = timelineViewportRef.current;
     if (!viewport) return;
-    panRef.current = { pointerId: event.pointerId, startX: event.clientX, startScrollLeft: viewport.scrollLeft, moved: false };
-    event.currentTarget.setPointerCapture(event.pointerId);
+    // Do not capture immediately: an ordinary press/release must still reach
+    // the frame button's click handler. Capture only after this becomes a drag.
+    panRef.current = { pointerId: event.pointerId, startX: event.clientX, startScrollLeft: viewport.scrollLeft, moved: false, captured: false };
     setIsPanning(true);
   };
 
@@ -131,6 +132,10 @@ export const PdfTimelineEditor: React.FC<PdfTimelineEditorProps> = ({
     if (Math.abs(distance) > 4) {
       pan.moved = true;
       ignoreFrameClickRef.current = true;
+      if (!pan.captured) {
+        event.currentTarget.setPointerCapture(event.pointerId);
+        pan.captured = true;
+      }
     }
     viewport.scrollLeft = pan.startScrollLeft - distance;
   };
