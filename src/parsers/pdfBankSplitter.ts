@@ -8,6 +8,8 @@ export interface PdfBankGroup {
   pageSelection: string;
   confidence: number;
   pageTypes: PageMapItem['pageType'][];
+  boundaryBasis?: 'MODEL_BANK' | 'BANK_FALLBACK' | 'MANUAL';
+  documentLabel?: string;
 }
 
 export interface PdfPageClassification {
@@ -88,6 +90,9 @@ export async function preparePdfBankSplitPlan(
 }
 
 export function buildBankGroups(pageMap: Map<number, PageMapItem>, totalPages: number): PdfBankGroup[] {
+  const documentGroups = buildModelDocumentGroups(pageMap, totalPages);
+  if (documentGroups.length) return documentGroups;
+
   const reliableBankByPage = new Map<number, string>();
   for (let page = 1; page <= totalPages; page += 1) {
     const item = pageMap.get(page);
@@ -126,9 +131,89 @@ export function buildBankGroups(pageMap: Map<number, PageMapItem>, totalPages: n
       confidence: confidenceValues.length
         ? confidenceValues.reduce((sum, value) => sum + value, 0) / confidenceValues.length
         : 0,
-      pageTypes: [...new Set(evidence.map(item => item.pageType))]
+      pageTypes: [...new Set(evidence.map(item => item.pageType))],
+      boundaryBasis: 'BANK_FALLBACK'
     };
   });
+}
+
+function buildModelDocumentGroups(pageMap: Map<number, PageMapItem>, totalPages: number): PdfBankGroup[] {
+  const items = Array.from({ length: totalPages }, (_, index) => pageMap.get(index + 1) || unknownPage(index + 1));
+  const explicitStarts = items
+    .filter(item => item.documentBoundary === 'START' && item.confidence >= 0.5)
+    .map(item => item.page);
+  const proposedStarts = [...new Set(explicitStarts)];
+  if (!proposedStarts.length) return [];
+
+  // Pages before the first detected bank section (cover, catalogue or
+  // separator) stay with the first bank. The model proposes semantic bank
+  // boundaries; deterministic code only turns them into gap-free ranges.
+  const orderedStarts = [...new Set(proposedStarts)].sort((left, right) => left - right);
+  const starts = [1, ...orderedStarts.slice(1)];
+  const proposedGroups: PdfBankGroup[] = starts.map((start, index) => {
+    const end = (starts[index + 1] || totalPages + 1) - 1;
+    const evidence = items.slice(start - 1, end);
+    const pages = continuousPages(start, end);
+    const bankName = dominantDocumentBank(evidence) || '待确认银行';
+    const labelEvidence = evidence.find(item => item.documentBoundary === 'START' && item.documentLabel)
+      || evidence.find(item => item.investigationOrderNo || item.documentLabel);
+    const confidenceValues = evidence.map(item => item.confidence).filter(Number.isFinite);
+    return {
+      id: `DOCUMENT_${index + 1}_${stableHash(`${bankName}|${pages.join(',')}`)}`,
+      bankName,
+      suggestedBankName: bankName,
+      pages,
+      pageSelection: formatPageSelection(pages),
+      confidence: confidenceValues.length
+        ? confidenceValues.reduce((sum, value) => sum + value, 0) / confidenceValues.length
+        : 0,
+      pageTypes: [...new Set(evidence.map(item => item.pageType))],
+      boundaryBasis: 'MODEL_BANK',
+      documentLabel: cleanDocumentLabel(labelEvidence?.documentLabel, labelEvidence?.investigationOrderNo)
+    };
+  });
+  const merged: PdfBankGroup[] = [];
+  for (const group of proposedGroups) {
+    const previous = merged.at(-1);
+    if (previous && !isPlaceholderBank(previous.bankName) && sameBank(previous.bankName, group.bankName)) {
+      const pages = [...previous.pages, ...group.pages];
+      const totalWeight = previous.pages.length + group.pages.length;
+      previous.pages = pages;
+      previous.pageSelection = formatPageSelection(pages);
+      previous.confidence = totalWeight
+        ? (previous.confidence * (totalWeight - group.pages.length) + group.confidence * group.pages.length) / totalWeight
+        : 0;
+      previous.pageTypes = [...new Set([...previous.pageTypes, ...group.pageTypes])];
+      continue;
+    }
+    merged.push({ ...group });
+  }
+  return merged.map((group, index) => ({
+    ...group,
+    id: `DOCUMENT_${index + 1}_${stableHash(`${group.bankName}|${group.pages.join(',')}`)}`
+  }));
+}
+
+function dominantDocumentBank(evidence: PageMapItem[]): string {
+  const scores = new Map<string, { name: string; score: number }>();
+  for (const item of evidence) {
+    const name = cleanBankName(item.bankName);
+    if (!name || isPlaceholderBank(name) || item.confidence < 0.45) continue;
+    const key = canonicalBankKey(name);
+    const current = scores.get(key) || { name, score: 0 };
+    current.score += Math.max(0.25, item.confidence);
+    if (name.length > current.name.length) current.name = name;
+    scores.set(key, current);
+  }
+  return [...scores.values()].sort((left, right) => right.score - left.score)[0]?.name || '';
+}
+
+function cleanDocumentLabel(label: string | undefined, orderNo: string | undefined): string {
+  return String(label || orderNo || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+}
+
+function continuousPages(start: number, end: number): number[] {
+  return Array.from({ length: Math.max(0, end - start + 1) }, (_, index) => start + index);
 }
 
 export function validateBankGroups(
@@ -178,20 +263,21 @@ export async function createBankSplitFiles(plan: PdfBankSplitPlan): Promise<File
   const selectedPages = new Set(plan.pages.filter(page => page.selectedForRecognition).map(page => page.page));
   const confirmedSegments = plan.groups.map(group => ({
     bankName: cleanBankName(group.bankName),
+    documentLabel: cleanDocumentLabel(group.documentLabel, ''),
     pages: parsePageSelection(group.pageSelection, plan.totalPages).filter(page => selectedPages.has(page))
   })).filter(segment => segment.pages.length).sort((left, right) => left.pages[0] - right.pages[0]);
 
-  for (const [segmentIndex, { bankName, pages }] of confirmedSegments.entries()) {
+  for (const [segmentIndex, { bankName, documentLabel, pages }] of confirmedSegments.entries()) {
     const document = await PDFDocument.create();
     const copiedPages = await document.copyPages(source, pages.map(page => page - 1));
     copiedPages.forEach(page => document.addPage(page));
     const bytes = await document.save({ useObjectStreams: true });
-    const bank = safeFilePart(bankName);
+    const documentName = safeFilePart(documentLabel || bankName);
     const ranges = safeFilePart(formatPageSelection(pages).replace(/,/g, '_'));
     const segment = String(segmentIndex + 1).padStart(2, '0');
     const splitFile = new File(
       [Uint8Array.from(bytes).buffer],
-      `${safeFilePart(baseName)}__段${segment}__${bank}__原第${ranges}页.pdf`,
+      `${safeFilePart(baseName)}__段${segment}__${documentName}__原第${ranges}页.pdf`,
       { type: 'application/pdf', lastModified: plan.sourceFile.lastModified }
     );
     recognitionSplitMetadata.set(splitFile, {
@@ -336,5 +422,8 @@ function stableHash(value: string): string {
 }
 
 function unknownPage(page: number): PageMapItem {
-  return { page, pageType: 'UNKNOWN', rotation: 0, bankName: '', accountName: '', accountNumbers: [], density: 'LOW', confidence: 0 };
+  return {
+    page, pageType: 'UNKNOWN', rotation: 0, bankName: '', accountName: '', accountNumbers: [], density: 'LOW', confidence: 0,
+    documentBoundary: 'UNCERTAIN', documentLabel: '', investigationOrderNo: ''
+  };
 }

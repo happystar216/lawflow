@@ -537,8 +537,11 @@ export const Step1Upload: React.FC<Step1Props> = ({
         id: `MANUAL_${Date.now()}_${pageNumber}`,
         pages: rightPages,
         pageSelection: formatPageSelection(rightPages),
-        suggestedBankName: group.bankName
+        suggestedBankName: group.bankName,
+        boundaryBasis: 'MANUAL' as const,
+        documentLabel: ''
       };
+      left.boundaryBasis = 'MANUAL';
       const groups = [...plan.groups.slice(0, groupIndex), left, right, ...plan.groups.slice(groupIndex + 1)];
       return withSyncedPdfAssignments(plan, groups);
     }));
@@ -799,7 +802,10 @@ export const Step1Upload: React.FC<Step1Props> = ({
                   <div className="px-4 py-3 bg-slate-50 border-b border-slate-200 flex items-center justify-between gap-3">
                     <div className="min-w-0">
                       <div className="text-sm font-semibold text-slate-900 truncate" title={plan.sourceFile.name}>{plan.sourceFile.name}</div>
-                      <div className="text-[11px] text-slate-500 mt-0.5">共 {plan.totalPages} 页 · 系统建议 {plan.groups.length} 个连续银行片段</div>
+                      <div className="text-[11px] text-slate-500 mt-0.5">
+                        共 {plan.totalPages} 页 · 系统建议 {plan.groups.length} 个连续银行区间
+                        {plan.groups.some(group => group.boundaryBasis === 'MODEL_BANK') ? ' · 模型已判断银行切换位置' : ' · 暂按逐页银行证据分档'}
+                      </div>
                     </div>
                     <button
                       type="button"

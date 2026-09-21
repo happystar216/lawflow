@@ -19,6 +19,11 @@ export interface PageEvidence {
   accountNumbers: string[];
   density: 'LOW' | 'MEDIUM' | 'HIGH';
   confidence: number;
+  /** Model-proposed position inside the source bank-material section. */
+  documentBoundary?: 'START' | 'CONTINUE' | 'UNCERTAIN';
+  /** Human-readable section clue, usually the bank name. */
+  documentLabel?: string;
+  investigationOrderNo?: string;
   locallyBlank?: boolean;
   segmentId?: string;
   segmentStart?: number;

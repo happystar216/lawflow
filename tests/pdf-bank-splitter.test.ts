@@ -44,6 +44,36 @@ test('bank splitter never joins separated runs when the same bank appears again 
   ]);
 });
 
+test('model-detected bank starts define continuous bank sections', () => {
+  const firstOrder = { ...page(2, '', 'INVESTIGATION_ORDER'), documentBoundary: 'START' as const, documentLabel: '285号之一·工商银行' };
+  const secondOrder = { ...page(5, '', 'INVESTIGATION_ORDER'), documentBoundary: 'START' as const, documentLabel: '285号之二·农业银行' };
+  const groups = buildBankGroups(new Map<number, PageMapItem>([
+    [1, { ...page(1, '', 'COVER'), documentBoundary: 'UNCERTAIN' }],
+    [2, firstOrder],
+    [3, { ...page(3, '中国工商银行'), documentBoundary: 'CONTINUE' }],
+    [4, { ...page(4, '中国工商银行'), documentBoundary: 'CONTINUE' }],
+    [5, secondOrder],
+    [6, { ...page(6, '中国农业银行'), documentBoundary: 'CONTINUE' }]
+  ]), 6);
+
+  assert.deepEqual(groups.map(group => [group.bankName, group.pageSelection]), [
+    ['中国工商银行', '1-4'],
+    ['中国农业银行', '5-6']
+  ]);
+  assert.deepEqual(groups.map(group => group.boundaryBasis), ['MODEL_BANK', 'MODEL_BANK']);
+});
+
+test('same-bank model starts are kept in one bank section', () => {
+  const groups = buildBankGroups(new Map<number, PageMapItem>([
+    [1, { ...page(1, '中国工商银行'), documentBoundary: 'START' }],
+    [2, { ...page(2, '中国工商银行'), documentBoundary: 'CONTINUE' }],
+    [3, { ...page(3, '工商银行', 'INVESTIGATION_ORDER'), documentBoundary: 'START' }],
+    [4, { ...page(4, '工商银行'), documentBoundary: 'CONTINUE' }]
+  ]), 4);
+
+  assert.deepEqual(groups.map(group => [group.bankName, group.pageSelection]), [['中国工商银行', '1-4']]);
+});
+
 test('bank splitter leaves an ambiguous transaction page for explicit confirmation', () => {
   const groups = buildBankGroups(new Map<number, PageMapItem>([
     [1, page(1, '中国工商银行')],

@@ -50,8 +50,10 @@ test('PDF timeline editor exposes the original document, bank tracks and frame c
   assert.match(markup, /PDF 页面时间线/);
   assert.match(markup, /中国工商银行/);
   assert.match(markup, /第 1-2 页/);
-  assert.match(markup, /拖动银行分界/);
-  assert.match(markup, /从本页切开/);
+  assert.match(markup, /按住时间轴左右拖动/);
+  assert.match(markup, /从本页切开银行区间/);
+  assert.match(markup, /中国工商银行结束页拖动手柄/);
+  assert.match(markup, /时间轴缩放/);
   assert.equal(markup.match(/查看原 PDF 第 \d 页/g)?.length, 4);
   assert.doesNotMatch(markup, /片段 1/);
 });

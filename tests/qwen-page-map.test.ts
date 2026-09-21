@@ -57,7 +57,7 @@ test('page-map classifier preserves detailed document page types', async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => new Response(JSON.stringify({
     choices: [{ message: { content: JSON.stringify({ pages: [
-      { page: 1, pageType: 'INVESTIGATION_ORDER', rotation: 0, bankName: '', accountNumbers: [], density: 'LOW', confidence: 0.94 },
+      { page: 1, pageType: 'INVESTIGATION_ORDER', rotation: 0, bankName: '', accountNumbers: [], density: 'LOW', confidence: 0.94, documentBoundary: 'START', documentLabel: '律调令285号之一·农业银行', investigationOrderNo: '285号之一' },
       { page: 2, pageType: 'ACCOUNT_LIST', rotation: 0, bankName: '中国农业银行', accountNumbers: ['62220001'], density: 'LOW', confidence: 0.96 }
     ] }) } }]
   }), { status: 200, headers: { 'content-type': 'application/json' } });
@@ -68,6 +68,9 @@ test('page-map classifier preserves detailed document page types', async () => {
       { DASHSCOPE_API_KEY: 'key', DASHSCOPE_BASE_URL: 'https://example.invalid' }
     );
     assert.deepEqual(result.map(item => item.pageType), ['INVESTIGATION_ORDER', 'ACCOUNT_LIST']);
+    assert.equal(result[0].documentBoundary, 'START');
+    assert.equal(result[0].investigationOrderNo, '285号之一');
+    assert.equal(result[1].documentBoundary, 'UNCERTAIN');
   } finally {
     globalThis.fetch = originalFetch;
   }

@@ -27,6 +27,9 @@ export interface PageMapItem {
   accountNumbers: string[];
   density: 'LOW' | 'MEDIUM' | 'HIGH';
   confidence: number;
+  documentBoundary: 'START' | 'CONTINUE' | 'UNCERTAIN';
+  documentLabel: string;
+  investigationOrderNo: string;
 }
 
 export async function classifyBankPageSheet(
@@ -63,9 +66,17 @@ export async function classifyBankPageSheet(
 - bankName、accountName、accountNumbers：只填写页面抬头或本方账户栏明确可见的信息；绝不能把对手方、贷款账号、客户号、凭证号或辅助卡号当成本方账号。看不清留空。
 - density: 交易表格行数观感，LOW/MEDIUM/HIGH；非交易页填 LOW。
 - confidence: 0 到 1。缩略图不足以判断时用 UNKNOWN 或降低 confidence，不得猜测。
+- documentBoundary：直接判断该页在卷宗中的银行材料区间。
+  - START：该页明确是下一个银行材料区间的起始页。证据可以是银行抬头发生切换、新银行回函首页、新银行对应的调查令首页，或第一张明确属于新银行的账户/流水页；
+  - CONTINUE：该页仍属于前面已经开始的同一银行材料区间；
+  - UNCERTAIN：缩略图不足以判断。不要因为普通流水换页、账号变化或同一回函续页而误报 START。
+  拼图中的第一格只是本次扫描批次的第一格，不代表原 PDF 或银行材料区间从这里开始，绝不能因此标为 START。
+- investigationOrderNo：只抄录本页明确可见的调查令编号，看不清留空。
+- documentLabel：给这一银行材料区间的简短名称，优先使用银行名称；调查令编号明确可见时可作为辅助说明。只能依据当前拼图中可见证据填写，看不清留空。
+- 分档的第一优先级是银行切换。同一银行内部出现调查令、账户清单、多个账号和流水续页时都保持 CONTINUE；只有进入下一个银行的材料时才标记 START。
 
 严格输出 JSON：
-{"pages":[{"page":1,"pageType":"TRANSACTIONS","rotation":0,"bankName":"","accountName":"","accountNumbers":[],"density":"MEDIUM","confidence":0.95}]}`;
+{"pages":[{"page":1,"pageType":"TRANSACTIONS","rotation":0,"bankName":"中国光大银行","accountName":"","accountNumbers":[],"density":"MEDIUM","confidence":0.95,"documentBoundary":"CONTINUE","documentLabel":"中国光大银行","investigationOrderNo":"285号之十二"}]}`;
   let parsed: any;
   let firstError: unknown;
   if (env.GEMINI_API_KEY) {
@@ -99,11 +110,15 @@ export async function classifyBankPageSheet(
         .filter((value: string) => value.length >= 8))],
       density: /^(LOW|MEDIUM|HIGH)$/.test(text(item?.density).toUpperCase())
         ? text(item?.density).toUpperCase() as PageMapItem['density'] : 'LOW',
-      confidence: confidence(item?.confidence)
+      confidence: confidence(item?.confidence),
+      documentBoundary: documentBoundary(item?.documentBoundary),
+      documentLabel: text(item?.documentLabel),
+      investigationOrderNo: text(item?.investigationOrderNo)
     });
   }
   return uniquePages.map(page => byPage.get(page) || {
-    page, pageType: 'UNKNOWN', rotation: 0, bankName: '', accountName: '', accountNumbers: [], density: 'LOW', confidence: 0
+    page, pageType: 'UNKNOWN', rotation: 0, bankName: '', accountName: '', accountNumbers: [], density: 'LOW', confidence: 0,
+    documentBoundary: 'UNCERTAIN', documentLabel: '', investigationOrderNo: ''
   });
 }
 
@@ -191,6 +206,11 @@ function rotation(value: unknown): 0 | 90 | 180 | 270 {
 function confidence(value: unknown): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? Math.max(0, Math.min(1, parsed)) : 0;
+}
+
+function documentBoundary(value: unknown): PageMapItem['documentBoundary'] {
+  const normalized = text(value).toUpperCase();
+  return normalized === 'START' || normalized === 'CONTINUE' ? normalized : 'UNCERTAIN';
 }
 
 function text(value: unknown): string {
