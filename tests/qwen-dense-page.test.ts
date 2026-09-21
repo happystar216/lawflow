@@ -2,7 +2,6 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildSegmentedPageMap,
-  buildSegmentPageRuns,
   buildVirtualDocumentSegments,
   splitSegmentResultByPage,
   ChunkParseResult,
@@ -68,14 +67,6 @@ test('virtual document map keeps continuation pages with one account and splits 
   assert.deepEqual(segments[1].accountNumbers, ['1192']);
 });
 
-test('segment API batches retain blank backs instead of degrading to one request per front page', () => {
-  const pendingFrontPages = new Set([1, 3, 5, 7]);
-  assert.deepEqual(
-    buildSegmentPageRuns([1, 2, 3, 4, 5, 6, 7, 8], pendingFrontPages, 4),
-    [[1, 2, 3, 4], [5, 6, 7, 8]]
-  );
-});
-
 test('segment results accept only server-normalized original source page numbers', () => {
   const input = denseResult(true);
   input.transactions = [
@@ -92,6 +83,19 @@ test('segment results accept only server-normalized original source page numbers
   assert.equal(pages[2].transactions[0].rawPageNumber, 51);
   assert.match(pages[2].warnings?.join('\n') || '', /第 51 页/);
   assert.equal(pages[2].transactions[0].rawSourceFile, '原始卷宗.pdf');
+});
+
+test('segment account index is carried once instead of repeated on every split page', () => {
+  const input = denseResult(true);
+  input.accounts = [input.account, { ...input.account, accountNumber: '6222000000000002' }];
+  const pages = splitSegmentResultByPage(input, {
+    id: 'SEG-P35-36', segmentId: 'SEG', bankName: '中国工商银行', accountNumbers: ['4088'],
+    pages: [35, 36], file: new File([], 'segment.pdf', { type: 'application/pdf' }),
+    pageStart: 35, pageEnd: 36, totalPages: 128, rotation: 0, scale: 1
+  }, new Map(), '原始卷宗.pdf');
+
+  assert.equal(pages[0].accounts?.length, 2);
+  assert.equal(pages[1].accounts, undefined);
 });
 
 test('segmented map inherits account and rotation context across an uncertain continuation page', () => {

@@ -2,6 +2,8 @@ interface QwenEnvironment {
   DASHSCOPE_API_KEY?: string;
   DASHSCOPE_BASE_URL?: string;
   QWEN_MODEL?: string;
+  GEMINI_API_KEY?: string;
+  GEMINI_MODEL?: string;
 }
 
 export type PageMapType = 'TRANSACTIONS' | 'ACCOUNT_INFO' | 'DOCUMENT' | 'BLANK' | 'UNKNOWN';
@@ -23,11 +25,14 @@ export async function classifyBankPageSheet(
   env: QwenEnvironment,
   signal?: AbortSignal
 ): Promise<PageMapItem[]> {
-  if (!env.DASHSCOPE_API_KEY || !env.DASHSCOPE_BASE_URL) throw new Error('页面分类服务尚未完成配置');
+  if (!env.GEMINI_API_KEY && (!env.DASHSCOPE_API_KEY || !env.DASHSCOPE_BASE_URL)) {
+    throw new Error('页面分类服务尚未完成配置');
+  }
   if (!file.type.startsWith('image/')) throw new Error('页面分类仅接收缩略图');
   const uniquePages = [...new Set(pageNumbers.filter(page => Number.isInteger(page) && page > 0))];
   if (!uniquePages.length || uniquePages.length > 12) throw new Error('页面分类批次范围无效');
-  const dataUrl = `data:${file.type || 'image/jpeg'};base64,${arrayBufferToBase64(await file.arrayBuffer())}`;
+  const mimeType = file.type || 'image/jpeg';
+  const base64Data = arrayBufferToBase64(await file.arrayBuffer());
   const prompt = `你是银行流水卷宗的页面导航分类器。图片是一张缩略图拼图，每格顶部有醒目的“原PDF第 N 页”标签。
 
 只做页面地图，不提取交易明细和金额。必须为这些页各返回一项：${uniquePages.join('、')}。
@@ -41,26 +46,23 @@ export async function classifyBankPageSheet(
 
 严格输出 JSON：
 {"pages":[{"page":1,"pageType":"TRANSACTIONS","rotation":0,"bankName":"","accountName":"","accountNumbers":[],"density":"MEDIUM","confidence":0.95}]}`;
-  const response = await fetch(`${env.DASHSCOPE_BASE_URL.replace(/\/+$/, '')}/chat/completions`, {
-    method: 'POST',
-    signal,
-    headers: { Authorization: `Bearer ${env.DASHSCOPE_API_KEY}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: env.QWEN_MODEL || 'qwen3.8-flash',
-      messages: [{ role: 'user', content: [
-        { type: 'text', text: prompt },
-        { type: 'image_url', image_url: { url: dataUrl } }
-      ] }],
-      stream: false,
-      response_format: { type: 'json_object' },
-      enable_thinking: false,
-      temperature: 0,
-      max_tokens: 2048
-    })
-  });
-  if (!response.ok) throw new Error(`页面分类服务请求失败（${response.status}）`);
-  const payload = await response.json() as any;
-  const parsed = parseJson(payload?.choices?.[0]?.message?.content);
+  let parsed: any;
+  let firstError: unknown;
+  if (env.GEMINI_API_KEY) {
+    try {
+      parsed = await classifyWithGemini(prompt, mimeType, base64Data, env, signal);
+    } catch (error) {
+      firstError = error;
+    }
+  }
+  if (!parsed && env.DASHSCOPE_API_KEY && env.DASHSCOPE_BASE_URL) {
+    try {
+      parsed = await classifyWithQwen(prompt, mimeType, base64Data, env, signal);
+    } catch (error) {
+      throw new Error(`页面分类服务均未完成：${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  if (!parsed) throw firstError instanceof Error ? firstError : new Error('页面分类服务未返回结果');
   const rawPages = Array.isArray(parsed?.pages) ? parsed.pages : [];
   const byPage = new Map<number, PageMapItem>();
   for (const item of rawPages) {
@@ -83,6 +85,68 @@ export async function classifyBankPageSheet(
   return uniquePages.map(page => byPage.get(page) || {
     page, pageType: 'UNKNOWN', rotation: 0, bankName: '', accountName: '', accountNumbers: [], density: 'LOW', confidence: 0
   });
+}
+
+async function classifyWithQwen(
+  prompt: string,
+  mimeType: string,
+  base64Data: string,
+  env: QwenEnvironment,
+  signal?: AbortSignal
+): Promise<any> {
+  const response = await fetch(`${env.DASHSCOPE_BASE_URL!.replace(/\/+$/, '')}/chat/completions`, {
+    method: 'POST',
+    signal,
+    headers: { Authorization: `Bearer ${env.DASHSCOPE_API_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: env.QWEN_MODEL || 'qwen3.8-flash',
+      messages: [{ role: 'user', content: [
+        { type: 'text', text: prompt },
+        { type: 'image_url', image_url: { url: `data:${mimeType};base64,${base64Data}` } }
+      ] }],
+      stream: false,
+      response_format: { type: 'json_object' },
+      enable_thinking: false,
+      temperature: 0,
+      max_tokens: 2048
+    })
+  });
+  if (!response.ok) throw new Error(`页面分类服务请求失败（${response.status}）`);
+  const payload = await response.json() as any;
+  return parseJson(payload?.choices?.[0]?.message?.content);
+}
+
+async function classifyWithGemini(
+  prompt: string,
+  mimeType: string,
+  base64Data: string,
+  env: QwenEnvironment,
+  signal?: AbortSignal
+): Promise<any> {
+  const model = env.GEMINI_MODEL || 'gemini-3.8-flash';
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${env.GEMINI_API_KEY}`,
+    {
+      method: 'POST',
+      signal,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ parts: [
+          { text: prompt },
+          { inline_data: { mime_type: mimeType, data: base64Data } }
+        ] }],
+        generationConfig: {
+          response_mime_type: 'application/json',
+          temperature: 0,
+          max_output_tokens: 4096
+        }
+      })
+    }
+  );
+  if (!response.ok) throw new Error(`页面分类服务请求失败（${response.status}）`);
+  const payload = await response.json() as any;
+  const content = payload?.candidates?.[0]?.content?.parts?.map((part: any) => part?.text || '').join('') || '';
+  return parseJson(content);
 }
 
 function parseJson(value: unknown): any {

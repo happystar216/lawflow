@@ -27,3 +27,28 @@ test('page-map classifier preserves requested pages and normalizes uncertain out
     globalThis.fetch = originalFetch;
   }
 });
+
+test('page-map classifier uses the PDF recognition provider when it is available', async () => {
+  const originalFetch = globalThis.fetch;
+  let requestedUrl = '';
+  globalThis.fetch = async input => {
+    requestedUrl = String(input);
+    return new Response(JSON.stringify({
+      candidates: [{ content: { parts: [{ text: JSON.stringify({ pages: [
+        { page: 1, pageType: 'ACCOUNT_INFO', rotation: 0, bankName: '中国农业银行', accountName: '胡艳红', accountNumbers: ['22240201100609597'], density: 'LOW', confidence: 0.97 }
+      ] }) }] } }]
+    }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  try {
+    const result = await classifyBankPageSheet(
+      new File([new Uint8Array([1, 2])], 'map.jpg', { type: 'image/jpeg' }),
+      [1],
+      { GEMINI_API_KEY: 'key', GEMINI_MODEL: 'gemini-test' }
+    );
+    assert.match(requestedUrl, /gemini-test:generateContent/);
+    assert.equal(result[0].bankName, '中国农业银行');
+    assert.deepEqual(result[0].accountNumbers, ['22240201100609597']);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
