@@ -12,6 +12,8 @@ export interface GeminiParserClientOptions {
   respondentName?: string;
   totalPages?: number;
   sourceContentHash?: string;
+  sourcePageNumbers?: number[];
+  sourceTotalPages?: number;
 }
 
 /**
@@ -56,5 +58,9 @@ export async function parsePdfWithGemini(
     totalTransactions: info.totalTransactions,
     percent: info.percent,
     isStreaming: info.percent < 100
-  }), signal, { cacheIdentity: options?.sourceContentHash });
+  }), signal, {
+    cacheIdentity: options?.sourceContentHash,
+    sourcePageNumbers: options?.sourcePageNumbers,
+    sourceTotalPages: options?.sourceTotalPages
+  });
 }

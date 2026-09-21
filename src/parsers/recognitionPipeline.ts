@@ -1,4 +1,14 @@
-export type RecognitionPageType = 'TRANSACTIONS' | 'ACCOUNT_INFO' | 'DOCUMENT' | 'BLANK' | 'UNKNOWN';
+export type RecognitionPageType =
+  | 'TRANSACTIONS'
+  | 'ACCOUNT_LIST'
+  | 'ACCOUNT_INFO'
+  | 'INVESTIGATION_ORDER'
+  | 'BANK_REPLY'
+  | 'COVER'
+  | 'OTHER_DOCUMENT'
+  | 'DOCUMENT'
+  | 'BLANK'
+  | 'UNKNOWN';
 
 export interface PageEvidence {
   page: number;
@@ -209,7 +219,10 @@ export function classifyRecognitionFailure(error: unknown): RecognitionFailureKi
 export function estimatePageRows(page?: PageEvidence): number {
   if (!page) return 12;
   if (page.pageType === 'BLANK') return 0;
-  if (page.pageType === 'ACCOUNT_INFO' || page.pageType === 'DOCUMENT') return 2;
+  if (page.pageType === 'ACCOUNT_LIST' || page.pageType === 'ACCOUNT_INFO'
+    || page.pageType === 'INVESTIGATION_ORDER' || page.pageType === 'BANK_REPLY'
+    || page.pageType === 'COVER' || page.pageType === 'OTHER_DOCUMENT'
+    || page.pageType === 'DOCUMENT') return 2;
   if (page.pageType === 'UNKNOWN') return 12;
   if (page.density === 'HIGH') return 40;
   if (page.density === 'MEDIUM') return 20;

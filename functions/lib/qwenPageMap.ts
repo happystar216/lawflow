@@ -6,7 +6,17 @@ interface QwenEnvironment {
   GEMINI_MODEL?: string;
 }
 
-export type PageMapType = 'TRANSACTIONS' | 'ACCOUNT_INFO' | 'DOCUMENT' | 'BLANK' | 'UNKNOWN';
+export type PageMapType =
+  | 'TRANSACTIONS'
+  | 'ACCOUNT_LIST'
+  | 'ACCOUNT_INFO'
+  | 'INVESTIGATION_ORDER'
+  | 'BANK_REPLY'
+  | 'COVER'
+  | 'OTHER_DOCUMENT'
+  | 'DOCUMENT'
+  | 'BLANK'
+  | 'UNKNOWN';
 
 export interface PageMapItem {
   page: number;
@@ -38,7 +48,17 @@ export async function classifyBankPageSheet(
 只做页面地图，不提取交易明细和金额。必须为这些页各返回一项：${uniquePages.join('、')}。
 
 判断：
-- pageType: TRANSACTIONS（含交易明细表）、ACCOUNT_INFO（账户清单/开户资料/余额清单）、DOCUMENT（法院文书、回函、封面）、BLANK（真正空白）、UNKNOWN。
+- pageType 必须逐页选择最具体的一类：
+  - TRANSACTIONS：有日期、金额等逐笔记录的交易流水明细；
+  - ACCOUNT_LIST：集中列出一个或多个账号/卡号的账户清单、查询账户列表；
+  - ACCOUNT_INFO：单一账户的开户资料、余额资料、账户基本信息；
+  - INVESTIGATION_ORDER：法院调查令、协助调查通知等司法调查文书；
+  - BANK_REPLY：银行回函、查询结果说明、无明细说明；
+  - COVER：封面、目录、分隔页；
+  - OTHER_DOCUMENT：说明页、授权材料或其他非流水资料；
+  - BLANK：真正空白页；
+  - UNKNOWN：缩略图无法可靠判断。
+  兼容旧值 DOCUMENT，但能判断时不要使用笼统的 DOCUMENT。
 - rotation: 为了让正文正向阅读，原页面需要顺时针旋转的角度，只能是 0/90/180/270。
 - bankName、accountName、accountNumbers：只填写页面抬头或本方账户栏明确可见的信息；绝不能把对手方、贷款账号、客户号、凭证号或辅助卡号当成本方账号。看不清留空。
 - density: 交易表格行数观感，LOW/MEDIUM/HIGH；非交易页填 LOW。
@@ -159,7 +179,7 @@ function parseJson(value: unknown): any {
 
 function pageType(value: unknown): PageMapType {
   const normalized = text(value).toUpperCase();
-  return /^(TRANSACTIONS|ACCOUNT_INFO|DOCUMENT|BLANK|UNKNOWN)$/.test(normalized)
+  return /^(TRANSACTIONS|ACCOUNT_LIST|ACCOUNT_INFO|INVESTIGATION_ORDER|BANK_REPLY|COVER|OTHER_DOCUMENT|DOCUMENT|BLANK|UNKNOWN)$/.test(normalized)
     ? normalized as PageMapType : 'UNKNOWN';
 }
 

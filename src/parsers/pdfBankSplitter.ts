@@ -10,12 +10,33 @@ export interface PdfBankGroup {
   pageTypes: PageMapItem['pageType'][];
 }
 
+export interface PdfPageClassification {
+  page: number;
+  pageType: PageMapItem['pageType'];
+  detectedBankName: string;
+  assignedBankName: string;
+  confidence: number;
+  thumbnailUrl: string;
+  suggestedForRecognition: boolean;
+  selectedForRecognition: boolean;
+  selectionModifiedByUser: boolean;
+}
+
 export interface PdfBankSplitPlan {
   id: string;
   sourceFile: File;
   totalPages: number;
   groups: PdfBankGroup[];
+  pages: PdfPageClassification[];
 }
+
+export interface RecognitionSplitMetadata {
+  sourceFileName: string;
+  sourceTotalPages: number;
+  sourcePageNumbers: number[];
+}
+
+const recognitionSplitMetadata = new WeakMap<File, RecognitionSplitMetadata>();
 
 export async function preparePdfBankSplitPlan(
   file: File,
@@ -23,8 +44,25 @@ export async function preparePdfBankSplitPlan(
   signal?: AbortSignal
 ): Promise<PdfBankSplitPlan> {
   const { discoverPdfPageMap } = await import('./qwenPdfParser');
-  const { totalPages, pageMap } = await discoverPdfPageMap(file, onProgress, signal);
+  const { totalPages, pageMap, previewFiles } = await discoverPdfPageMap(file, onProgress, signal);
   const groups = buildBankGroups(pageMap, totalPages);
+  const assignedBankByPage = new Map(groups.flatMap(group => group.pages.map(page => [page, group.bankName] as const)));
+  const pages = Array.from({ length: totalPages }, (_, index) => {
+    const page = index + 1;
+    const item = pageMap.get(page) || unknownPage(page);
+    const suggestedForRecognition = isPageRecommendedForRecognition(item.pageType);
+    return {
+      page,
+      pageType: item.pageType,
+      detectedBankName: cleanBankName(item.bankName),
+      assignedBankName: assignedBankByPage.get(page) || '待确认银行',
+      confidence: item.confidence,
+      thumbnailUrl: previewFiles.get(page) ? URL.createObjectURL(previewFiles.get(page)!) : '',
+      suggestedForRecognition,
+      selectedForRecognition: suggestedForRecognition,
+      selectionModifiedByUser: false
+    };
+  });
   const fileNameBank = bankNameFromFileName(file.name);
   if (fileNameBank && groups.length === 1 && isPlaceholderBank(groups[0].bankName)) {
     groups[0] = {
@@ -36,12 +74,14 @@ export async function preparePdfBankSplitPlan(
       // and require the user's confirmation before recognition starts.
       confidence: Math.max(groups[0].confidence, 0.45)
     };
+    pages.forEach(page => { page.assignedBankName = fileNameBank; });
   }
   return {
     id: splitPlanId(file),
     sourceFile: file,
     totalPages,
-    groups
+    groups,
+    pages
   };
 }
 
@@ -53,36 +93,47 @@ export function buildBankGroups(pageMap: Map<number, PageMapItem>, totalPages: n
     if (bank && !isPlaceholderBank(bank) && (item?.confidence ?? 0) >= 0.5) reliableBankByPage.set(page, bank);
   }
 
-  const pagesByBank = new Map<string, number[]>();
-  const evidenceByBank = new Map<string, PageMapItem[]>();
+  const assigned: Array<{ bankName: string; item: PageMapItem }> = [];
   for (let page = 1; page <= totalPages; page += 1) {
     const item = pageMap.get(page) || unknownPage(page);
     const explicit = reliableBankByPage.get(page);
     const bankName = explicit || inferNeighbourBank(page, totalPages, item, reliableBankByPage) || '待确认银行';
-    pagesByBank.set(bankName, [...(pagesByBank.get(bankName) || []), page]);
-    evidenceByBank.set(bankName, [...(evidenceByBank.get(bankName) || []), item]);
+    assigned.push({ bankName, item });
   }
 
-  return [...pagesByBank.entries()]
-    .sort((left, right) => left[1][0] - right[1][0])
-    .map(([bankName, pages], index) => {
-      const evidence = evidenceByBank.get(bankName) || [];
-      const confidenceValues = evidence.map(item => item.confidence).filter(value => Number.isFinite(value));
-      return {
-        id: `BANK_${index + 1}_${stableHash(`${bankName}|${pages.join(',')}`)}`,
-        bankName,
-        suggestedBankName: bankName,
-        pages,
-        pageSelection: formatPageSelection(pages),
-        confidence: confidenceValues.length
-          ? confidenceValues.reduce((sum, value) => sum + value, 0) / confidenceValues.length
-          : 0,
-        pageTypes: [...new Set(evidence.map(item => item.pageType))]
-      };
-    });
+  const runs: Array<{ bankName: string; pages: number[]; evidence: PageMapItem[] }> = [];
+  for (const [index, entry] of assigned.entries()) {
+    const page = index + 1;
+    const previous = runs.at(-1);
+    if (previous && sameBank(previous.bankName, entry.bankName)) {
+      previous.pages.push(page);
+      previous.evidence.push(entry.item);
+      continue;
+    }
+    runs.push({ bankName: entry.bankName, pages: [page], evidence: [entry.item] });
+  }
+
+  return runs.map(({ bankName, pages, evidence }, index) => {
+    const confidenceValues = evidence.map(item => item.confidence).filter(value => Number.isFinite(value));
+    return {
+      id: `SEGMENT_${index + 1}_${stableHash(`${bankName}|${pages.join(',')}`)}`,
+      bankName,
+      suggestedBankName: bankName,
+      pages,
+      pageSelection: formatPageSelection(pages),
+      confidence: confidenceValues.length
+        ? confidenceValues.reduce((sum, value) => sum + value, 0) / confidenceValues.length
+        : 0,
+      pageTypes: [...new Set(evidence.map(item => item.pageType))]
+    };
+  });
 }
 
-export function validateBankGroups(groups: PdfBankGroup[], totalPages: number): string[] {
+export function validateBankGroups(
+  groups: PdfBankGroup[],
+  totalPages: number,
+  pageClassifications: PdfPageClassification[] = []
+): string[] {
   const errors: string[] = [];
   const assigned = new Map<number, number>();
   for (const [index, group] of groups.entries()) {
@@ -98,47 +149,75 @@ export function validateBankGroups(groups: PdfBankGroup[], totalPages: number): 
       continue;
     }
     if (!pages.length) errors.push(`${label}没有页码`);
+    if (pages.some((page, pageIndex) => pageIndex > 0 && page !== pages[pageIndex - 1] + 1)) {
+      errors.push(`${label}必须是连续页段，不能使用不连续页码`);
+    }
     for (const page of pages) assigned.set(page, (assigned.get(page) || 0) + 1);
   }
   const missing = Array.from({ length: totalPages }, (_, index) => index + 1).filter(page => !assigned.has(page));
   const duplicated = [...assigned.entries()].filter(([, count]) => count > 1).map(([page]) => page);
   if (missing.length) errors.push(`尚未分配第 ${formatPageSelection(missing)} 页`);
   if (duplicated.length) errors.push(`第 ${formatPageSelection(duplicated)} 页被重复分配`);
+  const unknownTypes = pageClassifications.filter(page => page.pageType === 'UNKNOWN').map(page => page.page);
+  if (unknownTypes.length) errors.push(`第 ${formatPageSelection(unknownTypes)} 页的页面类型尚未确认`);
+  if (pageClassifications.length && !pageClassifications.some(page => page.selectedForRecognition)) {
+    errors.push('至少选择一页进入流水识别');
+  }
   return errors;
 }
 
 export async function createBankSplitFiles(plan: PdfBankSplitPlan): Promise<File[]> {
-  const errors = validateBankGroups(plan.groups, plan.totalPages);
+  const errors = validateBankGroups(plan.groups, plan.totalPages, plan.pages);
   if (errors.length) throw new Error(errors.join('；'));
   const { PDFDocument } = await import('pdf-lib');
   const source = await PDFDocument.load(await plan.sourceFile.arrayBuffer());
   const baseName = plan.sourceFile.name.replace(/\.pdf$/i, '');
   const files: File[] = [];
-  const confirmedBanks = new Map<string, { bankName: string; pages: number[] }>();
+  const selectedPages = new Set(plan.pages.filter(page => page.selectedForRecognition).map(page => page.page));
+  const confirmedSegments = plan.groups.map(group => ({
+    bankName: cleanBankName(group.bankName),
+    pages: parsePageSelection(group.pageSelection, plan.totalPages).filter(page => selectedPages.has(page))
+  })).filter(segment => segment.pages.length).sort((left, right) => left.pages[0] - right.pages[0]);
 
-  for (const group of plan.groups) {
-    const bankName = cleanBankName(group.bankName);
-    const key = canonicalBankKey(bankName);
-    const current = confirmedBanks.get(key) || { bankName, pages: [] };
-    current.pages.push(...parsePageSelection(group.pageSelection, plan.totalPages));
-    confirmedBanks.set(key, current);
-  }
-
-  for (const { bankName, pages: unorderedPages } of confirmedBanks.values()) {
-    const pages = [...new Set(unorderedPages)].sort((left, right) => left - right);
+  for (const [segmentIndex, { bankName, pages }] of confirmedSegments.entries()) {
     const document = await PDFDocument.create();
     const copiedPages = await document.copyPages(source, pages.map(page => page - 1));
     copiedPages.forEach(page => document.addPage(page));
     const bytes = await document.save({ useObjectStreams: true });
     const bank = safeFilePart(bankName);
     const ranges = safeFilePart(formatPageSelection(pages).replace(/,/g, '_'));
-    files.push(new File(
+    const segment = String(segmentIndex + 1).padStart(2, '0');
+    const splitFile = new File(
       [Uint8Array.from(bytes).buffer],
-      `${safeFilePart(baseName)}__${bank}__原第${ranges}页.pdf`,
+      `${safeFilePart(baseName)}__段${segment}__${bank}__原第${ranges}页.pdf`,
       { type: 'application/pdf', lastModified: plan.sourceFile.lastModified }
-    ));
+    );
+    recognitionSplitMetadata.set(splitFile, {
+      sourceFileName: plan.sourceFile.name,
+      sourceTotalPages: plan.totalPages,
+      sourcePageNumbers: [...pages]
+    });
+    files.push(splitFile);
   }
   return files;
+}
+
+export function getRecognitionSplitMetadata(file: File): RecognitionSplitMetadata | undefined {
+  return recognitionSplitMetadata.get(file);
+}
+
+export function isPageRecommendedForRecognition(pageType: PageMapItem['pageType']): boolean {
+  return pageType === 'TRANSACTIONS'
+    || pageType === 'ACCOUNT_LIST'
+    || pageType === 'ACCOUNT_INFO'
+    || pageType === 'BANK_REPLY'
+    || pageType === 'UNKNOWN';
+}
+
+export function releasePdfSplitPlanPreviews(plan: PdfBankSplitPlan): void {
+  for (const page of plan.pages) {
+    if (page.thumbnailUrl) URL.revokeObjectURL(page.thumbnailUrl);
+  }
 }
 
 export function parsePageSelection(value: string, totalPages: number): number[] {
@@ -189,9 +268,10 @@ function inferNeighbourBank(
 ): string {
   const previous = nearestBank(page, -1, totalPages, reliableBankByPage);
   const next = nearestBank(page, 1, totalPages, reliableBankByPage);
-  if (previous?.bank && previous.bank === next?.bank) return previous.bank;
-  if (page === 1 && next?.bank) return next.bank;
-  if (item.pageType === 'BLANK' || item.pageType === 'DOCUMENT') {
+  if (previous?.bank && next?.bank && sameBank(previous.bank, next.bank)) return previous.bank;
+  if (!previous?.bank && next?.bank) return next.bank;
+  if (previous?.bank && !next?.bank) return previous.bank;
+  if (item.pageType !== 'TRANSACTIONS') {
     if (previous?.bank && (!next || previous.distance <= next.distance)) return previous.bank;
     if (next?.bank) return next.bank;
   }
@@ -217,6 +297,11 @@ function cleanBankName(value: string | undefined): string {
 
 function canonicalBankKey(value: string): string {
   return value.replace(/中国|股份有限公司|有限责任公司|银行/g, '').toLocaleLowerCase();
+}
+
+function sameBank(left: string, right: string): boolean {
+  if (isPlaceholderBank(left) || isPlaceholderBank(right)) return left === right;
+  return canonicalBankKey(left) === canonicalBankKey(right);
 }
 
 function isPlaceholderBank(value: string): boolean {

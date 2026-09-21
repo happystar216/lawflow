@@ -30,6 +30,7 @@ export interface AutomationImportState {
     fileName: string;
     totalPages: number;
     groups: Array<{ bankName: string; pageSelection: string }>;
+    pages: Array<{ page: number; pageType: string; bankName: string; selectedForRecognition: boolean }>;
     validationErrors: string[];
   }>;
 }

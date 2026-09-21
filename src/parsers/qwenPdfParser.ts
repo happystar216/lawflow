@@ -62,7 +62,7 @@ export async function parsePdfWithQwen(
   file: File,
   onProgress?: (info: QwenProgressInfo) => void,
   signal?: AbortSignal,
-  options?: { cacheIdentity?: string }
+  options?: { cacheIdentity?: string; sourcePageNumbers?: number[]; sourceTotalPages?: number }
 ): Promise<{ account: BankAccount; accounts: BankAccount[]; transactions: StandardTransaction[] }> {
   // Every PDF follows the same four-stage pipeline: page evidence, logical
   // document grouping, transaction extraction, and independent completeness
@@ -206,10 +206,15 @@ export async function parsePdfWithQwen(
       .sort((a, b) => a.pageStart - b.pageStart)
       .map(result => markUnresolvedCompleteness(result, pageMap.get(result.pageStart)));
     await writeCachedResults(cacheKey, finalResults.filter(result => !isHardFailedPage(result)));
-    const merged = mergeVerifiedChunks(finalResults, file.name, totalPages);
+    const localMerged = mergeVerifiedChunks(finalResults, file.name, totalPages);
+    const merged = remapRecognitionSourcePages(
+      localMerged,
+      options?.sourcePageNumbers,
+      options?.sourceTotalPages
+    );
     const failedPages = finalResults
       .filter(result => assessPageCompleteness(result, pageMap.get(result.pageStart)).blocksAnalysis)
-      .map(result => result.pageStart);
+      .map(result => sourcePageNumber(result.pageStart, options?.sourcePageNumbers));
     onProgress?.({
       currentPage: totalPages,
       totalPages,
@@ -226,12 +231,46 @@ export async function parsePdfWithQwen(
   }
 }
 
+export function remapRecognitionSourcePages(
+  result: { account: BankAccount; accounts: BankAccount[]; transactions: StandardTransaction[] },
+  sourcePageNumbers?: number[],
+  sourceTotalPages?: number
+): { account: BankAccount; accounts: BankAccount[]; transactions: StandardTransaction[] } {
+  if (!sourcePageNumbers?.length) return result;
+  const totalPages = sourceTotalPages || Math.max(...sourcePageNumbers);
+  const remapWarning = (warning: string) => warning.replace(/第\s*(\d+)\s*页/g, (_match, value: string) => {
+    return `第 ${sourcePageNumber(Number(value), sourcePageNumbers)} 页`;
+  });
+  const remapAccount = (account: BankAccount): BankAccount => ({
+    ...account,
+    coveredPages: account.coveredPages?.map(page => sourcePageNumber(page, sourcePageNumbers)),
+    totalPages,
+    parseWarnings: account.parseWarnings?.map(remapWarning)
+  });
+  const accounts = result.accounts.map(remapAccount);
+  return {
+    account: remapAccount(result.account),
+    accounts,
+    transactions: result.transactions.map(transaction => ({
+      ...transaction,
+      rawPageNumber: transaction.rawPageNumber
+        ? sourcePageNumber(transaction.rawPageNumber, sourcePageNumbers)
+        : transaction.rawPageNumber
+    }))
+  };
+}
+
+function sourcePageNumber(localPage: number, sourcePageNumbers?: number[]): number {
+  return sourcePageNumbers?.[localPage - 1] || localPage;
+}
+
 async function buildPageMap(
   pages: number[],
   totalPages: number,
   renderPage: (pageNumber: number, rotation?: number, scale?: number) => Promise<PdfPageImage>,
   signal: AbortSignal | undefined,
-  report: (status: string) => void
+  report: (status: string) => void,
+  previewFiles?: Map<number, File>
 ): Promise<Map<number, PageMapItem>> {
   report(`正在快速扫描 ${pages.length} 个未缓存页面，过滤空白页并建立文档地图…`);
   const thumbnails = new Map<number, PdfPageImage>();
@@ -240,6 +279,7 @@ async function buildPageMap(
     assertNotAborted(signal);
     const thumbnail = await renderPage(page, 0, THUMBNAIL_SCALE);
     thumbnails.set(page, thumbnail);
+    previewFiles?.set(page, thumbnail.file);
     const blankness = await analyzeThumbnailBlankness(thumbnail.file);
     if (blankness !== 'CONTENT') likelyBlank.add(page);
   }, signal);
@@ -278,11 +318,12 @@ export async function discoverPdfPageMap(
   file: File,
   onProgress?: (message: string, completedPages: number, totalPages: number) => void,
   signal?: AbortSignal
-): Promise<{ totalPages: number; pageMap: Map<number, PageMapItem> }> {
+): Promise<{ totalPages: number; pageMap: Map<number, PageMapItem>; previewFiles: Map<number, File> }> {
   const renderer = await createPdfPageImageRenderer(file);
   const totalPages = renderer.totalPages;
   try {
     const pages = Array.from({ length: totalPages }, (_, index) => index + 1);
+    const previewFiles = new Map<number, File>();
     let lastCompleted = 0;
     const pageMap = await buildPageMap(
       pages,
@@ -293,9 +334,10 @@ export async function discoverPdfPageMap(
         const match = message.match(/(\d+)\/(\d+)/);
         if (match) lastCompleted = Number(match[1]);
         onProgress?.(message, lastCompleted, totalPages);
-      }
+      },
+      previewFiles
     );
-    return { totalPages, pageMap };
+    return { totalPages, pageMap, previewFiles };
   } finally {
     await renderer.destroy();
   }

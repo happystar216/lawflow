@@ -19,7 +19,7 @@ export interface QwenChunkResult {
     expectedCount: number;
     extractedCount: number;
     status: 'COMPLETE' | 'NEEDS_REVIEW';
-    pageType?: 'TRANSACTIONS' | 'ACCOUNT_INFO' | 'DOCUMENT' | 'BLANK' | 'UNKNOWN';
+    pageType?: 'TRANSACTIONS' | 'ACCOUNT_LIST' | 'ACCOUNT_INFO' | 'INVESTIGATION_ORDER' | 'BANK_REPLY' | 'COVER' | 'OTHER_DOCUMENT' | 'DOCUMENT' | 'BLANK' | 'UNKNOWN';
   }>;
 }
 

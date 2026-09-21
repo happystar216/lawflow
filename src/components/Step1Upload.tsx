@@ -12,8 +12,13 @@ import { normalizeRecognizedData } from '../utils/recognizedDataNormalizer';
 import { businessAccounts, incompleteRecognitionPages, isDocumentReviewAccount } from '../review/recognitionCompleteness';
 import {
   createBankSplitFiles,
+  getRecognitionSplitMetadata,
+  isPageRecommendedForRecognition,
   PdfBankSplitPlan,
+  PdfPageClassification,
+  parsePageSelection,
   preparePdfBankSplitPlan,
+  releasePdfSplitPlanPreviews,
   validateBankGroups
 } from '../parsers/pdfBankSplitter';
 
@@ -44,6 +49,23 @@ interface ImportTask {
   diagnosis?: string;
 }
 
+const PAGE_TYPE_OPTIONS: Array<{ value: PdfPageClassification['pageType']; label: string }> = [
+  { value: 'TRANSACTIONS', label: '流水明细' },
+  { value: 'ACCOUNT_LIST', label: '账号列表' },
+  { value: 'ACCOUNT_INFO', label: '账户资料' },
+  { value: 'INVESTIGATION_ORDER', label: '调查令' },
+  { value: 'BANK_REPLY', label: '银行回函' },
+  { value: 'COVER', label: '封面/目录' },
+  { value: 'OTHER_DOCUMENT', label: '其他资料' },
+  { value: 'DOCUMENT', label: '一般文书' },
+  { value: 'BLANK', label: '空白页' },
+  { value: 'UNKNOWN', label: '待确认' }
+];
+
+function pageTypeLabel(type: PdfPageClassification['pageType']): string {
+  return PAGE_TYPE_OPTIONS.find(option => option.value === type)?.label || '待确认';
+}
+
 function importTaskId(file: File): string {
   return `${file.name}:${file.size}:${file.lastModified}`;
 }
@@ -66,8 +88,10 @@ export const Step1Upload: React.FC<Step1Props> = ({
   const [importTasks, setImportTasks] = useState<ImportTask[]>([]);
   const [pendingPdfPlans, setPendingPdfPlans] = useState<PdfBankSplitPlan[]>([]);
   const [splitValidationErrors, setSplitValidationErrors] = useState<Record<string, string[]>>({});
+  const [activePreviewPages, setActivePreviewPages] = useState<Record<string, number>>({});
 
   const abortControllerRef = useRef<AbortController | null>(null);
+  const pendingPdfPlansRef = useRef<PdfBankSplitPlan[]>([]);
   const zeroTransactionFiles = sourceFilesWithoutTransactions(accounts, transactions);
   const sourceTransactionCounts = transactionCountsBySource(transactions);
   const hasTransactions = transactions.length > 0;
@@ -93,6 +117,14 @@ export const Step1Upload: React.FC<Step1Props> = ({
     window.addEventListener('beforeunload', warnBeforeLeaving);
     return () => window.removeEventListener('beforeunload', warnBeforeLeaving);
   }, [isProcessing]);
+
+  useEffect(() => {
+    pendingPdfPlansRef.current = pendingPdfPlans;
+  }, [pendingPdfPlans]);
+
+  useEffect(() => () => {
+    pendingPdfPlansRef.current.forEach(releasePdfSplitPlanPreviews);
+  }, []);
 
   useEffect(() => {
     publishAutomationImportState({
@@ -121,6 +153,12 @@ export const Step1Upload: React.FC<Step1Props> = ({
         fileName: plan.sourceFile.name,
         totalPages: plan.totalPages,
         groups: plan.groups.map(group => ({ bankName: group.bankName, pageSelection: group.pageSelection })),
+        pages: plan.pages.map(page => ({
+          page: page.page,
+          pageType: page.pageType,
+          bankName: page.assignedBankName,
+          selectedForRecognition: page.selectedForRecognition
+        })),
         validationErrors: splitValidationErrors[plan.id] || []
       }))
     });
@@ -214,6 +252,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
           importedTransactionCount = canonical.transactions.length;
           importedAccountCount = businessAccounts(canonical.accounts).length;
         } else if (name.endsWith('.pdf')) {
+          const splitMetadata = getRecognitionSplitMetadata(file);
           const controller = new AbortController();
           abortControllerRef.current = controller;
           setIsCancellable(true);
@@ -226,7 +265,9 @@ export const Step1Upload: React.FC<Step1Props> = ({
             controller.signal,
             {
               respondentName: caseRespondentName,
-              sourceContentHash: source.contentHash
+              sourceContentHash: source.contentHash,
+              sourcePageNumbers: splitMetadata?.sourcePageNumbers,
+              sourceTotalPages: splitMetadata?.sourceTotalPages
             }
           );
           let sourceStored = true;
@@ -355,6 +396,8 @@ export const Step1Upload: React.FC<Step1Props> = ({
         }, controller.signal);
         setPendingPdfPlans(current => {
           const next = new Map(current.map(item => [item.id, item]));
+          const previous = next.get(plan.id);
+          if (previous) releasePdfSplitPlanPreviews(previous);
           next.set(plan.id, plan);
           return [...next.values()];
         });
@@ -391,6 +434,54 @@ export const Step1Upload: React.FC<Step1Props> = ({
     setSplitValidationErrors(current => ({ ...current, [planId]: [] }));
   };
 
+  const updatePdfPageType = (
+    planId: string,
+    pageNumber: number,
+    pageType: PdfPageClassification['pageType']
+  ) => {
+    setPendingPdfPlans(current => current.map(plan => plan.id !== planId ? plan : {
+      ...plan,
+      pages: plan.pages.map(page => {
+        if (page.page !== pageNumber) return page;
+        const suggestedForRecognition = isPageRecommendedForRecognition(pageType);
+        return {
+          ...page,
+          pageType,
+          suggestedForRecognition,
+          selectedForRecognition: page.selectionModifiedByUser
+            ? page.selectedForRecognition
+            : suggestedForRecognition
+        };
+      })
+    }));
+    setSplitValidationErrors(current => ({ ...current, [planId]: [] }));
+  };
+
+  const togglePdfPageSelection = (planId: string, pageNumber: number) => {
+    setPendingPdfPlans(current => current.map(plan => plan.id !== planId ? plan : {
+      ...plan,
+      pages: plan.pages.map(page => page.page === pageNumber ? {
+        ...page,
+        selectedForRecognition: !page.selectedForRecognition,
+        selectionModifiedByUser: true
+      } : page)
+    }));
+    setSplitValidationErrors(current => ({ ...current, [planId]: [] }));
+  };
+
+  const applySuggestedPageSelection = (planId: string, pageNumbers?: number[]) => {
+    const targetPages = pageNumbers ? new Set(pageNumbers) : null;
+    setPendingPdfPlans(current => current.map(plan => plan.id !== planId ? plan : {
+      ...plan,
+      pages: plan.pages.map(page => !targetPages || targetPages.has(page.page) ? {
+        ...page,
+        selectedForRecognition: page.suggestedForRecognition,
+        selectionModifiedByUser: false
+      } : page)
+    }));
+    setSplitValidationErrors(current => ({ ...current, [planId]: [] }));
+  };
+
   const addPdfGroup = (planId: string) => {
     setPendingPdfPlans(current => current.map(plan => plan.id !== planId ? plan : {
       ...plan,
@@ -416,7 +507,10 @@ export const Step1Upload: React.FC<Step1Props> = ({
   };
 
   const discardPdfPlan = (planId: string) => {
-    setPendingPdfPlans(current => current.filter(plan => plan.id !== planId));
+    setPendingPdfPlans(current => {
+      current.filter(plan => plan.id === planId).forEach(releasePdfSplitPlanPreviews);
+      return current.filter(plan => plan.id !== planId);
+    });
     setSplitValidationErrors(current => {
       const next = { ...current };
       delete next[planId];
@@ -425,7 +519,10 @@ export const Step1Upload: React.FC<Step1Props> = ({
   };
 
   const confirmPdfPlans = async () => {
-    const errors = Object.fromEntries(pendingPdfPlans.map(plan => [plan.id, validateBankGroups(plan.groups, plan.totalPages)]));
+    const errors = Object.fromEntries(pendingPdfPlans.map(plan => [
+      plan.id,
+      validateBankGroups(plan.groups, plan.totalPages, plan.pages)
+    ]));
     setSplitValidationErrors(errors);
     if (Object.values(errors).some(items => items.length)) {
       setErrorMessage('分拣方案仍有未确认、漏页或重复页，请按红色提示修改后再开始识别。');
@@ -437,6 +534,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
     try {
       const splitFiles: File[] = [];
       for (const plan of pendingPdfPlans) splitFiles.push(...await createBankSplitFiles(plan));
+      pendingPdfPlans.forEach(releasePdfSplitPlanPreviews);
       setPendingPdfPlans([]);
       setSplitValidationErrors({});
       setIsProcessing(false);
@@ -626,7 +724,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
               <div>
                 <h2 className="text-sm font-semibold text-slate-900">确认 PDF 分拣方案</h2>
                 <p className="text-xs text-slate-600 mt-1 leading-relaxed">
-                  系统目前只完成了页面分拣，还没有识别流水。请确认每个银行和对应原文件页码；确认后才会生成独立 PDF 并逐个识别。
+                  系统已按原文件顺序划分连续页段，并逐页标注内容类型。请确认银行、连续页码和标成“待确认”的页面；确认后才会分别识别流水。
                 </p>
               </div>
             </div>
@@ -643,7 +741,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
                   <div className="px-4 py-3 bg-slate-50 border-b border-slate-200 flex items-center justify-between gap-3">
                     <div className="min-w-0">
                       <div className="text-sm font-semibold text-slate-900 truncate" title={plan.sourceFile.name}>{plan.sourceFile.name}</div>
-                      <div className="text-[11px] text-slate-500 mt-0.5">共 {plan.totalPages} 页 · 建议拆成 {plan.groups.length} 个银行文件</div>
+                      <div className="text-[11px] text-slate-500 mt-0.5">共 {plan.totalPages} 页 · 建议拆成 {plan.groups.length} 个连续文档段</div>
                     </div>
                     <button
                       type="button"
@@ -657,46 +755,162 @@ export const Step1Upload: React.FC<Step1Props> = ({
                   </div>
 
                   <div className="p-4 space-y-3">
-                    <div className="hidden sm:grid grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)_auto] gap-3 px-1 text-[11px] font-medium text-slate-500">
-                      <span>银行名称</span>
-                      <span>原文件页码</span>
-                      <span className="w-8" />
-                    </div>
-                    {plan.groups.map((group, groupIndex) => (
-                      <div key={group.id} className="grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)_auto] gap-3 items-start rounded-lg sm:rounded-none border sm:border-0 border-slate-200 p-3 sm:p-0">
-                        <label className="space-y-1">
-                          <span className="sm:hidden text-[11px] font-medium text-slate-500">银行名称</span>
-                          <input
-                            value={group.bankName}
-                            onChange={event => updatePdfGroup(plan.id, group.id, { bankName: event.target.value })}
-                            placeholder="例如：中国工商银行"
-                            className={`w-full rounded-lg border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-200 ${/待确认|待核验|未知/.test(group.bankName) || !group.bankName.trim() ? 'border-amber-300 bg-amber-50' : 'border-slate-300 bg-white'}`}
-                          />
-                          {group.bankName === group.suggestedBankName && group.confidence < 0.55 && (
-                            <span className="block text-[10px] text-amber-700">银行名称把握较低，请对照原件确认</span>
-                          )}
-                        </label>
-                        <label className="space-y-1">
-                          <span className="sm:hidden text-[11px] font-medium text-slate-500">原文件页码</span>
-                          <input
-                            value={group.pageSelection}
-                            onChange={event => updatePdfGroup(plan.id, group.id, { pageSelection: event.target.value })}
-                            placeholder="例如：1-12,15"
-                            className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-mono outline-none focus:ring-2 focus:ring-blue-200"
-                          />
-                          <span className="block text-[10px] text-slate-400">连续页用“-”，不连续页用逗号</span>
-                        </label>
-                        <button
-                          type="button"
-                          onClick={() => removePdfGroup(plan.id, group.id)}
-                          disabled={plan.groups.length === 1 || isProcessing}
-                          className="w-8 h-8 inline-flex items-center justify-center rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 disabled:opacity-30"
-                          title={plan.groups.length === 1 ? '至少保留一个分组' : `删除第 ${groupIndex + 1} 个分组`}
-                        >
-                          <X className="w-4 h-4" />
-                        </button>
-                      </div>
-                    ))}
+                    {plan.groups.map((group, groupIndex) => {
+                      let selectedPages = group.pages;
+                      try {
+                        const parsed = parsePageSelection(group.pageSelection, plan.totalPages);
+                        if (parsed.length) selectedPages = parsed;
+                      } catch {
+                        // Keep showing the original proposal while the user is editing an invalid range.
+                      }
+                      const pageDetails = selectedPages.map(pageNumber => plan.pages.find(page => page.page === pageNumber))
+                        .filter((page): page is PdfPageClassification => Boolean(page));
+                      const previewKey = `${plan.id}:${group.id}`;
+                      const activePage = pageDetails.find(page => page.page === activePreviewPages[previewKey])
+                        || pageDetails.find(page => page.pageType === 'UNKNOWN')
+                        || pageDetails.find(page => page.selectedForRecognition)
+                        || pageDetails[0];
+                      const selectedCount = pageDetails.filter(page => page.selectedForRecognition).length;
+                      return (
+                        <div key={group.id} className="rounded-xl border border-slate-200 bg-white overflow-hidden">
+                          <div className="px-3.5 py-2.5 bg-slate-50 border-b border-slate-200 flex items-center justify-between gap-3">
+                            <div>
+                              <span className="text-xs font-semibold text-slate-800">连续页段 {groupIndex + 1}</span>
+                              <span className="ml-2 text-[11px] text-slate-500">原第 {group.pageSelection || '—'} 页</span>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => removePdfGroup(plan.id, group.id)}
+                              disabled={plan.groups.length === 1 || isProcessing}
+                              className="w-8 h-8 inline-flex items-center justify-center rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 disabled:opacity-30"
+                              title={plan.groups.length === 1 ? '至少保留一个连续页段' : `删除连续页段 ${groupIndex + 1}`}
+                            >
+                              <X className="w-4 h-4" />
+                            </button>
+                          </div>
+
+                          <div className="p-3.5 space-y-3">
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                              <label className="space-y-1">
+                                <span className="text-[11px] font-medium text-slate-600">所属银行</span>
+                                <input
+                                  value={group.bankName}
+                                  onChange={event => updatePdfGroup(plan.id, group.id, { bankName: event.target.value })}
+                                  placeholder="例如：中国工商银行"
+                                  className={`w-full rounded-lg border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-200 ${/待确认|待核验|未知/.test(group.bankName) || !group.bankName.trim() ? 'border-amber-300 bg-amber-50' : 'border-slate-300 bg-white'}`}
+                                />
+                                {group.bankName === group.suggestedBankName && group.confidence < 0.55 && (
+                                  <span className="block text-[10px] text-amber-700">银行名称把握较低，请对照原件确认</span>
+                                )}
+                              </label>
+                              <label className="space-y-1">
+                                <span className="text-[11px] font-medium text-slate-600">连续原文件页码</span>
+                                <input
+                                  value={group.pageSelection}
+                                  onChange={event => updatePdfGroup(plan.id, group.id, { pageSelection: event.target.value })}
+                                  placeholder="例如：1-12"
+                                  className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-mono outline-none focus:ring-2 focus:ring-blue-200"
+                                />
+                                <span className="block text-[10px] text-slate-400">每个页段必须连续，例如“1-12”；不能填写“1-3,20-25”</span>
+                              </label>
+                            </div>
+
+                            <div className="space-y-3">
+                              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                                <div>
+                                  <div className="text-[11px] font-medium text-slate-700">逐页预览与识别范围</div>
+                                  <div className="text-[10px] text-slate-400 mt-0.5">已选择 {selectedCount}/{pageDetails.length} 页；未选择的页面仍保留在原文件中，但不进入下一步识别</div>
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => applySuggestedPageSelection(plan.id, pageDetails.map(page => page.page))}
+                                  className="self-start sm:self-auto text-[11px] font-medium text-blue-600 hover:text-blue-700 rounded-lg border border-blue-200 bg-blue-50 px-2.5 py-1.5"
+                                >
+                                  恢复系统建议
+                                </button>
+                              </div>
+
+                              {activePage && (
+                                <div className="rounded-2xl bg-slate-950 p-3 sm:p-4 shadow-inner">
+                                  <div className="relative min-h-[300px] sm:min-h-[430px] flex items-center justify-center overflow-hidden rounded-xl bg-slate-900">
+                                    {activePage.thumbnailUrl ? (
+                                      <img
+                                        src={activePage.thumbnailUrl}
+                                        alt={`原 PDF 第 ${activePage.page} 页预览`}
+                                        className="max-h-[520px] max-w-full object-contain shadow-2xl transition-all duration-200"
+                                      />
+                                    ) : (
+                                      <div className="text-xs text-slate-400">第 {activePage.page} 页预览暂不可用</div>
+                                    )}
+                                    <div className="absolute left-3 top-3 rounded-full bg-black/70 px-2.5 py-1 text-[11px] font-semibold text-white backdrop-blur">
+                                      原第 {activePage.page} 页
+                                    </div>
+                                    <button
+                                      type="button"
+                                      onClick={() => togglePdfPageSelection(plan.id, activePage.page)}
+                                      className={`absolute right-3 top-3 inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[11px] font-semibold shadow-lg backdrop-blur transition ${activePage.selectedForRecognition ? 'bg-blue-600 text-white' : 'bg-white/90 text-slate-700'}`}
+                                    >
+                                      {activePage.selectedForRecognition ? <CheckCircle2 className="w-3.5 h-3.5" /> : <CircleSlash2 className="w-3.5 h-3.5" />}
+                                      {activePage.selectedForRecognition ? '进入识别' : '不进入识别'}
+                                    </button>
+                                  </div>
+
+                                  <div className="mt-3 flex flex-col sm:flex-row sm:items-center gap-2 rounded-xl bg-white/10 px-3 py-2.5">
+                                    <div className="min-w-0 flex-1">
+                                      <div className="text-xs font-semibold text-white">第 {activePage.page} 页 · {pageTypeLabel(activePage.pageType)}</div>
+                                      <div className="text-[10px] text-slate-300 mt-0.5">
+                                        系统建议：{activePage.suggestedForRecognition ? '进入识别' : '不进入识别'}
+                                        {activePage.confidence < 0.55 ? ' · 页面类型把握较低，请人工确认' : ''}
+                                      </div>
+                                    </div>
+                                    <select
+                                      value={activePage.pageType}
+                                      onChange={event => updatePdfPageType(plan.id, activePage.page, event.target.value as PdfPageClassification['pageType'])}
+                                      aria-label={`第 ${activePage.page} 页内容类型`}
+                                      className={`rounded-lg border px-3 py-2 text-xs outline-none ${activePage.pageType === 'UNKNOWN' ? 'border-amber-300 bg-amber-50 text-amber-900' : 'border-white/20 bg-white text-slate-800'}`}
+                                    >
+                                      {PAGE_TYPE_OPTIONS.map(option => (
+                                        <option key={option.value} value={option.value}>{option.label}</option>
+                                      ))}
+                                    </select>
+                                  </div>
+                                </div>
+                              )}
+
+                              <div className="overflow-x-auto pb-2">
+                                <div className="flex min-w-max items-end gap-2 px-1 pt-1">
+                                  {pageDetails.map(page => {
+                                    const isActive = activePage?.page === page.page;
+                                    return (
+                                      <button
+                                        key={page.page}
+                                        type="button"
+                                        onClick={() => setActivePreviewPages(current => ({ ...current, [previewKey]: page.page }))}
+                                        className={`group relative w-[76px] flex-shrink-0 rounded-xl border-2 p-1.5 text-left transition-all duration-200 ${isActive ? 'border-blue-500 bg-blue-50 -translate-y-1 shadow-lg' : 'border-transparent bg-slate-100 hover:border-slate-300'} ${page.selectedForRecognition ? '' : 'opacity-55'}`}
+                                        aria-label={`查看第 ${page.page} 页，${pageTypeLabel(page.pageType)}，${page.selectedForRecognition ? '进入识别' : '不进入识别'}`}
+                                      >
+                                        <div className="aspect-[3/4] overflow-hidden rounded-lg bg-white shadow-sm">
+                                          {page.thumbnailUrl ? (
+                                            <img src={page.thumbnailUrl} alt="" className="h-full w-full object-cover object-top" />
+                                          ) : (
+                                            <div className="h-full w-full flex items-center justify-center text-[9px] text-slate-400">无预览</div>
+                                          )}
+                                        </div>
+                                        <div className="mt-1 truncate text-[9px] font-medium text-slate-700">第 {page.page} 页</div>
+                                        <div className={`truncate text-[8px] ${page.pageType === 'UNKNOWN' ? 'text-amber-700' : 'text-slate-500'}`}>{pageTypeLabel(page.pageType)}</div>
+                                        <span className={`absolute right-0.5 top-0.5 flex h-4 w-4 items-center justify-center rounded-full ring-2 ring-white ${page.selectedForRecognition ? 'bg-blue-600 text-white' : 'bg-slate-400 text-white'}`}>
+                                          {page.selectedForRecognition ? <CheckCircle2 className="w-3 h-3" /> : <X className="w-2.5 h-2.5" />}
+                                        </span>
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
 
                     <button
                       type="button"
@@ -705,7 +919,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
                       className="inline-flex items-center gap-1.5 text-xs font-medium text-blue-600 hover:text-blue-700 disabled:opacity-50"
                     >
                       <PlusCircle className="w-4 h-4" />
-                      添加银行分组
+                      添加连续页段
                     </button>
 
                     {planErrors.length > 0 && (
@@ -720,7 +934,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
 
             <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 pt-1">
               <p className="text-[11px] text-slate-500 leading-relaxed">
-                确认时会检查 1 到末页是否全部覆盖且没有重复；名称相同的银行会自动合并。生成的分文件保留原 PDF 页面内容，不转成图片。
+                确认时会检查 1 到末页是否全部归类、没有重复且每段连续。同一银行在后文再次出现时仍保留为新的连续页段；只有勾选的原生 PDF 页面进入识别，不会把缩略图当作识别原件。
               </p>
               <button
                 type="button"

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { QwenChunkResult, mergeQwenChunkResults } from '../src/parsers/qwenResultMerger';
+import { remapRecognitionSourcePages } from '../src/parsers/qwenPdfParser';
 import { BankAccount, StandardTransaction } from '../src/types/transaction';
 
 const account = (): BankAccount => ({
@@ -42,6 +43,20 @@ test('Qwen chunk merge restores source order, deduplicates locators and reconcil
   assert.equal(merged.account.endBalance, 950);
   assert.equal(merged.account.isBalanced, true);
   assert.equal(merged.account.parseStatus, 'COMPLETE');
+});
+
+test('selected-page PDF results retain the original source page numbers', () => {
+  const merged = mergeQwenChunkResults([
+    chunk(1, 1, [transaction('a', 1, 1, 'OUT', 100, 900)]),
+    chunk(2, 2, [transaction('b', 2, 1, 'IN', 50, 950)])
+  ], '已选页面.pdf', 2);
+  merged.accounts[0].parseWarnings = ['第 2 页字段待核对'];
+  const remapped = remapRecognitionSourcePages(merged, [2, 9], 12);
+
+  assert.deepEqual(remapped.transactions.map(item => item.rawPageNumber), [2, 9]);
+  assert.deepEqual(remapped.accounts[0].coveredPages, [2, 9]);
+  assert.equal(remapped.accounts[0].totalPages, 12);
+  assert.deepEqual(remapped.accounts[0].parseWarnings, ['第 9 页字段待核对']);
 });
 
 test('Qwen chunk merge separates multiple banks in one PDF into account tabs', () => {
