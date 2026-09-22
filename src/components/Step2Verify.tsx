@@ -5,6 +5,8 @@ import {
   ArrowRight,
   Check,
   CheckCircle2,
+  Clipboard,
+  ClipboardCheck,
   ChevronDown,
   ChevronUp,
   CircleHelp,
@@ -33,6 +35,8 @@ import { createFieldEvidenceSnapshot } from "../utils/evidenceProvenance";
 import { applyRowReviewDecision, RowReviewDecision } from "../review/fieldReview";
 import { estimatedSourceRegion } from "../utils/sourceLocator";
 import { isBlockingRecognitionIssue, isDocumentReviewAccount } from "../review/recognitionCompleteness";
+import { formatRecognitionDiagnostics } from "../review/recognitionDiagnostics";
+import { copyText } from "../utils/copyText";
 
 interface Step2Props {
   caseId: string;
@@ -117,6 +121,7 @@ export const Step2Verify: React.FC<Step2Props> = ({
   const [reviewedRowIds, setReviewedRowIds] = useState<string[]>([]);
   const [unresolvedRowIds, setUnresolvedRowIds] = useState<string[]>([]);
   const [activeReviewRowIndex, setActiveReviewRowIndex] = useState(0);
+  const [copyState, setCopyState] = useState<"IDLE" | "COPIED" | "ERROR">("IDLE");
 
   const selectedAccount =
     accounts.find(
@@ -668,18 +673,40 @@ export const Step2Verify: React.FC<Step2Props> = ({
     onNext();
   };
 
+  const copyAllDiagnostics = async () => {
+    try {
+      await copyText(formatRecognitionDiagnostics(accounts, transactions));
+      setCopyState("COPIED");
+    } catch {
+      setCopyState("ERROR");
+    }
+    window.setTimeout(() => setCopyState("IDLE"), 2500);
+  };
+
   return (
     <div className="max-w-[1500px] mx-auto py-8 px-4 sm:px-6 space-y-6">
       <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm p-6">
-        <span className="text-xs font-semibold uppercase tracking-wider text-blue-600 bg-blue-50 px-2.5 py-1 rounded-md">
-          Step 2 / 6 原件核对
-        </span>
-        <h2 className="text-xl font-bold text-slate-900 mt-2">
-          银行流水数据准确性复核
-        </h2>
-        <p className="text-xs text-slate-500 mt-1">
-          逐项对照原始文件，确认页数、交易笔数、日期、方向、金额、余额、对手方及摘要。这里只确认“是否读取正确”，不判断交易原因是否真实。
-        </p>
+        <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
+          <div>
+            <span className="text-xs font-semibold uppercase tracking-wider text-blue-600 bg-blue-50 px-2.5 py-1 rounded-md">
+              Step 2 / 6 原件核对
+            </span>
+            <h2 className="text-xl font-bold text-slate-900 mt-2">
+              银行流水数据准确性复核
+            </h2>
+            <p className="text-xs text-slate-500 mt-1">
+              逐项对照原始文件，确认页数、交易笔数、日期、方向、金额、余额、对手方及摘要。这里只确认“是否读取正确”，不判断交易原因是否真实。
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={copyAllDiagnostics}
+            className="inline-flex items-center justify-center gap-2 rounded-xl border border-slate-300 bg-white px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 flex-shrink-0"
+          >
+            {copyState === "COPIED" ? <ClipboardCheck className="w-4 h-4 text-emerald-600" /> : <Clipboard className="w-4 h-4" />}
+            {copyState === "COPIED" ? "已复制全部异常" : copyState === "ERROR" ? "复制失败，请重试" : "复制全部识别异常"}
+          </button>
+        </div>
         <div className="flex items-center gap-2 mt-5 overflow-x-auto pb-1">
           {accounts.map((account) => {
             const isDocumentReview = isDocumentReviewAccount(account);

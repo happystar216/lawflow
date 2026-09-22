@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { UploadCloud, FileSpreadsheet, FileText, FileImage, CheckCircle2, ArrowRight, ArrowLeft, Trash2, PlusCircle, AlertCircle, ShieldCheck, Sparkles, StopCircle, RotateCcw, CircleSlash2, Scissors } from 'lucide-react';
+import { UploadCloud, FileSpreadsheet, FileText, FileImage, CheckCircle2, ArrowRight, ArrowLeft, Trash2, PlusCircle, AlertCircle, ShieldCheck, Sparkles, StopCircle, RotateCcw, CircleSlash2, Scissors, Clipboard, ClipboardCheck } from 'lucide-react';
 import { BankAccount, StandardTransaction } from '../types/transaction';
 import { parseExcelBankStatement } from '../parsers/excelParser';
 import type { GeminiProgressInfo } from '../parsers/geminiPdfParser';
@@ -26,6 +26,8 @@ import {
 } from '../parsers/pdfBankSplitter';
 import { discoverPdfPageMapWithMinerU } from '../parsers/mineruPdfParser';
 import { PdfTimelineEditor } from './PdfTimelineEditor';
+import { formatRecognitionDiagnostics } from '../review/recognitionDiagnostics';
+import { copyText } from '../utils/copyText';
 
 interface Step1Props {
   caseId: string;
@@ -56,6 +58,30 @@ interface ImportTask {
 
 function importTaskId(file: File): string {
   return `${file.name}:${file.size}:${file.lastModified}`;
+}
+
+function formatImportTasksForCopy(tasks: ImportTask[]): string {
+  const statusLabel: Record<ImportTaskStatus, string> = {
+    QUEUED: '等待处理', PROCESSING: '处理中', SUCCESS: '导入成功', WARNING: '有提示',
+    EMPTY: '未识别到流水', ERROR: '导入失败', CANCELLED: '已取消'
+  };
+  const lines = ['# 本次文件处理结果', '', `- 文件数：${tasks.length}`];
+  tasks.forEach((task, index) => {
+    const safeDetails = String(task.details || '')
+      .replace(/Bearer\s+\S+/gi, '服务凭据')
+      .replace(/([?&]key=)[^&\s]+/gi, '$1[已隐藏]');
+    lines.push('', `## ${index + 1}. ${task.file.name}`);
+    lines.push(`- 状态：${statusLabel[task.status]}`);
+    lines.push(`- 结果：${task.title}`);
+    if (task.transactionCount !== undefined) lines.push(`- 流水：${task.transactionCount} 笔`);
+    if (task.accountCount !== undefined) lines.push(`- 账户：${task.accountCount} 个`);
+    if (task.message) lines.push(`- 说明：${task.message}`);
+    if (task.impact) lines.push(`- 影响：${task.impact}`);
+    if (task.diagnosticCode) lines.push(`- 诊断代码：${task.diagnosticCode}`);
+    if (task.diagnosis) lines.push(`- 具体诊断：${task.diagnosis}`);
+    if (safeDetails) lines.push(`- 错误详情：${safeDetails}`);
+  });
+  return lines.join('\n');
 }
 
 function pdfGroupPages(group: PdfBankSplitPlan['groups'][number], totalPages: number): number[] {
@@ -127,6 +153,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
   const [importTasks, setImportTasks] = useState<ImportTask[]>([]);
   const [pendingPdfPlans, setPendingPdfPlans] = useState<PdfBankSplitPlan[]>([]);
   const [splitValidationErrors, setSplitValidationErrors] = useState<Record<string, string[]>>({});
+  const [copiedReport, setCopiedReport] = useState<'TASKS' | 'ANOMALIES' | ''>('');
 
   const abortControllerRef = useRef<AbortController | null>(null);
   const mineruControllersRef = useRef<Map<string, AbortController>>(new Map());
@@ -145,6 +172,19 @@ export const Step1Upload: React.FC<Step1Props> = ({
 
   const updateImportTask = (id: string, patch: Partial<ImportTask>) => {
     setImportTasks(current => current.map(task => task.id === id ? { ...task, ...patch } : task));
+  };
+
+  const copyReport = async (kind: 'TASKS' | 'ANOMALIES') => {
+    const text = kind === 'TASKS'
+      ? formatImportTasksForCopy(importTasks)
+      : formatRecognitionDiagnostics(accounts, transactions);
+    try {
+      await copyText(text);
+      setCopiedReport(kind);
+      window.setTimeout(() => setCopiedReport(''), 2500);
+    } catch {
+      setErrorMessage('浏览器未允许复制，请检查剪贴板权限后重试。');
+    }
   };
 
   useEffect(() => {
@@ -1033,9 +1073,19 @@ export const Step1Upload: React.FC<Step1Props> = ({
 
       {importTasks.length > 0 && (
         <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm p-5 space-y-3">
-          <div>
-            <h2 className="text-sm font-semibold text-slate-900">本次文件处理结果</h2>
-            <p className="text-[11px] text-slate-500 mt-1">每个文件单独处理；某个文件失败不会影响其他文件或案件中已有数据。</p>
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <h2 className="text-sm font-semibold text-slate-900">本次文件处理结果</h2>
+              <p className="text-[11px] text-slate-500 mt-1">每个文件单独处理；某个文件失败不会影响其他文件或案件中已有数据。</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => copyReport('TASKS')}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-300 bg-white text-slate-700 hover:bg-slate-50 text-[11px] font-medium flex-shrink-0"
+            >
+              {copiedReport === 'TASKS' ? <ClipboardCheck className="w-3.5 h-3.5 text-emerald-600" /> : <Clipboard className="w-3.5 h-3.5" />}
+              {copiedReport === 'TASKS' ? '已复制' : '复制本次结果'}
+            </button>
           </div>
           <div className="space-y-2">
             {importTasks.map(task => {
@@ -1101,16 +1151,26 @@ export const Step1Upload: React.FC<Step1Props> = ({
       {/* Uploaded Accounts List */}
       {accounts.length > 0 && (
         <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm p-6 space-y-4">
-          <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+          <div className="flex items-center justify-between gap-3 border-b border-slate-100 pb-3">
             <div className="flex items-center space-x-2">
               <CheckCircle2 className="w-5 h-5 text-emerald-500" />
               <h2 className="text-base font-semibold text-slate-900">
                 已导入文件 ({importedFileGroups.length}) · 账户 ({visibleAccounts.length})
               </h2>
             </div>
-            <span className="text-xs text-slate-500">
-              共计 {transactions.length} 笔流水记录 · 数据保存在当前浏览器
-            </span>
+            <div className="flex items-center gap-3 flex-shrink-0">
+              <span className="text-xs text-slate-500">
+                共计 {transactions.length} 笔流水记录 · 数据保存在当前浏览器
+              </span>
+              <button
+                type="button"
+                onClick={() => copyReport('ANOMALIES')}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-300 bg-white text-slate-700 hover:bg-slate-50 text-[11px] font-medium"
+              >
+                {copiedReport === 'ANOMALIES' ? <ClipboardCheck className="w-3.5 h-3.5 text-emerald-600" /> : <Clipboard className="w-3.5 h-3.5" />}
+                {copiedReport === 'ANOMALIES' ? '已复制' : '复制全部识别异常'}
+              </button>
+            </div>
           </div>
 
           <div className="space-y-4">
