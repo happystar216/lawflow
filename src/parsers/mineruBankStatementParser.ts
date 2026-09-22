@@ -189,14 +189,77 @@ async function normalizeWholeMinerUDocument(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(request)
   });
-  const payload = await responseJson(response);
-  if (!response.ok) throw apiError(payload, '整份 MinerU 结果整理失败');
+  if (!response.ok) {
+    const payload = await responseJson(response);
+    throw apiError(payload, '整份 MinerU 结果整理失败');
+  }
+  const payload = response.headers.get('content-type')?.includes('text/event-stream')
+    ? await readMinerUNormalizationStream(response, onProgress)
+    : await responseJson(response);
   return parseMinerUWholeModelResult(
     payload as ModelNormalizationResult,
     sourceFileName,
     respondentName,
     totalPages
   );
+}
+
+export async function readMinerUNormalizationStream(
+  response: Response,
+  onProgress?: (info: MinerUDirectProgressInfo) => void
+): Promise<ModelNormalizationResult> {
+  if (!response.body) throw new Error('整份 MinerU 结果整理连接不可读');
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let completed: ModelNormalizationResult | undefined;
+  let streamError = '';
+
+  const consumeFrame = (frame: string) => {
+    const data = frame.split(/\r?\n/)
+      .filter(line => line.startsWith('data:'))
+      .map(line => line.slice(5).trim())
+      .join('');
+    if (!data) return;
+    let event: any;
+    try {
+      event = JSON.parse(data);
+    } catch {
+      throw new Error('整份 MinerU 结果整理进度数据无法读取');
+    }
+    if (event?.type === 'error') {
+      streamError = String(event.error || '整份 MinerU 结果整理失败');
+      return;
+    }
+    if (event?.type === 'complete') {
+      completed = event.result as ModelNormalizationResult;
+      return;
+    }
+    if (event?.type === 'progress') {
+      const characters = Math.max(0, Number(event.generatedCharacters) || 0);
+      onProgress?.({
+        statusText: characters
+          ? `正在整理整份识别结果，已生成 ${characters.toLocaleString()} 个字符…`
+          : '正在整理整份识别结果…',
+        totalTransactions: 0,
+        percent: Math.min(99, 95 + Math.floor(characters / 20_000)),
+        isStreaming: true
+      });
+    }
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+    const frames = buffer.split(/\r?\n\r?\n/);
+    buffer = done ? '' : frames.pop() || '';
+    for (const frame of frames) consumeFrame(frame);
+    if (done) break;
+  }
+  if (buffer.trim()) consumeFrame(buffer);
+  if (streamError) throw new Error(streamError);
+  if (!completed) throw new Error('整份 MinerU 结果整理连接提前结束，未收到完整结果');
+  return completed;
 }
 
 export function parseMinerUWholeModelResult(
@@ -258,7 +321,8 @@ export function parseMinerUWholeModelResult(
       rawSourceFile: sourceFileName,
       rawPageNumber: page,
       rawRowIndex: row,
-      rawText: cleanText(raw?.src ?? raw?.rawText),
+      rawText: cleanText(raw?.src ?? raw?.rawText) || [transactionTime, direction, amount.valid ? Math.abs(amount.value) : '', cleanText(raw?.sm ?? raw?.summary)]
+        .filter(value => value !== '').join(' '),
       extractionMethod: 'MINERU_DIRECT_PDF',
       extractionConfidence: confidence,
       reviewStatus: issues.length || confidence < 0.8 ? 'PENDING' : 'AUTO_PASSED',

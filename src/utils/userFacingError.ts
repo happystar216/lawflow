@@ -81,6 +81,15 @@ export function importErrorForUser(error: unknown, fileName: string): UserFacing
       retryable: true
     };
   }
+  if (/\b524\b/.test(details)) {
+    return {
+      ...base,
+      message: '文件内容已提取，但整份流水的最终整理等待超时，尚未形成可导入结果。',
+      retryable: true,
+      diagnosticCode: diagnosticCode || 'NORMALIZATION_GATEWAY_TIMEOUT',
+      diagnosis: diagnosis || '结构化整理耗时超过网关同步等待时间'
+    };
+  }
   if (/超时|timeout|网络|连接|Failed to fetch|传输中断|数据流/i.test(details)) {
     return {
       ...base,

@@ -22,6 +22,13 @@ test('oversized upload errors provide a concrete recovery action', () => {
   assert.match(result.message, /压缩|拆分/);
 });
 
+test('gateway timeout identifies the final normalization stage instead of blaming the PDF', () => {
+  const result = importErrorForUser(new Error('服务返回异常（524）'), '长流水.pdf');
+  assert.match(result.message, /最终整理等待超时/);
+  assert.equal(result.diagnosticCode, 'NORMALIZATION_GATEWAY_TIMEOUT');
+  assert.doesNotMatch(result.message, /不清晰|方向/);
+});
+
 test('premature stream completion exposes a concrete diagnostic instead of blaming document clarity', () => {
   const error = Object.assign(new Error('识别数据流提前结束，未收到最终完成结果'), {
     diagnosticCode: 'STREAM_ENDED_BEFORE_COMPLETE',

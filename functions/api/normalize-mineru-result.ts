@@ -1,4 +1,4 @@
-import { normalizeMinerUBankStatement } from '../lib/mineruBankStatementNormalizer';
+import { normalizeMinerUBankStatementStream } from '../lib/mineruBankStatementNormalizer';
 import { guardParseRequest, secureResponseHeaders } from '../lib/requestSecurity';
 
 export async function onRequestPost(context: any) {
@@ -8,8 +8,43 @@ export async function onRequestPost(context: any) {
     const contentLength = Number(context.request.headers.get('content-length') || 0);
     if (contentLength > 6_000_000) return json({ error: 'MinerU 完整结果过大' }, 413);
     const input = await context.request.json();
-    const result = await normalizeMinerUBankStatement(input, context.env, context.request.signal);
-    return json(result, 200);
+    const requestId = crypto.randomUUID();
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream({
+      async start(controller) {
+        let closed = false;
+        const send = (payload: unknown) => {
+          if (closed) return;
+          try {
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`));
+          } catch {
+            closed = true;
+          }
+        };
+        send({ type: 'init', requestId });
+        const heartbeat = setInterval(() => send({ type: 'heartbeat', requestId }), 3_000);
+        try {
+          const result = await normalizeMinerUBankStatementStream(input, context.env, progress => {
+            send({ type: 'progress', requestId, ...progress });
+          }, context.request.signal);
+          send({ type: 'complete', requestId, result });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          send({ type: 'error', requestId, error: publicMessage(message) });
+        } finally {
+          clearInterval(heartbeat);
+          if (!closed) controller.close();
+        }
+      }
+    });
+    return new Response(stream, {
+      status: 200,
+      headers: {
+        'Content-Type': 'text/event-stream; charset=utf-8',
+        'X-LawFlow-Request-Id': requestId,
+        ...secureResponseHeaders
+      }
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return json({ error: publicMessage(message) }, /输入|批次|过大/.test(message) ? 400 : 502);

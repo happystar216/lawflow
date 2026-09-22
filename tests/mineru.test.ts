@@ -6,8 +6,10 @@ import {
   buildMinerUWholeDocumentRequest,
   parseMinerUDocumentToBankStatement,
   parseMinerUTableHtml,
-  parseMinerUWholeModelResult
+  parseMinerUWholeModelResult,
+  readMinerUNormalizationStream
 } from '../src/parsers/mineruBankStatementParser';
+import { normalizeMinerUBankStatementStream } from '../functions/lib/mineruBankStatementNormalizer';
 import { buildPdfBankSplitSuggestion, PdfBankSplitPlan } from '../src/parsers/pdfBankSplitter';
 import type { PageMapItem } from '../src/parsers/qwenPdfParser';
 
@@ -147,6 +149,57 @@ test('the complete MinerU document is sent to the model as one request', () => {
   assert.equal(request.pages[2].tables.length, 1);
   assert.equal('transactions' in request, false);
   assert.equal('accounts' in request, false);
+});
+
+test('MinerU normalization streams one Gemini request instead of waiting silently for the whole response', async () => {
+  const originalFetch = globalThis.fetch;
+  let requestedUrl = '';
+  const progress: number[] = [];
+  const chunks = [
+    '{"a":[["62220001","胡艳红","中国农业银行",1,0.98]],',
+    '"t":[[1,1,0,"2024-01-01","IN",1.25,9.8,"","","","结息",0.97]],"c":[[1,"TRANSACTIONS",1,"COMPLETE",""]],"w":[]}'
+  ];
+  globalThis.fetch = async input => {
+    requestedUrl = String(input);
+    const body = chunks.map((chunk, index) => `data: ${JSON.stringify({
+      candidates: [{ content: { parts: [{ text: chunk }] }, ...(index === chunks.length - 1 ? { finishReason: 'STOP' } : {}) }],
+      usageMetadata: { candidatesTokenCount: (index + 1) * 20 }
+    })}\n\n`).join('');
+    return new Response(body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+  };
+  try {
+    const result = await normalizeMinerUBankStatementStream({
+      sourceFileName: '流水.pdf', respondentName: '胡艳红', totalPages: 1,
+      pages: [{ page: 1, text: '账户信息', tables: [] }]
+    }, { GEMINI_API_KEY: 'test', GEMINI_MODEL: 'gemini-test' }, update => progress.push(update.generatedCharacters));
+    assert.match(requestedUrl, /gemini-test:streamGenerateContent\?alt=sse/);
+    assert.equal(result.accounts.length, 1);
+    assert.equal(result.transactions.length, 1);
+    assert.deepEqual(result.transactions[0], {
+      p: 1, r: 1, ac: '62220001', holder: '胡艳红', bk: '中国农业银行',
+      tm: '2024-01-01', dir: 'IN', amt: 1.25, bal: 9.8, cp: '', ca: '', cb: '', sm: '结息', cf: 0.97
+    });
+    assert.deepEqual(progress, [chunks[0].length, chunks.join('').length]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('browser consumes normalization progress and requires a complete stream event', async () => {
+  const statuses: string[] = [];
+  const expected = { accounts: [], transactions: [], pageChecks: [], warnings: [] };
+  const body = [
+    { type: 'init', requestId: 'request-1' },
+    { type: 'progress', requestId: 'request-1', generatedCharacters: 24000 },
+    { type: 'heartbeat', requestId: 'request-1' },
+    { type: 'complete', requestId: 'request-1', result: expected }
+  ].map(event => `data: ${JSON.stringify(event)}\n\n`).join('');
+  const result = await readMinerUNormalizationStream(
+    new Response(body, { headers: { 'Content-Type': 'text/event-stream' } }),
+    update => statuses.push(update.statusText)
+  );
+  assert.deepEqual(result, expected);
+  assert.match(statuses.join(''), /24,000/);
 });
 
 test('one model response becomes the final accounts and transactions without a rule draft', () => {
