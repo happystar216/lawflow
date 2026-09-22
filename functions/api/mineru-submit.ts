@@ -11,14 +11,14 @@ export async function onRequestPost(context: any) {
     const invalid = validateUploadedFile(file);
     if (invalid) return invalid;
     if (!file.name.toLowerCase().endsWith('.pdf') && file.type !== 'application/pdf') {
-      return json({ error: 'MinerU 对照方案仅接收 PDF' }, 415);
+      return json({ error: 'MinerU 直接识别仅接收 PDF' }, 415);
     }
     const batchId = await submitMinerUPdf(file, context.env, context.request.signal);
     return json({ status: 'submitted', batchId }, 202);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (message === 'MINERU_NOT_CONFIGURED') {
-      return json({ error: 'MinerU 对照方案尚未配置', code: 'MINERU_NOT_CONFIGURED' }, 503);
+      return json({ error: 'MinerU 直接识别服务尚未配置', code: 'MINERU_NOT_CONFIGURED' }, 503);
     }
     return json({ error: publicMessage(message) }, 502);
   }

@@ -21,7 +21,7 @@ export async function onRequestGet(context: any) {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (message === 'MINERU_NOT_CONFIGURED') {
-      return json({ error: 'MinerU 对照方案尚未配置', code: 'MINERU_NOT_CONFIGURED' }, 503);
+      return json({ error: 'MinerU 直接识别服务尚未配置', code: 'MINERU_NOT_CONFIGURED' }, 503);
     }
     return json({ error: message.replace(/MINERU_API_TOKEN/g, 'MinerU 服务配置') }, 502);
   }

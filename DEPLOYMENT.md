@@ -5,12 +5,12 @@
 ```text
 律师浏览器
   → Cloudflare Pages 前端
-  → Cloudflare Pages Function /api/parse-bank-statement-stream
-  → 已配置的 Gemini 或阿里云百炼模型服务
-  ↘ 可选 MinerU 精准解析 API（仅用于页面结构/银行区间对照）
+  → MinerU 精准解析 API（PDF 转逐页文字和 HTML 表格）
+  → Cloudflare Pages Function /api/normalize-mineru-result
+  → 已配置的阿里云百炼或 Gemini 模型服务（业务字段整理）
 ```
 
-系统不再依赖阿里云 ECS、Nginx、FastAPI、PaddleOCR 或临时 Cloudflare Tunnel。PDF 经 Cloudflare 服务端函数以 Base64 形式直接提交给 Qwen，API Key 不进入浏览器。
+系统不再依赖阿里云 ECS、Nginx、FastAPI、PaddleOCR 或临时 Cloudflare Tunnel。原 PDF 只提交给 MinerU；大模型接收的是 MinerU 已提取的逐页文字、表格和带固定行号的规则草稿，服务密钥均不进入浏览器。
 
 ## Cloudflare 环境变量
 
@@ -19,9 +19,9 @@
 - `DASHSCOPE_API_KEY`：百炼 API Key，必须配置为 Secret。
 - `DASHSCOPE_BASE_URL`：北京地域业务空间的 OpenAI 兼容地址，例如 `https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1`。
 - `QWEN_MODEL`：可选，默认 `qwen3.8-flash`。
-- `GEMINI_API_KEY`：可选；配置后 PDF 优先走 Gemini 直传解析。
+- `GEMINI_API_KEY`：可选；百炼整理失败或未配置时，可作为 MinerU 结构化结果整理的备用模型服务。
 - `GEMINI_MODEL`：可选，指定实际可用的 Gemini 模型名。
-- `MINERU_API_TOKEN`：可选；在 MinerU API 管理页面创建。配置后，上传页会在后台生成 MinerU 结构化分档方案，与现有视觉方案并列展示；不配置时现有流程不受影响。
+- `MINERU_API_TOKEN`：当前 PDF 主识别路线必需；在 MinerU API 管理页面创建。PDF 会直接提交 MinerU，再由已配置的大模型依据逐页 JSON/HTML 表格整理银行、账户和流水字段。
 - `LAWFLOW_ALLOWED_ORIGIN`：生产站点的唯一允许来源，例如 `https://lawflow.example.com`。
 - `LAWFLOW_REQUIRE_ACCESS`：生产环境建议设为 `true`，并先为 Pages 项目配置 Cloudflare Access 策略。开启后，没有经过 Access 的解析请求会被拒绝。
 
@@ -49,10 +49,10 @@ npm run deploy
 
 ## PDF 解析约束
 
-- 模型：`qwen3.8-flash`。
-- 协议：OpenAI 兼容 Chat Completions；不能改用 Responses API 传 PDF。
-- 输入：Base64 PDF。
+- 模型：默认 `qwen3.8-flash`，可由 `QWEN_MODEL` 调整。
+- 协议：OpenAI 兼容 Chat Completions；模型输入为 MinerU 结构化文字和 HTML 表格，不再直接传 PDF。
+- 输入：MinerU 逐页 JSON/HTML 表格及程序生成的逐行草稿。
 - 应用限制：单文件不超过 75 MB；前端和服务端都会校验。
-- MinerU 对照：原 PDF 通过官方精准解析接口异步上传；接口单任务最多 200 页，应用会对更长文件自动按连续 200 页切段并恢复原页码。MinerU 结果只用于页面类型与银行切换位置，用户确认后仍进入同一套流水识别流程。
-- 完整性：Qwen 路径执行独立计数和逐页校验；Gemini 路径检查页面覆盖，但因没有独立二次清点，结果统一进入律师人工复核。
-- 数据：解析结果和原始 PDF 保存在浏览器 IndexedDB，未实施应用层静态加密；PDF 还会按照所选模型服务的数据处理规则发送至 Gemini 或百炼。
+- MinerU 直读：原 PDF 通过官方精准解析接口异步上传；应用保守地按单任务 200 页处理更长文件，自动连续切段并恢复原页码。当前试验路线不再先做页面分类或银行分档，而是把 MinerU 的表格结果分批交给大模型整理；程序用固定行号、页码和规则草稿防止大模型漏行，并在整理失败时明确报错。
+- 完整性：每个交易草稿都有不可变 sourceKey；模型必须逐项返回。漏返、重复或新增的结果不会覆盖原始行，并会转成人工核对提示。
+- 数据：解析结果和原始 PDF 保存在浏览器 IndexedDB，未实施应用层静态加密；原 PDF 按 MinerU 的数据处理规则发送，提取后的结构化文字和表格按所选模型服务的数据处理规则发送。

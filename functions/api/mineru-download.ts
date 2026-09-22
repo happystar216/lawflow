@@ -22,7 +22,7 @@ export async function onRequestGet(context: any) {
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    return json({ error: message === 'MINERU_NOT_CONFIGURED' ? 'MinerU 对照方案尚未配置' : message }, 502);
+    return json({ error: message === 'MINERU_NOT_CONFIGURED' ? 'MinerU 直接识别服务尚未配置' : message }, 502);
   }
 }
 

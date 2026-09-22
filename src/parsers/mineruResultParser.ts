@@ -5,7 +5,24 @@ export interface MinerUPageText {
   text: string;
 }
 
+export interface MinerUStructuredBlock {
+  page: number;
+  type: string;
+  text: string;
+  tableHtml?: string;
+  bbox?: [number, number, number, number];
+}
+
+export interface MinerUStructuredDocument {
+  pages: MinerUPageText[];
+  blocks: MinerUStructuredBlock[];
+}
+
 export async function parseMinerUZip(buffer: ArrayBuffer): Promise<MinerUPageText[]> {
+  return (await parseMinerUStructuredZip(buffer)).pages;
+}
+
+export async function parseMinerUStructuredZip(buffer: ArrayBuffer): Promise<MinerUStructuredDocument> {
   const zip = await JSZip.loadAsync(buffer);
   const entries = Object.values(zip.files).filter(entry => !entry.dir);
   const preferred = entries.find(entry => /(?:^|\/)structured_content\.json$/i.test(entry.name))
@@ -21,7 +38,7 @@ export async function parseMinerUZip(buffer: ArrayBuffer): Promise<MinerUPageTex
   }
   const pages = normalizeMinerUPages(parsed);
   if (!pages.length) throw new Error('MinerU 结果中没有可用的逐页文字');
-  return pages;
+  return { pages, blocks: normalizeMinerUBlocks(parsed) };
 }
 
 export function normalizeMinerUPages(value: unknown): MinerUPageText[] {
@@ -46,6 +63,48 @@ export function normalizeMinerUPages(value: unknown): MinerUPageText[] {
       page: pageIndex + 1,
       text: uniqueFragments(fragments).join('\n').replace(/\n{3,}/g, '\n\n').trim().slice(0, 12_000)
     }));
+}
+
+export function normalizeMinerUBlocks(value: unknown): MinerUStructuredBlock[] {
+  const root = value as any;
+  const blocks: MinerUStructuredBlock[] = [];
+  const directPages = Array.isArray(root?.pages) ? root.pages : Array.isArray(root?.pdf_info) ? root.pdf_info : null;
+  if (directPages) {
+    for (const [index, page] of directPages.entries()) {
+      const pageIndex = integer(page?.page_idx) ?? integer(page?.page_index) ?? index;
+      const pageBlocks = Array.isArray(page?.blocks)
+        ? page.blocks
+        : Array.isArray(page?.para_blocks) ? page.para_blocks : [page];
+      for (const block of pageBlocks) appendStructuredBlock(blocks, block, pageIndex);
+    }
+  } else if (Array.isArray(root)) {
+    for (const item of root) {
+      const pageIndex = integer(item?.page_idx) ?? integer(item?.page_index);
+      if (pageIndex != null) appendStructuredBlock(blocks, item, pageIndex);
+    }
+  }
+  return blocks.sort((left, right) => left.page - right.page);
+}
+
+function appendStructuredBlock(target: MinerUStructuredBlock[], value: any, pageIndex: number): void {
+  if (pageIndex < 0 || value == null || typeof value !== 'object') return;
+  const tableHtml = typeof value.table_body === 'string' ? value.table_body.trim() : '';
+  const text = uniqueFragments(collectText(value)).join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  if (!text && !tableHtml) return;
+  const bbox = normalizeBbox(value.bbox);
+  target.push({
+    page: pageIndex + 1,
+    type: String(value.type || (tableHtml ? 'table' : 'text')),
+    text,
+    ...(tableHtml ? { tableHtml } : {}),
+    ...(bbox ? { bbox } : {})
+  });
+}
+
+function normalizeBbox(value: unknown): [number, number, number, number] | undefined {
+  if (!Array.isArray(value) || value.length < 4) return undefined;
+  const bbox = value.slice(0, 4).map(Number);
+  return bbox.every(Number.isFinite) ? bbox as [number, number, number, number] : undefined;
 }
 
 function collectText(value: unknown, depth = 0): string[] {

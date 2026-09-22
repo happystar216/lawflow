@@ -1,13 +1,16 @@
 import type { PageMapItem } from './qwenPdfParser';
-import { parseMinerUZip } from './mineruResultParser';
+import {
+  MinerUStructuredDocument,
+  parseMinerUStructuredZip
+} from './mineruResultParser';
 
 interface MinerUPageText {
   page: number;
   text: string;
 }
 
-interface MinerUProgress {
-  stage: 'SUBMITTING' | 'EXTRACTING' | 'CLASSIFYING';
+export interface MinerUProgress {
+  stage: 'SUBMITTING' | 'EXTRACTING' | 'CLASSIFYING' | 'NORMALIZING';
   message: string;
   completed: number;
   total: number;
@@ -24,19 +27,8 @@ export async function discoverPdfPageMapWithMinerU(
   onProgress?: (progress: MinerUProgress) => void,
   signal?: AbortSignal
 ): Promise<Map<number, PageMapItem>> {
-  const chunks = await createMinerUChunks(file, totalPages);
-  const pages: MinerUPageText[] = [];
-  for (const [chunkIndex, chunk] of chunks.entries()) {
-    assertNotAborted(signal);
-    const chunkLabel = chunks.length > 1 ? `（第 ${chunkIndex + 1}/${chunks.length} 段）` : '';
-    onProgress?.({
-      stage: 'SUBMITTING', message: `正在提交 MinerU 结构化解析${chunkLabel}…`, completed: chunk.startPage - 1, total: totalPages
-    });
-    const chunkPages = await submitAndWait(chunk.file, chunkLabel, onProgress, signal);
-    pages.push(...chunkPages.map(item => ({ page: item.page + chunk.startPage - 1, text: item.text })));
-  }
-
-  pages.sort((left, right) => left.page - right.page);
+  const document = await extractPdfStructureWithMinerU(file, totalPages, onProgress, signal);
+  const pages = document.pages;
   const pageMap = new Map<number, PageMapItem>();
   for (let offset = 0; offset < pages.length; offset += CLASSIFY_BATCH_SIZE) {
     assertNotAborted(signal);
@@ -66,12 +58,46 @@ export async function discoverPdfPageMapWithMinerU(
   return pageMap;
 }
 
+/**
+ * Sends the original PDF to MinerU and returns its native page/table structure.
+ * Files above the conservative API page limit are split only into consecutive
+ * transport chunks; no bank/page classification is performed here.
+ */
+export async function extractPdfStructureWithMinerU(
+  file: File,
+  totalPages: number,
+  onProgress?: (progress: MinerUProgress) => void,
+  signal?: AbortSignal
+): Promise<MinerUStructuredDocument> {
+  const chunks = await createMinerUChunks(file, totalPages);
+  const pages: MinerUPageText[] = [];
+  const blocks: MinerUStructuredDocument['blocks'] = [];
+  for (const [chunkIndex, chunk] of chunks.entries()) {
+    assertNotAborted(signal);
+    const chunkLabel = chunks.length > 1 ? `（第 ${chunkIndex + 1}/${chunks.length} 段）` : '';
+    onProgress?.({
+      stage: 'SUBMITTING', message: `正在提交 MinerU 结构化解析${chunkLabel}…`, completed: chunk.startPage - 1, total: totalPages
+    });
+    const offset = chunk.startPage - 1;
+    const document = await submitAndWait(chunk.file, chunkLabel, progress => onProgress?.({
+      ...progress,
+      completed: Math.min(totalPages, offset + progress.completed),
+      total: totalPages
+    }), signal);
+    pages.push(...document.pages.map(item => ({ page: item.page + offset, text: item.text })));
+    blocks.push(...document.blocks.map(item => ({ ...item, page: item.page + offset })));
+  }
+  pages.sort((left, right) => left.page - right.page);
+  blocks.sort((left, right) => left.page - right.page);
+  return { pages, blocks };
+}
+
 async function submitAndWait(
   file: File,
   chunkLabel: string,
   onProgress?: (progress: MinerUProgress) => void,
   signal?: AbortSignal
-): Promise<MinerUPageText[]> {
+): Promise<MinerUStructuredDocument> {
   const formData = new FormData();
   formData.append('file', file);
   const submit = await fetch('/api/mineru-submit', { method: 'POST', body: formData, signal });
@@ -88,7 +114,7 @@ async function waitForPages(
   chunkLabel: string,
   onProgress?: (progress: MinerUProgress) => void,
   signal?: AbortSignal
-): Promise<MinerUPageText[]> {
+): Promise<MinerUStructuredDocument> {
   const startedAt = Date.now();
   while (Date.now() - startedAt < MAX_WAIT_MS) {
     assertNotAborted(signal);
@@ -101,9 +127,9 @@ async function waitForPages(
       if (!downloadUrl.startsWith('/api/mineru-download?')) throw new Error('MinerU 没有返回有效的结果下载地址');
       const archive = await fetch(downloadUrl, { signal });
       if (!archive.ok) throw new Error(`MinerU 结果下载失败（${archive.status}）`);
-      const pages = await parseMinerUZip(await archive.arrayBuffer());
-      if (!pages.length) throw new Error('MinerU 没有返回可用的逐页内容');
-      return pages;
+      const document = await parseMinerUStructuredZip(await archive.arrayBuffer());
+      if (!document.pages.length) throw new Error('MinerU 没有返回可用的逐页内容');
+      return document;
     }
     const completed = Number(payload?.extractedPages || 0);
     const total = Number(payload?.totalPages || 0);
@@ -117,7 +143,7 @@ async function waitForPages(
     });
     await delay(POLL_INTERVAL_MS, signal);
   }
-  throw new Error('MinerU 解析超过 20 分钟，现有方案仍可继续使用');
+  throw new Error('MinerU 解析超过 20 分钟，请稍后重新识别');
 }
 
 async function createMinerUChunks(

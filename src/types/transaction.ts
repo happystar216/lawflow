@@ -111,7 +111,7 @@ export interface StandardTransaction {
   /** Location of the printed source row on the original page. */
   sourceRegion?: SourceRegion;
   balanceAvailable?: boolean;
-  extractionMethod?: 'DOCUMENT_PDF' | 'DOCUMENT_IMAGE' | 'GEMINI_DIRECT_PDF' | 'MANUAL';
+  extractionMethod?: 'DOCUMENT_PDF' | 'DOCUMENT_IMAGE' | 'GEMINI_DIRECT_PDF' | 'MINERU_DIRECT_PDF' | 'MANUAL';
   extractionConfidence?: number;
   extractionChunkId?: string;
   reviewStatus?: 'AUTO_PASSED' | 'PENDING' | 'VERIFIED' | 'CORRECTED';

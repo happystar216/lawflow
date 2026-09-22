@@ -2,7 +2,8 @@ import React, { useEffect, useState, useRef } from 'react';
 import { UploadCloud, FileSpreadsheet, FileText, FileImage, CheckCircle2, ArrowRight, ArrowLeft, Trash2, PlusCircle, AlertCircle, ShieldCheck, Sparkles, StopCircle, RotateCcw, CircleSlash2, Scissors } from 'lucide-react';
 import { BankAccount, StandardTransaction } from '../types/transaction';
 import { parseExcelBankStatement } from '../parsers/excelParser';
-import { parsePdfWithGemini, GeminiProgressInfo } from '../parsers/geminiPdfParser';
+import type { GeminiProgressInfo } from '../parsers/geminiPdfParser';
+import { parsePdfWithMinerU } from '../parsers/mineruBankStatementParser';
 import { deleteSourceDocument, saveSourceDocument } from '../store/sourceDocumentStore';
 import { accountIdentityKey, transactionBelongsToAccount } from '../utils/accountIdentity';
 import { importErrorForUser } from '../utils/userFacingError';
@@ -291,11 +292,13 @@ export const Step1Upload: React.FC<Step1Props> = ({
           importedTransactionCount = canonical.transactions.length;
           importedAccountCount = businessAccounts(canonical.accounts).length;
         } else if (name.endsWith('.pdf')) {
-          const splitMetadata = getRecognitionSplitMetadata(file);
           const controller = new AbortController();
           abortControllerRef.current = controller;
           setIsCancellable(true);
-          const { accounts: parsedAccounts, transactions: parsedTx } = await parsePdfWithGemini(
+          // Trial mode: the previous visual classification/splitting pipeline is
+          // intentionally bypassed. The complete PDF is sent to MinerU and its
+          // native table result is converted directly into accounts and rows.
+          const { accounts: parsedAccounts, transactions: parsedTx } = await parsePdfWithMinerU(
             file,
             (info: GeminiProgressInfo) => {
               setProgressInfo(info);
@@ -303,10 +306,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
             },
             controller.signal,
             {
-              respondentName: caseRespondentName,
-              sourceContentHash: source.contentHash,
-              sourcePageNumbers: splitMetadata?.sourcePageNumbers,
-              sourceTotalPages: splitMetadata?.sourceTotalPages
+              respondentName: caseRespondentName
             }
           );
           let sourceStored = true;
@@ -363,7 +363,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
         } : {
           status: 'SUCCESS',
           title: `“${file.name}”已导入`,
-          message: `共读取 ${importedTransactionCount} 笔流水，识别出 ${importedAccountCount} 个账户。`,
+          message: `${name.endsWith('.pdf') ? 'MinerU 提取及大模型整理完成，' : ''}共读取 ${importedTransactionCount} 笔流水，识别出 ${importedAccountCount} 个账户。`,
           transactionCount: importedTransactionCount,
           accountCount: importedAccountCount
         });
@@ -533,11 +533,10 @@ export const Step1Upload: React.FC<Step1Props> = ({
       setErrorMessage('当前文件仍在处理中，请等待完成或停止后再添加文件。');
       return;
     }
-    const selected = Array.from(files);
-    const pdfFiles = selected.filter(file => file.name.toLowerCase().endsWith('.pdf'));
-    const electronicFiles = selected.filter(file => !file.name.toLowerCase().endsWith('.pdf'));
-    if (electronicFiles.length) await processFiles(electronicFiles);
-    if (pdfFiles.length) await preparePdfPlans(pdfFiles);
+    // MinerU direct trial: PDFs no longer stop at the page-classification
+    // timeline. The legacy preparation functions below remain available for a
+    // quick rollback, but are not part of the active upload path.
+    await processFiles(Array.from(files));
   };
 
   const updatePdfGroup = (planId: string, groupId: string, patch: { bankName?: string; pageSelection?: string }) => {
@@ -754,12 +753,12 @@ export const Step1Upload: React.FC<Step1Props> = ({
           <div className="flex items-center space-x-2">
             <span className="inline-flex items-center space-x-1.5 px-3 py-1 rounded-full bg-blue-50 text-blue-700 border border-blue-200 text-xs font-medium">
               <Sparkles className="w-3.5 h-3.5 text-blue-600" />
-              <span>智能识别与结构化提取</span>
+              <span>MinerU 直接结构化提取</span>
             </span>
 
             <span className="inline-flex items-center space-x-1 px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 text-[11px] font-medium">
               <ShieldCheck className="w-3 h-3 text-emerald-600" />
-              <span>长卷宗结构化提取与人工复核</span>
+              <span>原 PDF 直传 · 无需预分档</span>
             </span>
           </div>
         </div>
@@ -768,7 +767,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
           上传银行流水证据文件
         </h1>
         <p className="text-sm text-slate-500 mt-1">
-          Excel/CSV 会直接读取；PDF 会先按银行和页码生成分拣方案，经你确认后再分别识别。完成后请对照原件复核。
+          Excel/CSV 会直接读取；PDF 当前直接交给 MinerU 提取账户与流水，不再预先分类或切分银行。完成后请对照原件复核。
         </p>
       </div>
 
@@ -856,7 +855,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
                   <div className="flex justify-between items-center text-[11px] text-slate-600 font-medium pt-0.5">
                     <div className="flex items-center space-x-1.5">
                       <span className="inline-block w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-                      <span><strong>{pendingPdfPlans.length ? '正在处理文件' : '正在扫描或识别文件'}</strong></span>
+                      <span><strong>MinerU 正在解析原始文件</strong></span>
                       {progressInfo.currentBank && (
                         <span className="ml-1 px-1.5 py-0.5 rounded bg-blue-100 text-blue-800 text-[10px] font-semibold">
                           {progressInfo.currentBank}
@@ -1119,6 +1118,8 @@ export const Step1Upload: React.FC<Step1Props> = ({
               const firstAccount = fileAccounts[0];
               const fileName = firstAccount.fileName;
               const fileTransactionCount = sourceTransactionCounts.get(sourceKey) || 0;
+              const fileTransactions = transactions.filter(transaction => sourceIdentity(transaction) === sourceKey);
+              const isMinerUDirect = fileTransactions.some(transaction => transaction.extractionMethod === 'MINERU_DIRECT_PDF');
               const fileBusinessAccounts = fileAccounts.filter(account => !isDocumentReviewAccount(account));
               const reviewPages = incompleteRecognitionPages(fileAccounts);
               return (
@@ -1134,7 +1135,10 @@ export const Step1Upload: React.FC<Step1Props> = ({
                       )}
                       <div className="min-w-0">
                         <p className="text-sm font-semibold text-slate-800 truncate" title={fileName}>{fileName}</p>
-                        <p className="text-[11px] text-slate-500">识别出 {fileBusinessAccounts.length} 个账户 · {fileTransactionCount} 笔流水</p>
+                        <p className="text-[11px] text-slate-500">
+                          识别出 {fileBusinessAccounts.length} 个账户 · {fileTransactionCount} 笔流水
+                          {isMinerUDirect ? ' · MinerU 提取 + 大模型整理' : ''}
+                        </p>
                       </div>
                     </div>
                     <button
