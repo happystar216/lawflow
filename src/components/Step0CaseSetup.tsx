@@ -14,6 +14,7 @@ export const Step0CaseSetup: React.FC<Step0Props> = ({
   onNext
 }) => {
   const canProceed = Boolean(caseMeta.respondentName?.trim());
+  const [timelineErrors, setTimelineErrors] = React.useState<string[]>([]);
 
   const handleChange = (field: keyof CaseMetadata, value: any) => {
     onChange({
@@ -30,6 +31,25 @@ export const Step0CaseSetup: React.FC<Step0Props> = ({
         [field]: value
       }
     });
+  };
+
+  const handleNext = () => {
+    const execution = caseMeta.timeline.executionFilingDate;
+    const reportOrder = caseMeta.timeline.reportOrderServedDate;
+    const freeze = caseMeta.timeline.freezeDate;
+    const errors: string[] = [];
+    if (execution && reportOrder && reportOrder < execution) {
+      errors.push(`时间节点错误：《报告财产令》送达日（${reportOrder}）必须在执行立案日期（${execution}）之后`);
+    }
+    if (execution && freeze && freeze < execution) {
+      errors.push(`时间节点错误：账户冻结 / 终本裁定日（${freeze}）早于执行立案日期（${execution}）。如果这是诉讼保全日期，请清空此项`);
+    }
+    if (errors.length) {
+      setTimelineErrors(errors);
+      return;
+    }
+    setTimelineErrors([]);
+    onNext();
   };
 
   return (
@@ -163,7 +183,7 @@ export const Step0CaseSetup: React.FC<Step0Props> = ({
                 type="date"
                 value={caseMeta.timeline.executionFilingDate || ''}
                 onChange={e => handleTimelineChange('executionFilingDate', e.target.value)}
-                className="w-full px-3.5 py-2.5 text-xs rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500"
+                className={`w-full px-3.5 py-2.5 text-xs rounded-lg border ${timelineErrors.length ? 'border-rose-500 bg-rose-50 ring-2 ring-rose-200' : 'border-slate-300'} focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500`}
               />
               <p className="text-[10px] text-slate-400 mt-1">用于优先筛查立案后的对外支出</p>
             </div>
@@ -176,7 +196,7 @@ export const Step0CaseSetup: React.FC<Step0Props> = ({
                 type="date"
                 value={caseMeta.timeline.reportOrderServedDate || ''}
                 onChange={e => handleTimelineChange('reportOrderServedDate', e.target.value)}
-                className="w-full px-3.5 py-2.5 text-xs rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500"
+                className={`w-full px-3.5 py-2.5 text-xs rounded-lg border ${timelineErrors.some(error => error.includes('报告财产令')) ? 'border-rose-500 bg-rose-50 ring-2 ring-rose-200' : 'border-slate-300'} focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500`}
               />
               <p className="text-[10px] text-rose-500 mt-1">送达后转出直接构成拒执线索</p>
             </div>
@@ -189,7 +209,7 @@ export const Step0CaseSetup: React.FC<Step0Props> = ({
                 type="date"
                 value={caseMeta.timeline.freezeDate || ''}
                 onChange={e => handleTimelineChange('freezeDate', e.target.value)}
-                className="w-full px-3.5 py-2.5 text-xs rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500"
+                className={`w-full px-3.5 py-2.5 text-xs rounded-lg border ${timelineErrors.some(error => error.includes('账户冻结')) ? 'border-rose-500 bg-rose-50 ring-2 ring-rose-200' : 'border-slate-300'} focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500`}
               />
               <p className="text-[10px] text-slate-400 mt-1">用于锁定突发大额转出节点</p>
             </div>
@@ -199,7 +219,7 @@ export const Step0CaseSetup: React.FC<Step0Props> = ({
         {/* Submit Actions */}
         <div className="flex justify-end pt-4 border-t border-slate-100">
           <button
-            onClick={onNext}
+            onClick={handleNext}
             disabled={!canProceed}
             className={`flex items-center space-x-2 px-6 py-2.5 rounded-xl font-medium text-sm transition ${
               canProceed
@@ -212,6 +232,16 @@ export const Step0CaseSetup: React.FC<Step0Props> = ({
           </button>
         </div>
       </div>
+      {timelineErrors.length > 0 && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4" role="dialog" aria-modal="true">
+          <div className="w-full max-w-lg rounded-2xl bg-white shadow-2xl border border-rose-200 p-6">
+            <h3 className="text-base font-bold text-rose-700">时间节点错误</h3>
+            <p className="mt-2 text-xs text-slate-600">请修改下列日期后再进入下一分页：</p>
+            <ul className="mt-3 space-y-2 text-sm text-rose-700 list-disc pl-5">{timelineErrors.map(error => <li key={error}>{error}</li>)}</ul>
+            <button type="button" onClick={() => setTimelineErrors([])} className="mt-5 w-full rounded-xl bg-rose-600 py-2.5 text-sm font-semibold text-white">返回修改</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
