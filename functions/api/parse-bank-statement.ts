@@ -1,4 +1,4 @@
-import { parseBankStatementWithQwen } from '../lib/qwenBankStatement';
+import { parsePdfWithGeminiStream } from '../lib/geminiBankStatement';
 import { guardParseRequest, secureResponseHeaders, validateUploadedFile } from '../lib/requestSecurity';
 
 export async function onRequestPost(context: any) {
@@ -10,25 +10,35 @@ export async function onRequestPost(context: any) {
     if (!(file instanceof File)) return json({ error: '缺少页面文件' }, 400);
     const invalidFile = validateUploadedFile(file);
     if (invalidFile) return invalidFile;
+    const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+    if (!isPdf) return json({ error: '当前解析服务仅支持 PDF 文件' }, 400);
+    if (!context.env?.GEMINI_API_KEY) return json({ error: '页面解析服务尚未完成配置' }, 503);
     const pageStart = positive(formData.get('pageStart'), 1);
     const pageEnd = positive(formData.get('pageEnd'), pageStart);
-    const contextBefore = formData.get('contextBefore');
-    const contextAfter = formData.get('contextAfter');
-    const result = await parseBankStatementWithQwen(file, context.env, undefined, {
+    const totalPages = positive(formData.get('totalPages'), pageEnd);
+    const result = await parsePdfWithGeminiStream(file, context.env, undefined, context.request.signal, {
+      respondentName: String(formData.get('respondentName') || '').trim(),
       sourceFileName: String(formData.get('sourceFileName') || file.name),
       pageStart,
       pageEnd,
-      totalPages: positive(formData.get('totalPages'), pageEnd),
-      chunkId: String(formData.get('chunkId') || `P${pageStart}-${pageEnd}`),
-      contextBefore: contextBefore instanceof File ? contextBefore : undefined,
-      contextAfter: contextAfter instanceof File ? contextAfter : undefined,
+      totalPages,
       auditHint: String(formData.get('auditHint') || ''),
       isPageSlice: String(formData.get('isPageSlice') || '') === 'true',
-      verificationMode: verificationMode(formData.get('verificationMode')),
-      signal: context.request.signal
+      verificationMode: verificationMode(formData.get('verificationMode'))
     });
-    const { model: _internalModel, ...publicResult } = result;
-    return json({ status: 'success', ...publicResult }, 200);
+    return json({
+      status: 'success',
+      account: result.account,
+      accounts: result.accounts,
+      transactions: result.transactions,
+      totalTransactions: result.transactions.length,
+      coveredPages: result.pagesCovered,
+      totalPages,
+      pageCount: totalPages,
+      countComplete: result.countComplete,
+      warnings: result.warnings,
+      pageQuality: result.pageQuality
+    }, 200);
   } catch (error: any) {
     return json({ error: publicErrorMessage(error) }, 502);
   }
@@ -41,8 +51,8 @@ function verificationMode(value: FormDataEntryValue | null): 'always' | 'auto' |
 function publicErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error || '');
   return message
-    .replace(/Qwen/gi, '智能解析服务')
-    .replace(/DASHSCOPE_[A-Z_]+/g, '服务配置')
+    .replace(/Gemini/gi, '智能解析服务')
+    .replace(/GEMINI_[A-Z_]+/g, '服务配置')
     .replace(/北京地域\s*/g, '');
 }
 

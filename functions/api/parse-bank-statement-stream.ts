@@ -1,4 +1,3 @@
-import { parseBankStatementWithQwen } from '../lib/qwenBankStatement';
 import { parsePdfWithGeminiStream, RecognitionDiagnosticError } from '../lib/geminiBankStatement';
 import { guardParseRequest, secureResponseHeaders, validateUploadedFile } from '../lib/requestSecurity';
 
@@ -34,8 +33,10 @@ export async function onRequestPost(context: any) {
       try {
         const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
         
-        // 优先使用 Gemini 3.8 Flash 直传引擎（速度快、支持长文档、成本极低）
-        if (context.env?.GEMINI_API_KEY && isPdf) {
+        if (!context.env?.GEMINI_API_KEY) throw new Error('页面解析服务尚未完成配置');
+        if (!isPdf) throw new Error('当前解析服务仅支持 PDF 文件');
+
+        {
           send({
             type: 'init',
             totalPages: options.totalPages,
@@ -97,43 +98,6 @@ export async function onRequestPost(context: any) {
             warnings: result.warnings,
             pageQuality: result.pageQuality
           });
-        } else {
-          // 回退使用 Qwen 单页/分片解析引擎
-          send({
-            type: 'init',
-            totalPages: options.totalPages,
-            pageStart: options.pageStart,
-            pageEnd: options.pageEnd,
-            parserVersion: 'page-image-v1'
-          });
-
-          const result = await parseBankStatementWithQwen(
-            file,
-            context.env,
-            statusText => {
-              send({
-                type: 'progress',
-                currentPage: options.pageStart - 1,
-                totalPages: options.totalPages,
-                percent: 0,
-                totalTransactions: 0,
-                statusText
-              });
-            },
-            { ...options, signal: context.request.signal }
-          );
-
-          send({
-            type: 'progress',
-            currentPage: result.pageCount,
-            totalPages: result.pageCount,
-            percent: 100,
-            totalTransactions: result.transactions.length,
-            statusText: `已完成 ${result.pageCount} 页核查，共提取 ${result.transactions.length} 笔交易`
-          });
-
-          const { model: _internalModel, ...publicResult } = result;
-          send({ type: 'complete', ...publicResult });
         }
       } catch (error: any) {
         send({
@@ -162,9 +126,7 @@ export async function onRequestPost(context: any) {
 function publicErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error || '页面解析失败');
   return message
-    .replace(/Qwen/gi, '智能解析服务')
     .replace(/Gemini/gi, '智能解析服务')
-    .replace(/DASHSCOPE_[A-Z_]+/g, '服务配置')
     .replace(/GEMINI_[A-Z_]+/g, '服务配置')
     .replace(/北京地域\s*/g, '');
 }

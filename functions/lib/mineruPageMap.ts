@@ -1,9 +1,6 @@
 import type { PageMapItem } from './qwenPageMap';
 
 interface ClassifierEnvironment {
-  DASHSCOPE_API_KEY?: string;
-  DASHSCOPE_BASE_URL?: string;
-  QWEN_MODEL?: string;
   GEMINI_API_KEY?: string;
   GEMINI_MODEL?: string;
 }
@@ -18,7 +15,7 @@ export async function classifyMinerUPageTexts(
   env: ClassifierEnvironment,
   signal?: AbortSignal
 ): Promise<PageMapItem[]> {
-  if (!env.GEMINI_API_KEY && (!env.DASHSCOPE_API_KEY || !env.DASHSCOPE_BASE_URL)) {
+  if (!env.GEMINI_API_KEY) {
     throw new Error('页面分类服务尚未完成配置');
   }
   const pages = inputs
@@ -43,19 +40,7 @@ ${pages.map(item => `\n===== 原 PDF 第 ${item.page} 页 =====\n${item.text || 
 严格输出 JSON：
 {"pages":[{"page":1,"pageType":"TRANSACTIONS","rotation":0,"bankName":"中国工商银行","accountName":"","accountNumbers":[],"density":"HIGH","confidence":0.95,"documentBoundary":"CONTINUE","documentLabel":"中国工商银行","investigationOrderNo":""}]}`;
 
-  let parsed: any;
-  let firstError: unknown;
-  if (env.GEMINI_API_KEY) {
-    try {
-      parsed = await withGemini(prompt, env, signal);
-    } catch (error) {
-      firstError = error;
-    }
-  }
-  if (!parsed && env.DASHSCOPE_API_KEY && env.DASHSCOPE_BASE_URL) {
-    parsed = await withQwen(prompt, env, signal);
-  }
-  if (!parsed) throw firstError instanceof Error ? firstError : new Error('页面分类服务未返回结果');
+  const parsed = await withGemini(prompt, env, signal);
   const byPage = new Map<number, PageMapItem>();
   for (const item of Array.isArray(parsed?.pages) ? parsed.pages : []) {
     const page = Number(item?.page);
@@ -63,25 +48,6 @@ ${pages.map(item => `\n===== 原 PDF 第 ${item.page} 页 =====\n${item.text || 
     byPage.set(page, normalizeItem(page, item));
   }
   return pages.map(input => byPage.get(input.page) || unknown(input.page));
-}
-
-async function withQwen(prompt: string, env: ClassifierEnvironment, signal?: AbortSignal): Promise<any> {
-  const response = await fetch(`${env.DASHSCOPE_BASE_URL!.replace(/\/+$/, '')}/chat/completions`, {
-    method: 'POST', signal,
-    headers: { Authorization: `Bearer ${env.DASHSCOPE_API_KEY}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: env.QWEN_MODEL || 'qwen3.8-flash',
-      messages: [{ role: 'user', content: prompt }],
-      stream: false,
-      response_format: { type: 'json_object' },
-      enable_thinking: false,
-      temperature: 0,
-      max_tokens: 4096
-    })
-  });
-  if (!response.ok) throw new Error(`MinerU 页面分类失败（${response.status}）`);
-  const payload = await response.json() as any;
-  return parseJson(payload?.choices?.[0]?.message?.content);
 }
 
 async function withGemini(prompt: string, env: ClassifierEnvironment, signal?: AbortSignal): Promise<any> {

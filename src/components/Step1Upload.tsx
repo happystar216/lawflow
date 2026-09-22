@@ -295,9 +295,9 @@ export const Step1Upload: React.FC<Step1Props> = ({
           const controller = new AbortController();
           abortControllerRef.current = controller;
           setIsCancellable(true);
-          // Trial mode: the previous visual classification/splitting pipeline is
-          // intentionally bypassed. The complete PDF is sent to MinerU and its
-          // native table result is converted directly into accounts and rows.
+          // The previous visual classification/splitting pipeline is bypassed.
+          // MinerU extracts the complete document first; that complete result is
+          // then sent to the language model once for the final account and row JSON.
           const { accounts: parsedAccounts, transactions: parsedTx } = await parsePdfWithMinerU(
             file,
             (info: GeminiProgressInfo) => {

@@ -3,9 +3,8 @@ compatibility_date = "2024-09-23"
 pages_build_output_dir = "dist"
 
 # Required production secrets / variables (configure in Cloudflare; never commit values):
-# DASHSCOPE_API_KEY  = 百炼 API Key（Secret）
-# DASHSCOPE_BASE_URL = https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
-# QWEN_MODEL         = qwen3.8-flash（optional; this is the code default）
+# GEMINI_API_KEY     = Gemini API Key（required for the current PDF pipeline）
+# GEMINI_MODEL       = gemini-3.8-flash（optional; this is the code default）
 # MINERU_API_TOKEN   = MinerU 精准解析 Token（required for the current direct PDF pipeline）
 # LAWFLOW_ALLOWED_ORIGIN = https://your-production-domain.example（recommended）
 # LAWFLOW_REQUIRE_ACCESS = true（recommended; requires a Cloudflare Access policy）

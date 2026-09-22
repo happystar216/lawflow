@@ -24,17 +24,18 @@
 ```mermaid
 graph TD
     User["👤 律师 / 用户浏览器"] -->|HTTPS (TLS 1.3)| CF_Pages["🌐 前端: Cloudflare Pages (React 18 + TS + Vite + Tailwind)"]
-    CF_Pages -->|同源代理 /api/parse-bank-statement-stream| CF_Edge["⚡ Cloudflare Edge Functions"]
-    CF_Edge -->|Chat Completions / Base64 PDF| Qwen["🤖 百炼 Qwen3.8-Flash PDF 理解"]
+    CF_Pages -->|同源代理 /api/*| CF_Edge["⚡ Cloudflare Edge Functions"]
+    CF_Edge -->|原始 PDF| MinerU["📄 MinerU 文档结构识别"]
+    MinerU -->|整份结构化结果一次提交| Gemini["🤖 Gemini 流水整理"]
 ```
 
 ### 2.1 技术栈清单
 - **前端框架**：`React 18` + `TypeScript` + `Vite` + `TailwindCSS`
 - **图标与组件**：`lucide-react`
 - **本地存储**：`IndexedDB` (基于原生 IDB 封装) + `localStorage` 双重实时自动保存恢复
-- **服务端代理**：Cloudflare Pages Functions（服务端保管百炼密钥）
-- **PDF 理解引擎**：阿里云百炼 `Qwen3.8-Flash`，原始 PDF 直接输入，不经过自建 OCR/ECS
-- **云基础设施**：Cloudflare Pages + 阿里云百炼北京地域模型端点
+- **服务端代理**：Cloudflare Pages Functions（服务端保管 MinerU 和 Gemini 密钥）
+- **PDF 识别链路**：MinerU 对整份 PDF 进行文档结构识别，再将整份 MinerU 结果一次性交给 Gemini 整理为账户和流水
+- **云基础设施**：Cloudflare Pages + MinerU API + Google Gemini API
 
 ---
 
@@ -58,10 +59,10 @@ Step 6: 报告与证据一键导出
 
 ### Step 1: 证据上传与流式解析 (`src/components/Step1Upload.tsx`)
 - 支持拖拽上传各大银行导出的 Excel、CSV、PDF 扫描件；
-- **Qwen 原生 PDF 理解**：PDF 经 Cloudflare 服务端代理直接提交给 Qwen3.8-Flash；
+- **两步识别**：整份 PDF 先由 MinerU 识别，整份识别结果再一次性交给 Gemini 整理；
 - **完整性校验**：模型逐页统计交易数，并与最终结构化数组核对，不一致时拒绝静默入库；
 - **交互控制**：提供 **「⏹ 停止解析」** 按钮（基于 `AbortController` 毫秒级中断）；
-- **长文档支持**：遵循百炼 PDF 理解接口的 150 MB、500 页上限。
+- **长文档支持**：MinerU 负责文档识别，Gemini 仅处理压缩后的整份文档结构结果。
 
 ### Step 2: 账户主体归属确认 (`src/components/Step2Verify.tsx`)
 - 确认各银行账户与当事人的主体关系：
@@ -106,8 +107,10 @@ law-tools/
 ├── vite.config.ts                    # Vite 打包配置
 ├── functions/                        # Cloudflare Pages Functions (Edge 代理)
 │   └── api/
-│       └── parse-bank-statement-stream.ts # 生产端 Qwen SSE 调用入口
-│   └── lib/qwenBankStatement.ts            # PDF 提示词、流式响应与标准化
+│       ├── submit-mineru-job.ts            # MinerU 整份 PDF 识别入口
+│       └── normalize-mineru-result.ts      # Gemini 整份结果整理入口
+│   ├── lib/mineruBankStatementNormalizer.ts # Gemini 整份结果提示词与标准化
+│   └── lib/geminiBankStatement.ts          # 兼容旧直传入口的 Gemini 解析器
 ├── src/
 │   ├── App.tsx                       # 顶层应用入口，状态驱动与自动持久化
 │   ├── types/                        # 核心 TypeScript 类型定义
@@ -120,7 +123,8 @@ law-tools/
 │   │   └── balanceAuditor.ts         # 会计平账一致性审计器
 │   ├── parsers/                      # 流水解析器
 │   │   ├── excelParser.ts            # 电子版 Excel / CSV 解析
-│   │   └── qwenPdfParser.ts           # 前端 Qwen SSE 读取器 (支持 AbortController)
+│   │   ├── mineruBankStatementParser.ts # MinerU 任务与 Gemini 整份整理流程
+│   │   └── qwenPdfParser.ts           # 仅保留的旧版分页编排兼容文件；不再调用百炼
 │   ├── store/                        # 状态持久化
 │   │   ├── caseStore.ts              # IndexedDB 案件库 (多案件自动存储)
 │   │   └── authStore.ts              # 用户鉴权与会话管理
@@ -145,11 +149,9 @@ law-tools/
 
 - **线上生产访问地址**：👉 **[https://lawflow-66f.pages.dev](https://lawflow-66f.pages.dev)**
 - **GitHub 代码仓库**：👉 **[https://github.com/happystar216/lawflow](https://github.com/happystar216/lawflow)**
-- **通义千问 Qwen3.8-Flash 接口**：
-  - Base URL：通过 Cloudflare 环境变量 `DASHSCOPE_BASE_URL` 配置
-  - API Key：通过 Cloudflare Secret `DASHSCOPE_API_KEY` 配置
-  - Model：`qwen3.8-flash`
-  - 协议：OpenAI 兼容 Chat Completions，Base64 PDF 输入
+- **MinerU 接口**：Cloudflare Secret `MINERU_API_TOKEN`
+- **Gemini 接口**：Cloudflare Secret `GEMINI_API_KEY`，可通过 `GEMINI_MODEL` 指定模型
+- **生产路径**：不配置、不调用百炼，也不会在 Gemini 失败时回退到其他大模型
 
 ---
 

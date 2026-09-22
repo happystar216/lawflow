@@ -6,7 +6,7 @@ export async function onRequestPost(context: any) {
   if (rejected) return rejected;
   try {
     const contentLength = Number(context.request.headers.get('content-length') || 0);
-    if (contentLength > 1_000_000) return json({ error: '结构化整理批次过大' }, 413);
+    if (contentLength > 6_000_000) return json({ error: 'MinerU 完整结果过大' }, 413);
     const input = await context.request.json();
     const result = await normalizeMinerUBankStatement(input, context.env, context.request.signal);
     return json(result, 200);
@@ -23,7 +23,7 @@ export async function onRequestOptions() {
 function publicMessage(message: string): string {
   return message
     .replace(/Bearer\s+\S+/gi, '服务凭据')
-    .replace(/DASHSCOPE_API_KEY|GEMINI_API_KEY/gi, '结构化整理服务配置');
+    .replace(/GEMINI_API_KEY/gi, '结构化整理服务配置');
 }
 
 function json(body: unknown, status: number): Response {

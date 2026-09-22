@@ -3,8 +3,10 @@ import assert from 'node:assert/strict';
 import { normalizeMinerUPages } from '../src/parsers/mineruResultParser';
 import {
   applyMinerUModelNormalization,
+  buildMinerUWholeDocumentRequest,
   parseMinerUDocumentToBankStatement,
-  parseMinerUTableHtml
+  parseMinerUTableHtml,
+  parseMinerUWholeModelResult
 } from '../src/parsers/mineruBankStatementParser';
 import { buildPdfBankSplitSuggestion, PdfBankSplitPlan } from '../src/parsers/pdfBankSplitter';
 import type { PageMapItem } from '../src/parsers/qwenPdfParser';
@@ -124,6 +126,54 @@ test('MinerU table parser expands colspan cells and ignores markup', () => {
     ['日期', '摘要'],
     ['2024-01-01', '结息', '']
   ]);
+});
+
+test('the complete MinerU document is sent to the model as one request', () => {
+  const request = buildMinerUWholeDocumentRequest({
+    pages: [
+      { page: 1, text: '调查令回执' },
+      { page: 2, text: '账户信息表' },
+      { page: 3, text: '交易明细表' }
+    ],
+    blocks: [
+      { page: 1, type: 'text', text: '调查令回执' },
+      { page: 2, type: 'table', text: '账户表', tableHtml: '<table><tr><td>账号</td></tr></table>' },
+      { page: 3, type: 'table', text: '流水表', tableHtml: '<table><tr><td>交易日期</td></tr></table>' }
+    ]
+  }, '整卷.pdf', '胡艳红', 3) as any;
+
+  assert.equal(request.pages.length, 3);
+  assert.equal(request.pages[1].tables.length, 1);
+  assert.equal(request.pages[2].tables.length, 1);
+  assert.equal('transactions' in request, false);
+  assert.equal('accounts' in request, false);
+});
+
+test('one model response becomes the final accounts and transactions without a rule draft', () => {
+  const parsed = parseMinerUWholeModelResult({
+    accounts: [
+      { ac: '22255301100006216', holder: '胡艳红', bk: '中国农业银行', p: 2, cf: 0.98 },
+      { ac: '22240201100609597', holder: '胡艳红', bk: '中国农业银行', p: 2, cf: 0.98 }
+    ],
+    transactions: [
+      { p: 3, r: 1, bk: '中国农业银行', ac: '22255301100006216', holder: '胡艳红', tm: '2024-12-21', dir: 'IN', amt: 1.38, bal: 5456.73, cp: '', ca: '', cb: '', sm: '结息', src: '20241221 1.38 5456.73 结息', cf: 0.98 },
+      { p: 3, r: 2, bk: '中国农业银行', ac: '22255301100006216', holder: '胡艳红', tm: '2025-02-25 14:39:05', dir: 'OUT', amt: 5453.26, bal: 3.47, cp: '', ca: '', cb: '', sm: '强制扣划', src: '20250225 -5453.26 3.47 强制扣划', cf: 0.96 },
+      { p: 3, r: 3, bk: '中国农业银行', ac: '22255301100006216', holder: '胡艳红', tm: '2025-06-21', dir: 'IN', amt: 0, bal: 4.47, cp: '', ca: '', cb: '', sm: '结息', src: '20250621 0.00 4.47 结息', cf: 0.95 }
+    ],
+    pageChecks: [
+      { p: 1, type: 'DOCUMENT', extracted: 0, status: 'COMPLETE', note: '' },
+      { p: 2, type: 'ACCOUNT_INFO', extracted: 0, status: 'COMPLETE', note: '' },
+      { p: 3, type: 'TRANSACTIONS', extracted: 3, status: 'COMPLETE', note: '' }
+    ],
+    warnings: []
+  }, '06_中国农业银行.pdf', '胡艳红', 3);
+
+  assert.equal(parsed.accounts.length, 2);
+  assert.equal(parsed.transactions.length, 3);
+  assert.equal(parsed.transactions[1].direction, 'OUT');
+  assert.equal(parsed.transactions[1].summary, '强制扣划');
+  assert.equal(parsed.transactions[2].amount, 0);
+  assert.equal(parsed.transactions[2].reviewStatus, 'AUTO_PASSED');
 });
 
 test('large-model normalization improves institution fields without dropping an omitted source row', () => {

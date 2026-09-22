@@ -16,7 +16,7 @@ export async function onRequestPost(context: any) {
     return json({ status: 'success', pages }, 200);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error || '页面分类失败');
-    return json({ error: message.replace(/Qwen/gi, '智能分类服务').replace(/DASHSCOPE_[A-Z_]+/g, '服务配置') }, 502);
+    return json({ error: message.replace(/Gemini/gi, '智能分类服务').replace(/GEMINI_[A-Z_]+/g, '服务配置') }, 502);
   }
 }
 

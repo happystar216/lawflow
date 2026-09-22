@@ -1,6 +1,5 @@
 # Copy to .dev.vars for local Cloudflare Pages development. Never commit real keys.
-DASHSCOPE_API_KEY=sk-your-key
-DASHSCOPE_BASE_URL=https://your-workspace-id.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
-QWEN_MODEL=qwen3.8-flash
-# Current PDF recognition pipeline. Create the token at https://mineru.net/apiManage
+GEMINI_API_KEY=your-gemini-api-key
+GEMINI_MODEL=gemini-3.8-flash
+# First step of the current PDF recognition pipeline. Create the token at https://mineru.net/apiManage
 MINERU_API_TOKEN=your-mineru-token

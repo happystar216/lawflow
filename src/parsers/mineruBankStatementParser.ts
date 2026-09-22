@@ -60,15 +60,13 @@ export async function parsePdfWithMinerU(
     onProgress?.(mineruProgress(progress, totalPages));
   }, signal);
   onProgress?.({
-    statusText: 'MinerU 已返回结构化表格，正在由大模型整理银行、账户和流水…',
+    statusText: 'MinerU 已返回完整结果，正在一次性交给大模型整理…',
     totalTransactions: 0,
     percent: 92,
     isStreaming: true
   });
-  const draft = parseMinerUDocumentToBankStatement(document, file.name, options?.respondentName, totalPages);
-  const result = await normalizeMinerUDraftWithModel(
+  const result = await normalizeWholeMinerUDocument(
     document,
-    draft,
     file.name,
     options?.respondentName || '',
     totalPages,
@@ -142,145 +140,160 @@ export function parseMinerUDocumentToBankStatement(
 interface ModelNormalizationResult {
   accounts?: any[];
   transactions?: any[];
+  pageChecks?: any[];
   warnings?: string[];
 }
 
-async function normalizeMinerUDraftWithModel(
+export function buildMinerUWholeDocumentRequest(
   document: MinerUStructuredDocument,
-  draft: { account: BankAccount; accounts: BankAccount[]; transactions: StandardTransaction[] },
+  sourceFileName: string,
+  respondentName: string,
+  totalPages: number
+): Record<string, unknown> {
+  const blocksByPage = new Map<number, MinerUStructuredBlock[]>();
+  for (const block of document.blocks) {
+    blocksByPage.set(block.page, [...(blocksByPage.get(block.page) || []), block]);
+  }
+  const pageText = new Map(document.pages.map(page => [page.page, page.text]));
+  const pages = Array.from({ length: totalPages }, (_, index) => {
+    const page = index + 1;
+    const blocks = blocksByPage.get(page) || [];
+    const textBlocks = blocks.filter(block => !block.tableHtml).map(block => block.text).filter(Boolean);
+    return {
+      page,
+      text: textBlocks.length ? [...new Set(textBlocks)].join('\n') : pageText.get(page) || '',
+      tables: blocks.filter(block => block.tableHtml).map(block => block.tableHtml || '').filter(Boolean)
+    };
+  });
+  return { sourceFileName, respondentName, totalPages, pages };
+}
+
+async function normalizeWholeMinerUDocument(
+  document: MinerUStructuredDocument,
   sourceFileName: string,
   respondentName: string,
   totalPages: number,
   onProgress?: (info: MinerUDirectProgressInfo) => void,
   signal?: AbortSignal
 ): Promise<{ account: BankAccount; accounts: BankAccount[]; transactions: StandardTransaction[] }> {
-  const batches = buildModelBatches(document, draft, sourceFileName, respondentName, totalPages);
-  const normalizedAccounts: any[] = [];
-  const normalizedTransactions: any[] = [];
-  const warnings: string[] = [];
-  for (const [index, batch] of batches.entries()) {
-    onProgress?.({
-      statusText: `正在由大模型整理结构化结果（${index + 1}/${batches.length}）…`,
-      totalTransactions: normalizedTransactions.length,
-      percent: Math.min(99, 92 + Math.round(index / Math.max(1, batches.length) * 7)),
-      currentBank: draft.account.bankName,
-      isStreaming: true
-    });
-    const response = await fetch('/api/normalize-mineru-result', {
-      method: 'POST',
-      signal,
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(batch)
-    });
-    const payload = await responseJson(response);
-    if (!response.ok) throw apiError(payload, '结构化结果整理失败');
-    const result = payload as ModelNormalizationResult;
-    if (Array.isArray(result.accounts)) normalizedAccounts.push(...result.accounts);
-    if (Array.isArray(result.transactions)) normalizedTransactions.push(...result.transactions);
-    if (Array.isArray(result.warnings)) warnings.push(...result.warnings.map(cleanText).filter(Boolean));
-  }
-  return applyMinerUModelNormalization(
-    draft, normalizedAccounts, normalizedTransactions, warnings,
-    sourceFileName, respondentName, totalPages
+  const request = buildMinerUWholeDocumentRequest(document, sourceFileName, respondentName, totalPages);
+  onProgress?.({
+    statusText: '正在由大模型一次性整理整份 MinerU 结果…',
+    totalTransactions: 0,
+    percent: 94,
+    isStreaming: true
+  });
+  const response = await fetch('/api/normalize-mineru-result', {
+    method: 'POST',
+    signal,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request)
+  });
+  const payload = await responseJson(response);
+  if (!response.ok) throw apiError(payload, '整份 MinerU 结果整理失败');
+  return parseMinerUWholeModelResult(
+    payload as ModelNormalizationResult,
+    sourceFileName,
+    respondentName,
+    totalPages
   );
 }
 
-function buildModelBatches(
-  document: MinerUStructuredDocument,
-  draft: { accounts: BankAccount[]; transactions: StandardTransaction[] },
+export function parseMinerUWholeModelResult(
+  result: ModelNormalizationResult,
   sourceFileName: string,
   respondentName: string,
   totalPages: number
-): any[] {
-  const tablesByPage = new Map<number, string[]>();
-  for (const block of document.blocks.filter(block => block.tableHtml)) {
-    tablesByPage.set(block.page, [...(tablesByPage.get(block.page) || []), block.tableHtml || '']);
+): { account: BankAccount; accounts: BankAccount[]; transactions: StandardTransaction[] } {
+  const rawAccounts = Array.isArray(result.accounts) ? result.accounts : [];
+  const listed: ListedAccount[] = [];
+  for (const raw of rawAccounts) {
+    const accountNumber = normalizeAccountNumber(cleanText(raw?.ac ?? raw?.accountNumber));
+    if (!isUsefulAccountNumber(accountNumber) || listed.some(item => item.accountNumber === accountNumber)) continue;
+    listed.push({
+      accountNumber,
+      accountName: cleanText(raw?.holder ?? raw?.accountName) || respondentName || '待核验户名',
+      bankName: usefulBankName(raw?.bk ?? raw?.bankName) || '待核验银行',
+      page: positiveInteger(raw?.p ?? raw?.page) || 1
+    });
   }
-  const transactionPages = new Set(draft.transactions.map(transaction => transaction.rawPageNumber || 0));
-  const evidencePages = document.pages.filter(page => page.page <= 3
-    || tablesByPage.has(page.page) || transactionPages.has(page.page));
-  const context = document.pages.slice(0, 3)
-    .map(page => `第${page.page}页：${page.text.slice(0, 6_000)}`)
-    .join('\n')
-    .slice(0, 16_000);
-  const accountEvidence = draft.accounts.map(account => ({
-    accountNumber: account.accountNumber,
-    accountName: account.accountName,
-    bankName: account.bankName,
-    coveredPages: account.coveredPages,
-    transactionCount: account.transactionCount
-  }));
-  const units: Array<{ page: any; transactions: any[] }> = [];
-  for (const page of evidencePages) {
-    const transactions = draft.transactions
-      .filter(transaction => transaction.rawPageNumber === page.page)
-      .map(transaction => modelDraftTransaction(transaction));
-    const chunks = transactions.length
-      ? Array.from({ length: Math.ceil(transactions.length / 140) }, (_, index) => transactions.slice(index * 140, (index + 1) * 140))
-      : [[]];
-    for (const transactionChunk of chunks) {
-      units.push({
-        page: {
-          page: page.page,
-          text: page.text.slice(0, 30_000),
-          tables: limitedTables(tablesByPage.get(page.page) || [], 500_000)
-        },
-        transactions: transactionChunk
-      });
+
+  const rawTransactions = Array.isArray(result.transactions) ? result.transactions : [];
+  const transactions = rawTransactions.flatMap((raw, index) => {
+    const page = positiveInteger(raw?.p ?? raw?.page ?? raw?.rawPageNumber);
+    if (!page || page > totalPages) return [];
+    const row = positiveInteger(raw?.r ?? raw?.row ?? raw?.rawRowIndex) || index + 1;
+    const transactionTime = normalizeDateTime(cleanText(raw?.tm ?? raw?.transactionTime), '');
+    const amount = moneyValue(cleanText(raw?.amt ?? raw?.amount));
+    const rawBalance = raw?.bal ?? raw?.balance;
+    const balance = rawBalance == null || cleanText(rawBalance) === ''
+      ? { value: 0, valid: false }
+      : moneyValue(cleanText(rawBalance));
+    const rawDirection = cleanText(raw?.dir ?? raw?.direction).toUpperCase();
+    const direction: FlowDirection = rawDirection === 'IN' || rawDirection === 'OUT' || rawDirection === 'UNKNOWN'
+      ? rawDirection : 'UNKNOWN';
+    const accountNumber = normalizeAccountNumber(cleanText(raw?.ac ?? raw?.accountNumber));
+    const confidenceValue = Number(raw?.cf ?? raw?.confidence);
+    const confidence = Number.isFinite(confidenceValue) ? clamp01(confidenceValue) : 0.65;
+    const issues: NonNullable<StandardTransaction['dataQualityIssues']> = [];
+    if (!transactionTime) issues.push('INVALID_DATE');
+    if (!amount.valid) issues.push('INVALID_AMOUNT');
+    if (direction === 'UNKNOWN') issues.push('UNKNOWN_DIRECTION');
+    const normalizedAccount = isUsefulAccountNumber(accountNumber) ? accountNumber : `待核验账号-第${page}页`;
+    const transaction: StandardTransaction = {
+      id: `TX_MINERU_LLM_P${page}_R${row}_${transactionsafe(normalizedAccount)}_${index + 1}`,
+      accountNumber: normalizedAccount,
+      accountName: cleanText(raw?.holder ?? raw?.accountName) || respondentName || '待核验户名',
+      bankName: usefulBankName(raw?.bk ?? raw?.bankName) || '待核验银行',
+      transactionTime,
+      transactionDate: transactionTime.slice(0, 10),
+      direction,
+      amount: amount.valid ? Math.abs(amount.value) : 0,
+      balance: balance.valid ? balance.value : 0,
+      balanceAvailable: balance.valid,
+      counterpartyName: cleanText(raw?.cp ?? raw?.counterpartyName),
+      counterpartyAccount: normalizeAccountNumber(cleanText(raw?.ca ?? raw?.counterpartyAccount)) || undefined,
+      counterpartyBank: cleanText(raw?.cb ?? raw?.counterpartyBank) || undefined,
+      summary: cleanText(raw?.sm ?? raw?.summary),
+      rawSourceFile: sourceFileName,
+      rawPageNumber: page,
+      rawRowIndex: row,
+      rawText: cleanText(raw?.src ?? raw?.rawText),
+      extractionMethod: 'MINERU_DIRECT_PDF',
+      extractionConfidence: confidence,
+      reviewStatus: issues.length || confidence < 0.8 ? 'PENDING' : 'AUTO_PASSED',
+      dataQualityIssues: issues
+    };
+    return [transaction];
+  });
+
+  const pageChecks = Array.isArray(result.pageChecks) ? result.pageChecks : [];
+  const warnings = [...new Set((result.warnings || []).map(cleanText).filter(Boolean))];
+  const checkedPages = new Set<number>();
+  let declaredTransactions = 0;
+  for (const check of pageChecks) {
+    const page = positiveInteger(check?.p ?? check?.page);
+    if (!page || page > totalPages) continue;
+    checkedPages.add(page);
+    declaredTransactions += Math.max(0, Number(check?.extracted ?? check?.transactionCount) || 0);
+    if (cleanText(check?.status).toUpperCase() === 'NEEDS_REVIEW') {
+      warnings.push(`第 ${page} 页需要核对：${cleanText(check?.note) || 'MinerU 结构可能不完整'}`);
     }
   }
-  const batches: any[] = [];
-  let pages: any[] = [];
-  let transactions: any[] = [];
-  const flush = () => {
-    if (!pages.length) return;
-    batches.push({
-      sourceFileName,
-      respondentName,
-      totalPages,
-      documentContext: context,
-      accounts: accountEvidence,
-      pages,
-      transactions
-    });
-    pages = [];
-    transactions = [];
-  };
-  for (const unit of units) {
-    const nextPages = [...pages, unit.page];
-    const nextTransactions = [...transactions, ...unit.transactions];
-    const estimatedSize = JSON.stringify({ pages: nextPages, transactions: nextTransactions, accounts: accountEvidence }).length;
-    if (pages.length && (nextPages.length > 4 || nextTransactions.length > 140 || estimatedSize > 700_000)) flush();
-    pages.push(unit.page);
-    transactions.push(...unit.transactions);
+  if (checkedPages.size !== totalPages) warnings.push(`大模型仅返回 ${checkedPages.size}/${totalPages} 页完整性检查`);
+  if (declaredTransactions !== transactions.length) {
+    warnings.push(`逐页清点为 ${declaredTransactions} 笔，但返回了 ${transactions.length} 笔流水`);
   }
-  flush();
-  return batches.length ? batches : [{
-    sourceFileName, respondentName, totalPages, documentContext: context,
-    accounts: accountEvidence,
-    pages: [{ page: 1, text: context || '[未提取到文字]', tables: [] }],
-    transactions: []
-  }];
-}
-
-function modelDraftTransaction(transaction: StandardTransaction): Record<string, unknown> {
-  return {
-    sourceKey: transaction.id,
-    page: transaction.rawPageNumber,
-    row: transaction.rawRowIndex,
-    bankName: transaction.bankName,
-    accountName: transaction.accountName,
-    accountNumber: transaction.accountNumber,
-    transactionTime: transaction.transactionTime,
-    direction: transaction.direction,
-    amount: transaction.amount,
-    balance: transaction.balanceAvailable === false ? null : transaction.balance,
-    counterpartyName: transaction.counterpartyName,
-    counterpartyAccount: transaction.counterpartyAccount || '',
-    counterpartyBank: transaction.counterpartyBank || '',
-    summary: transaction.summary,
-    rawText: transaction.rawText
-  };
+  const fallbackBank = listed.map(item => item.bankName).find(usefulBankName)
+    || transactions.map(item => item.bankName).find(usefulBankName)
+    || '待核验银行';
+  const accounts = buildAccounts(listed, transactions, fallbackBank, respondentName, sourceFileName, totalPages);
+  if (!accounts.length) accounts.push(emptyDocumentAccount(fallbackBank, respondentName, sourceFileName, totalPages));
+  if (warnings.length) {
+    accounts[0].parseWarnings = [...new Set([...(accounts[0].parseWarnings || []), ...warnings])];
+    accounts[0].parseStatus = 'NEEDS_REVIEW';
+  }
+  return { account: accounts[0], accounts, transactions };
 }
 
 export function applyMinerUModelNormalization(
@@ -403,18 +416,6 @@ function applyModelTransaction(draft: StandardTransaction, model: any): Standard
     next.correctionReason = next.correctionReason || '大模型依据表头、摘要与余额关系重新整理收支方向';
   }
   return next;
-}
-
-function limitedTables(tables: string[], characterLimit: number): string[] {
-  let remaining = characterLimit;
-  const result: string[] = [];
-  for (const table of tables) {
-    if (remaining <= 0) break;
-    const value = table.slice(0, remaining);
-    if (value) result.push(value);
-    remaining -= value.length;
-  }
-  return result;
 }
 
 function modelConfidence(value: any): number {
@@ -874,6 +875,11 @@ function sum(values: number[]): number {
 
 function clamp01(value: number): number {
   return Math.max(0, Math.min(1, value));
+}
+
+function positiveInteger(value: unknown): number | undefined {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
 }
 
 async function pdfPageCount(file: File): Promise<number> {
