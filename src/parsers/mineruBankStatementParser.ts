@@ -213,7 +213,7 @@ export async function readMinerUNormalizationStream(
   const decoder = new TextDecoder();
   let buffer = '';
   let completed: ModelNormalizationResult | undefined;
-  let streamError = '';
+  let streamError: { message: string; diagnosticCode?: string; diagnosis?: string } | undefined;
 
   const consumeFrame = (frame: string) => {
     const data = frame.split(/\r?\n/)
@@ -228,7 +228,11 @@ export async function readMinerUNormalizationStream(
       throw new Error('整份 MinerU 结果整理进度数据无法读取');
     }
     if (event?.type === 'error') {
-      streamError = String(event.error || '整份 MinerU 结果整理失败');
+      streamError = {
+        message: String(event.error || '整份 MinerU 结果整理失败'),
+        diagnosticCode: typeof event.diagnosticCode === 'string' ? event.diagnosticCode : undefined,
+        diagnosis: typeof event.diagnosis === 'string' ? event.diagnosis : undefined
+      };
       return;
     }
     if (event?.type === 'complete') {
@@ -257,7 +261,14 @@ export async function readMinerUNormalizationStream(
     if (done) break;
   }
   if (buffer.trim()) consumeFrame(buffer);
-  if (streamError) throw new Error(streamError);
+  if (streamError) {
+    const error = new Error(streamError.message);
+    Object.assign(error, {
+      diagnosticCode: streamError.diagnosticCode,
+      diagnosis: streamError.diagnosis
+    });
+    throw error;
+  }
   if (!completed) throw new Error('整份 MinerU 结果整理连接提前结束，未收到完整结果');
   return completed;
 }
@@ -497,7 +508,11 @@ async function responseJson(response: Response): Promise<any> {
 
 function apiError(payload: any, fallback: string): Error {
   const error = new Error(String(payload?.error || fallback));
-  (error as Error & { code?: string }).code = payload?.code;
+  Object.assign(error, {
+    code: payload?.code,
+    diagnosticCode: payload?.diagnosticCode,
+    diagnosis: payload?.diagnosis
+  });
   return error;
 }
 

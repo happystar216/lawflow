@@ -30,7 +30,14 @@ export async function onRequestPost(context: any) {
           send({ type: 'complete', requestId, result });
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
-          send({ type: 'error', requestId, error: publicMessage(message) });
+          const diagnostic = diagnoseNormalizationError(message);
+          send({
+            type: 'error',
+            requestId,
+            error: publicMessage(message),
+            diagnosticCode: diagnostic.code,
+            diagnosis: diagnostic.diagnosis
+          });
         } finally {
           clearInterval(heartbeat);
           if (!closed) controller.close();
@@ -59,6 +66,25 @@ function publicMessage(message: string): string {
   return message
     .replace(/Bearer\s+\S+/gi, '服务凭据')
     .replace(/GEMINI_API_KEY/gi, '结构化整理服务配置');
+}
+
+function diagnoseNormalizationError(message: string): { code: string; diagnosis: string } {
+  if (/MAX_TOKENS|输出上限/i.test(message)) {
+    return {
+      code: 'OUTPUT_LIMIT_REACHED',
+      diagnosis: '整份识别结果已提取，但结构化整理返回内容达到单次输出长度上限'
+    };
+  }
+  if (/JSON|结构化.*(?:无效|无法读取|不完整)|无法读取.*结构化/i.test(message)) {
+    return {
+      code: 'INVALID_STRUCTURED_OUTPUT',
+      diagnosis: '结构化整理服务已返回内容，但返回格式不完整或无法解析'
+    };
+  }
+  return {
+    code: 'NORMALIZATION_FAILED',
+    diagnosis: '整份识别结果在结构化整理阶段未能完成'
+  };
 }
 
 function json(body: unknown, status: number): Response {

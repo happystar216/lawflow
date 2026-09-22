@@ -135,6 +135,7 @@ async function withGemini(
         contents: [{ parts: [{ text: prompt }] }],
         generationConfig: {
           response_mime_type: 'application/json',
+          responseJsonSchema: compactOutputSchema(),
           temperature: 0,
           max_output_tokens: 65536
         }
@@ -163,6 +164,7 @@ async function withGeminiStream(
         contents: [{ parts: [{ text: prompt }] }],
         generationConfig: {
           response_mime_type: 'application/json',
+          responseJsonSchema: compactOutputSchema(),
           temperature: 0,
           max_output_tokens: 65536
         }
@@ -208,13 +210,66 @@ async function withGeminiStream(
     if (done) break;
   }
   if (buffer.trim()) consumeLine(buffer);
-  if (finishReason === 'MAX_TOKENS') throw new Error('结构化整理结果达到输出上限，返回内容不完整');
+  if (finishReason === 'MAX_TOKENS') {
+    const tokenText = outputTokens === undefined ? '输出 token 数未返回' : `已生成 ${outputTokens} 个输出 token`;
+    throw new Error(`结构化整理结果达到输出上限（已生成 ${content.length} 个字符，${tokenText}，停止原因 MAX_TOKENS），返回内容不完整`);
+  }
   if (!content) {
     throw new Error(malformedFrames
       ? '结构化整理服务返回了无法读取的流式数据'
       : '结构化整理服务未返回有效内容');
   }
   return parseJson(content);
+}
+
+function compactOutputSchema(): Record<string, unknown> {
+  const string = { type: 'string' };
+  const number = { type: 'number' };
+  const integer = { type: 'integer' };
+  return {
+    type: 'object',
+    additionalProperties: false,
+    propertyOrdering: ['a', 't', 'c', 'w'],
+    required: ['a', 't', 'c', 'w'],
+    properties: {
+      a: {
+        type: 'array',
+        description: '账户数组，每项严格为 [ac,holder,bk,p,cf]',
+        items: {
+          type: 'array', prefixItems: [string, string, string, integer, number], minItems: 5, maxItems: 5
+        }
+      },
+      t: {
+        type: 'array',
+        description: '流水数组，每项严格为 [p,r,ai,tm,dir,amt,bal,cp,ca,cb,sm,cf]',
+        items: {
+          type: 'array',
+          prefixItems: [
+            integer, integer, integer, string,
+            { type: 'string', enum: ['IN', 'OUT', 'UNKNOWN'] },
+            number, { type: ['number', 'null'] }, string, string, string, string, number
+          ],
+          minItems: 12, maxItems: 12
+        }
+      },
+      c: {
+        type: 'array',
+        description: '逐页检查，每项严格为 [p,type,extracted,status,note]',
+        items: {
+          type: 'array',
+          prefixItems: [
+            integer,
+            { type: 'string', enum: ['TRANSACTIONS', 'ACCOUNT_INFO', 'DOCUMENT', 'BLANK', 'UNKNOWN'] },
+            integer,
+            { type: 'string', enum: ['COMPLETE', 'NEEDS_REVIEW'] },
+            string
+          ],
+          minItems: 5, maxItems: 5
+        }
+      },
+      w: { type: 'array', items: string }
+    }
+  };
 }
 
 function validateInput(input: MinerUNormalizationInput): void {

@@ -154,13 +154,15 @@ test('the complete MinerU document is sent to the model as one request', () => {
 test('MinerU normalization streams one Gemini request instead of waiting silently for the whole response', async () => {
   const originalFetch = globalThis.fetch;
   let requestedUrl = '';
+  let requestedBody: any;
   const progress: number[] = [];
   const chunks = [
     '{"a":[["62220001","胡艳红","中国农业银行",1,0.98]],',
     '"t":[[1,1,0,"2024-01-01","IN",1.25,9.8,"","","","结息",0.97]],"c":[[1,"TRANSACTIONS",1,"COMPLETE",""]],"w":[]}'
   ];
-  globalThis.fetch = async input => {
+  globalThis.fetch = async (input, init) => {
     requestedUrl = String(input);
+    requestedBody = JSON.parse(String(init?.body || '{}'));
     const body = chunks.map((chunk, index) => `data: ${JSON.stringify({
       candidates: [{ content: { parts: [{ text: chunk }] }, ...(index === chunks.length - 1 ? { finishReason: 'STOP' } : {}) }],
       usageMetadata: { candidatesTokenCount: (index + 1) * 20 }
@@ -173,6 +175,8 @@ test('MinerU normalization streams one Gemini request instead of waiting silentl
       pages: [{ page: 1, text: '账户信息', tables: [] }]
     }, { GEMINI_API_KEY: 'test', GEMINI_MODEL: 'gemini-test' }, update => progress.push(update.generatedCharacters));
     assert.match(requestedUrl, /gemini-test:streamGenerateContent\?alt=sse/);
+    assert.deepEqual(requestedBody.generationConfig.responseJsonSchema.required, ['a', 't', 'c', 'w']);
+    assert.equal(requestedBody.generationConfig.responseJsonSchema.properties.t.items.maxItems, 12);
     assert.equal(result.accounts.length, 1);
     assert.equal(result.transactions.length, 1);
     assert.deepEqual(result.transactions[0], {
@@ -200,6 +204,22 @@ test('browser consumes normalization progress and requires a complete stream eve
   );
   assert.deepEqual(result, expected);
   assert.match(statuses.join(''), /24,000/);
+});
+
+test('browser preserves normalization diagnostics from a streamed error', async () => {
+  const body = `data: ${JSON.stringify({
+    type: 'error',
+    requestId: 'request-2',
+    error: '结构化整理结果达到输出上限（已生成 120000 个字符）',
+    diagnosticCode: 'OUTPUT_LIMIT_REACHED',
+    diagnosis: '结构化整理返回内容达到单次输出长度上限'
+  })}\n\n`;
+  await assert.rejects(
+    () => readMinerUNormalizationStream(new Response(body)),
+    (error: any) => error?.diagnosticCode === 'OUTPUT_LIMIT_REACHED'
+      && /120000/.test(error.message)
+      && /输出长度上限/.test(error.diagnosis)
+  );
 });
 
 test('one model response becomes the final accounts and transactions without a rule draft', () => {
