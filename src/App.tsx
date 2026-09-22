@@ -255,6 +255,24 @@ export const App: React.FC = () => {
     setCurrentStep(safeWorkflowStep(step, transactions.length));
   };
 
+  const validatePreAnnotation = (): boolean => {
+    const timeline = caseMeta.timeline || {};
+    const missing = [
+      !timeline.debtFormationDate && 'T0 债务形成/借款日',
+      !timeline.lawsuitFilingDate && 'T1 诉讼立案/财产保全日',
+      !timeline.judgmentEffectiveDate && 'T2 裁判文书生效日'
+    ].filter(Boolean) as string[];
+    if (missing.length) {
+      window.alert(`请先填写前置标注必填项：\n${missing.join('、')}`);
+      return false;
+    }
+    if (!accounts.some(account => account.ownerType !== 'UNKNOWN')) {
+      window.alert('请至少确认一个账户归属，不能全部保持“待核对”。');
+      return false;
+    }
+    return true;
+  };
+
   const handleTransactionsUpdated = (updatedTransactions: StandardTransaction[]) => {
     if (!updatedTransactions.length) {
       setTransactions([]);
@@ -380,6 +398,7 @@ export const App: React.FC = () => {
             onAccountsUpdated={setAccounts}
             onPrev={() => goToStep(2)}
             onNext={() => {
+              if (!validatePreAnnotation()) return;
               markStepCompleted(3);
               goToStep(4);
             }}

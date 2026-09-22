@@ -25,6 +25,7 @@ export const Step3PreAnnotation: React.FC<Step3Props> = ({
   const [declaredCategory, setDeclaredCategory] = useState<AssetDeclarationItem['category']>('income');
   const [declaredContent, setDeclaredContent] = useState('');
   const [declaredValue, setDeclaredValue] = useState<number>(0);
+  const [missingFields, setMissingFields] = useState<string[]>([]);
 
   const ownershipGroups = useMemo(() => {
     const groups = new Map<string, BankAccount[]>();
@@ -84,6 +85,37 @@ export const Step3PreAnnotation: React.FC<Step3Props> = ({
       ...caseMeta,
       declaredAssets: (caseMeta.declaredAssets || []).filter(a => a.id !== id)
     });
+  };
+
+  const handleNext = () => {
+    const missing = [
+      !caseMeta.timeline.debtFormationDate && 'T0 债务形成/借款日',
+      !caseMeta.timeline.lawsuitFilingDate && 'T1 诉讼立案/财产保全日',
+      !caseMeta.timeline.judgmentEffectiveDate && 'T2 裁判文书生效日',
+      !caseMeta.timeline.executionFilingDate && 'T3 执行立案日',
+      !caseMeta.timeline.reportOrderServedDate && 'T4 《报告财产令》送达日',
+      !caseMeta.timeline.settlementDate && 'T6 执行和解协议签署日'
+    ].filter(Boolean) as string[];
+    if (missing.length) {
+      setMissingFields(missing);
+      return;
+    }
+    const t = caseMeta.timeline;
+    const pairs: Array<[string, string, string, string]> = [
+      ['债务形成/借款日', t.debtFormationDate!, '诉讼立案/财产保全日', t.lawsuitFilingDate!],
+      ['诉讼立案/财产保全日', t.lawsuitFilingDate!, '裁判文书生效日', t.judgmentEffectiveDate!],
+      ['裁判文书生效日', t.judgmentEffectiveDate!, '执行立案日', t.executionFilingDate!],
+      ['执行立案日', t.executionFilingDate!, '《报告财产令》送达日', t.reportOrderServedDate!],
+      ['执行立案日', t.executionFilingDate!, '执行和解协议签署日', t.settlementDate!]
+    ];
+    const orderErrors = pairs.filter(([, from, , to]) => from > to)
+      .map(([fromLabel, from, toLabel, to]) => `时间节点错误：${fromLabel}（${from}）必须早于${toLabel}（${to}）`);
+    if (orderErrors.length) {
+      setMissingFields(orderErrors);
+      return;
+    }
+    setMissingFields([]);
+    onNext();
   };
 
   return (
@@ -173,69 +205,77 @@ export const Step3PreAnnotation: React.FC<Step3Props> = ({
         <p className="text-xs text-slate-500">
           每一笔交易将根据下列时点被打上法律阶段标签。节点后的流出会被优先提示，但仅作为复核线索，不自动认定为转移财产。
         </p>
+        <div className="rounded-xl border border-blue-100 bg-blue-50/60 px-4 py-3 text-[11px] leading-5 text-slate-600">
+          <div><b>T0 债务形成/借款日：</b>债务实际发生的起点。</div>
+          <div><b>T1 诉讼立案/财产保全日：</b>法院正式受理维权的日期，必须晚于 T0。</div>
+          <div><b>T2 裁判文书生效日：</b>判决或调解书产生法律效力的日期，必须晚于 T1。</div>
+          <div><b>T3 执行立案日：</b>申请强制执行并由法院正式立案的日期，必须晚于 T2。</div>
+          <div><b>T4 报告财产令送达日：</b>执行中法院要求报告财产的送达日期，必须晚于 T3。</div>
+          <div><b>T6 执行和解协议签署日：</b>执行过程中达成分期或其他和解的日期，必须晚于 T3。</div>
+        </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4 pt-2">
           <div>
-            <label className="block text-xs text-slate-600 mb-1">T0 债务形成/借款日</label>
+            <label className="block text-xs text-slate-600 mb-1">T0 债务形成/借款日 <span className="text-rose-600">*</span></label>
             <input
               type="date"
               value={caseMeta.timeline.debtFormationDate || ''}
               onChange={e => handleTimelineChange('debtFormationDate', e.target.value)}
-              className="w-full px-3 py-2 text-xs rounded-lg border border-slate-300"
+              className={`w-full px-3 py-2 text-xs rounded-lg border ${missingFields.includes('T0 债务形成/借款日') ? 'border-rose-500 bg-rose-50 ring-2 ring-rose-200' : 'border-slate-300'}`}
             />
           </div>
 
           <div>
-            <label className="block text-xs text-slate-600 mb-1">T1 诉讼立案/财产保全日</label>
+            <label className="block text-xs text-slate-600 mb-1">T1 诉讼立案/财产保全日 <span className="text-rose-600">*</span></label>
             <input
               type="date"
               value={caseMeta.timeline.lawsuitFilingDate || ''}
               onChange={e => handleTimelineChange('lawsuitFilingDate', e.target.value)}
-              className="w-full px-3 py-2 text-xs rounded-lg border border-slate-300"
+              className={`w-full px-3 py-2 text-xs rounded-lg border ${missingFields.includes('T1 诉讼立案/财产保全日') ? 'border-rose-500 bg-rose-50 ring-2 ring-rose-200' : 'border-slate-300'}`}
             />
           </div>
 
           <div>
-            <label className="block text-xs text-slate-600 mb-1">T2 裁判文书生效日</label>
+            <label className="block text-xs text-slate-600 mb-1">T2 裁判文书生效日 <span className="text-rose-600">*</span></label>
             <input
               type="date"
               value={caseMeta.timeline.judgmentEffectiveDate || ''}
               onChange={e => handleTimelineChange('judgmentEffectiveDate', e.target.value)}
-              className="w-full px-3 py-2 text-xs rounded-lg border border-slate-300"
+              className={`w-full px-3 py-2 text-xs rounded-lg border ${missingFields.includes('T2 裁判文书生效日') ? 'border-rose-500 bg-rose-50 ring-2 ring-rose-200' : 'border-slate-300'}`}
             />
           </div>
 
           <div>
             <label className="block text-xs font-semibold text-blue-700 mb-1">
-              T3 执行立案日 ⭐ (核心锚点)
+              T3 执行立案日 ⭐ (核心锚点) <span className="text-rose-600">*</span>
             </label>
             <input
               type="date"
               value={caseMeta.timeline.executionFilingDate || ''}
               onChange={e => handleTimelineChange('executionFilingDate', e.target.value)}
-              className="w-full px-3 py-2 text-xs rounded-lg border border-blue-300 bg-blue-50/20 font-medium"
+              className={`w-full px-3 py-2 text-xs rounded-lg border font-medium ${missingFields.includes('T3 执行立案日') ? 'border-rose-500 bg-rose-50 ring-2 ring-rose-200' : 'border-blue-300 bg-blue-50/20'}`}
             />
           </div>
 
           <div>
             <label className="block text-xs font-semibold text-rose-700 mb-1">
-              T4 《报告财产令》送达日 ⭐⭐（重点核查节点）
+              T4 《报告财产令》送达日 ⭐⭐（重点核查节点） <span className="text-rose-600">*</span>
             </label>
             <input
               type="date"
               value={caseMeta.timeline.reportOrderServedDate || ''}
               onChange={e => handleTimelineChange('reportOrderServedDate', e.target.value)}
-              className="w-full px-3 py-2 text-xs rounded-lg border border-rose-300 bg-rose-50/20 font-medium"
+              className={`w-full px-3 py-2 text-xs rounded-lg border font-medium ${missingFields.includes('T4 《报告财产令》送达日') ? 'border-rose-500 bg-rose-50 ring-2 ring-rose-200' : 'border-rose-300 bg-rose-50/20'}`}
             />
           </div>
 
           <div>
-            <label className="block text-xs text-slate-600 mb-1">T6 执行和解协议签署日</label>
+            <label className="block text-xs text-slate-600 mb-1">T6 执行和解协议签署日 <span className="text-rose-600">*</span></label>
             <input
               type="date"
               value={caseMeta.timeline.settlementDate || ''}
               onChange={e => handleTimelineChange('settlementDate', e.target.value)}
-              className="w-full px-3 py-2 text-xs rounded-lg border border-slate-300"
+              className={`w-full px-3 py-2 text-xs rounded-lg border ${missingFields.includes('T6 执行和解协议签署日') ? 'border-rose-500 bg-rose-50 ring-2 ring-rose-200' : 'border-slate-300'}`}
             />
           </div>
         </div>
@@ -314,13 +354,25 @@ export const Step3PreAnnotation: React.FC<Step3Props> = ({
         </button>
 
         <button
-          onClick={onNext}
+          onClick={handleNext}
           className="flex items-center space-x-2 px-6 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-medium text-sm shadow-md shadow-blue-500/20 transition"
         >
           <span>进入步骤四：运行核心算法计算</span>
           <ArrowRight className="w-4 h-4" />
         </button>
       </div>
+      {missingFields.length > 0 && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4" role="dialog" aria-modal="true">
+          <div className="w-full max-w-md rounded-2xl bg-white shadow-2xl border border-rose-200 p-6">
+            <h3 className="text-base font-bold text-rose-700">{missingFields.some(field => field.startsWith('时间节点错误')) ? '时间节点错误' : '还有未填写的必填项'}</h3>
+            <p className="mt-2 text-xs text-slate-600">{missingFields.some(field => field.startsWith('时间节点错误')) ? '请按案件时间先后关系修改以下日期：' : '请填写以下内容后，才能进入下一分页：'}</p>
+            <ul className="mt-3 space-y-2 text-sm text-rose-700 list-disc pl-5">
+              {missingFields.map(field => <li key={field}>{field}</li>)}
+            </ul>
+            <button type="button" onClick={() => setMissingFields([])} className="mt-5 w-full rounded-xl bg-rose-600 py-2.5 text-sm font-semibold text-white hover:bg-rose-700">返回填写</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
