@@ -88,7 +88,7 @@ export function auditAccountBalance(
   // A zero ending balance can be a real statement value and must not bypass
   // reconciliation. Unknown balances should be represented separately by the
   // parser rather than silently treated as balanced.
-  const isBalanced = isAuditable && diff < 1.0;
+  const isBalanced = isAuditable && Math.round(diff * 100) === 0;
 
   return {
     accountNumber: account.accountNumber,

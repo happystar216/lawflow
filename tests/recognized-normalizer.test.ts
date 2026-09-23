@@ -42,7 +42,7 @@ test('normalizer migrates a cached short account alias to the full listed accoun
   assert.equal(result.transactions[0].accountNumber, fullNumber);
 });
 
-test('normalizer repairs a page of one-off owner identifiers when adjacent pages agree', () => {
+test('normalizer preserves multiple explicit owner identifiers even when adjacent pages agree', () => {
   const transactions = [
     transaction('before', 1, '6214663610258281'),
     transaction('bad-a', 2, '1010050361692410653421440'),
@@ -50,8 +50,10 @@ test('normalizer repairs a page of one-off owner identifiers when adjacent pages
     transaction('after', 3, '6214663610258281')
   ];
   const result = normalizeRecognizedData(transactions.map(item => account(item.accountNumber, item.bankName)), transactions);
-  assert.deepEqual([...new Set(result.transactions.filter(item => item.rawPageNumber === 2).map(item => item.accountNumber))], ['6214663610258281']);
-  assert.equal(result.accounts.length, 1);
+  assert.deepEqual([...new Set(result.transactions.filter(item => item.rawPageNumber === 2).map(item => item.accountNumber))], [
+    '1010050361692410653421440', '1010050151692411896446025'
+  ]);
+  assert.equal(result.accounts.length, 3);
 });
 
 test('normalizer attaches unscoped parser commentary to one real account instead of creating a fake account', () => {
@@ -184,6 +186,33 @@ test('normalizer merges an OCR alias when duplicate rows corroborate it without 
   );
   assert.equal(result.accounts.length, 1);
   assert.equal(result.accounts[0].accountNumber, canonical);
+});
+
+test('normalizer keeps lookalike account numbers separate when overlapping rows contain repeated conflicts', () => {
+  const first = '2308014101100012218';
+  const second = '2308014101100042218';
+  const shared = (id: string, page: number, accountNumber: string, date: string, amount: number, balance: number, time: string) => ({
+    ...transaction(id, page, accountNumber, '中国工商银行'),
+    transactionDate: date,
+    transactionTime: `${date} ${time}`,
+    amount,
+    balance,
+    summary: '利息'
+  });
+  const rows = [
+    shared('a1', 29, first, '2023-06-21', 8.62, 16879.64, '00:54:31'),
+    shared('a2', 29, first, '2024-09-21', 6.48, 16910.17, '00:56:10'),
+    shared('a3', 29, first, '2025-02-25', 16903.99, 10.75, '11:38:01'),
+    shared('b1', 47, second, '2023-06-21', 8.62, 16879.64, '00:54:31'),
+    shared('b2', 47, second, '2024-09-21', 6.48, 16910.47, '00:56:40'),
+    shared('b3', 47, second, '2025-02-25', 16903.99, 10.75, '14:38:01')
+  ];
+  const result = normalizeRecognizedData(
+    [account(first, '中国工商银行', 3), account(second, '中国工商银行', 3)],
+    rows
+  );
+  assert.deepEqual(new Set(result.transactions.map(item => item.accountNumber)), new Set([first, second]));
+  assert.equal(result.accounts.length, 2);
 });
 
 test('normalizer repairs an isolated impossible OCR year from the account period', () => {

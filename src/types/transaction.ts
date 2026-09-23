@@ -37,7 +37,7 @@ export interface BankAccount {
 }
 
 export type ReviewIssueStatus = 'PENDING' | 'CONFIRMED' | 'CORRECTED' | 'UNRESOLVED';
-export type ReviewIssueCategory = 'PAGE_INTEGRITY' | 'BLANK_PAGE' | 'LOW_CONFIDENCE' | 'BALANCE_BREAK' | 'INVALID_AMOUNT' | 'INVALID_DATE' | 'INVALID_DIRECTION' | 'DATA_WARNING';
+export type ReviewIssueCategory = 'PAGE_INTEGRITY' | 'BLANK_PAGE' | 'LOW_CONFIDENCE' | 'CANDIDATE_CONFLICT' | 'BALANCE_BREAK' | 'INVALID_AMOUNT' | 'INVALID_DATE' | 'INVALID_DIRECTION' | 'DATA_WARNING';
 
 export interface EvidenceReviewIssue {
   id: string;
@@ -86,6 +86,17 @@ export interface SourceRegion {
 
 export interface StandardTransaction {
   id: string;
+  /** Versioned extraction contract: downstream analysis must not guess-edit fields. */
+  recognitionPolicy?: 'EVIDENCE_ONLY_V1';
+  /** Independent comparison evidence; never cleared by balance/zero-amount heuristics. */
+  candidateReview?: {
+    kind: 'FIELD_CONFLICT' | 'UNMATCHED_ROW' | 'AMBIGUOUS_ROW' | 'SOURCE_CHECK';
+    reason?: string;
+    requiredFields?: TransactionEvidenceField[];
+    differences: Array<{ field: TransactionEvidenceField; selected: string | number | null; alternative: string | number | null }>;
+    status: 'PENDING' | 'CONFIRMED' | 'UNRESOLVED';
+    reviewedAt?: string;
+  };
   accountNumber: string;
   accountName: string;
   bankName: string;

@@ -4,10 +4,10 @@
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "module": "ESNext",
     "moduleResolution": "bundler",
-    "types": ["node"],
+    "types": ["node", "vite/client"],
     "strict": true,
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["scripts/onlineDebugServer.ts"]
+  "include": ["scripts/onlineDebugServer.ts", "scripts/replayRecognition.ts", "scripts/recheckRecognitionPages.ts", "scripts/testRecognitionStorage.ts", "scripts/testRecognitionReview.ts"]
 }

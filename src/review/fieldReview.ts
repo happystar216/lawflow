@@ -34,6 +34,7 @@ export function applyRowReviewDecision(
   }
 
   if (decision === 'UNRESOLVED') {
+    if (next.candidateReview) next.candidateReview = { ...next.candidateReview, status: 'UNRESOLVED', reviewedAt };
     next.reviewStatus = 'PENDING';
     next.reviewedAt = reviewedAt;
     next.lawyerNote = appendNote(next.lawyerNote, '本行原件不清晰，字段暂未确认');
@@ -45,16 +46,25 @@ export function applyRowReviewDecision(
     : 'VERIFIED';
   next.reviewedBy = reviewedBy;
   next.reviewedAt = reviewedAt;
+  if (next.candidateReview) {
+    const required: TransactionEvidenceField[] = next.candidateReview.kind === 'FIELD_CONFLICT' || next.candidateReview.kind === 'SOURCE_CHECK'
+      ? [...new Set([...next.candidateReview.differences.map(item => item.field), ...(next.candidateReview.requiredFields || [])])]
+      : ['accountNumber', 'transactionTime', 'direction', 'amount', 'balance', 'counterpartyName', 'counterpartyAccount', 'summary'];
+    const resolved = required.every(field => next.fieldEvidence?.[field]?.decision === 'CONFIRMED'
+      && next.fieldEvidence?.[field]?.reviewedBy === reviewedBy);
+    next.candidateReview = { ...next.candidateReview, status: resolved ? 'CONFIRMED' : 'PENDING', reviewedAt };
+  }
   next.lawyerNote = appendNote(next.lawyerNote, decision === 'USE_ORIGINAL'
     ? '律师确认采用原始识别值'
     : '律师确认当前结构化值与原件一致');
   next.transactionDate = next.transactionTime.slice(0, 10);
   next.dataQualityIssues = (next.dataQualityIssues || []).filter(issue => {
     if (issue === 'INVALID_DATE' && fields.includes('transactionTime') && /^20\d{2}-\d{2}-\d{2}/.test(next.transactionTime)) return false;
-    if (issue === 'INVALID_AMOUNT' && fields.includes('amount') && next.amount > 0) return false;
+    if (issue === 'INVALID_AMOUNT' && fields.includes('amount') && Number.isFinite(next.amount) && next.amount >= 0) return false;
     if (issue === 'UNKNOWN_DIRECTION' && fields.includes('direction') && next.direction !== 'UNKNOWN') return false;
     return true;
   });
+  if (next.dataQualityIssues.length || (next.candidateReview && next.candidateReview.status !== 'CONFIRMED')) next.reviewStatus = 'PENDING';
   return next;
 }
 

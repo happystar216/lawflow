@@ -294,7 +294,7 @@ export function balanceContinuityIssues(
 
     const diff = Math.abs(expected - current.balance);
 
-    if (diff >= 1) {
+    if (Math.round(diff * 100) !== 0) {
       issues.push({
         previous,
         transaction: current,

@@ -1,6 +1,7 @@
 import { BankAccount, StandardTransaction } from '../types/transaction';
 import { accountIdentityKey, isReliableAccountNumber, normalizeAccountIdentityPart } from './accountIdentity';
 import { balanceContinuityIssues, chronologicalTransactions, isBalanceConfirmedZeroSettlement, isCreditCardStatement, isFeeWaiver } from './transactionSequence';
+import { isEvidenceOnly, sameSource } from '../recognition/decisionPolicy';
 
 export interface NormalizedRecognizedData {
   accounts: BankAccount[];
@@ -16,21 +17,28 @@ export function normalizeRecognizedData(
     accountNumber: canonicalStoredAccountNumber(account.accountNumber, account.fileName, account.sourceDocumentId, aliasCandidates),
     parseWarnings: account.parseWarnings?.map(publicParserWarning)
   }));
-  const preparedTransactions = restoreUnsupportedBalanceCorrections(inputTransactions.map(transaction => upgradeLegacyGeminiReviewStatus({
+  const protectedTransactions = inputTransactions.filter(isEvidenceOnly).map(transaction => structuredClone(transaction));
+  const preparedTransactions = restoreUnsupportedBalanceCorrections(inputTransactions.filter(transaction => !isEvidenceOnly(transaction)).map(transaction => upgradeLegacyGeminiReviewStatus({
     ...transaction,
     accountNumber: canonicalStoredAccountNumber(transaction.accountNumber, transaction.rawSourceFile, transaction.sourceDocumentId, aliasCandidates)
   })));
   const stabilized = repairOutlierOcrYears(restorePrintedDatesFromRawText(
     healSummaryOverriddenAmounts(stabilizePageAccountIdentities(preparedTransactions))
   ));
-  const { transactions: observations, mergedPagesByAccount } = deduplicateTransactions(stabilized);
+  const { transactions: observations, mergedPagesByAccount } = deduplicateTransactions([...stabilized, ...protectedTransactions]);
   const canonicalObservations = observations.filter(transaction => !transaction.excludedFromAnalysis);
-  const settlementRepaired = repairPeriodicSettlementRows(canonicalObservations);
+  const settlementRepaired = repairPeriodicSettlementRows(canonicalObservations.filter(transaction => !isEvidenceOnly(transaction)));
   const calibrated = calibrateDirectionsByBalanceMath(settlementRepaired);
-  const analyzedTransactions = healOcrBalanceAndAmountDiscrepancies(calibrated);
+  const analyzedTransactions = [
+    ...healOcrBalanceAndAmountDiscrepancies(calibrated),
+    ...canonicalObservations.filter(isEvidenceOnly)
+  ];
   const analyzedById = new Map(analyzedTransactions.map(transaction => [transaction.id, transaction]));
   const transactions = observations.map(transaction => analyzedById.get(transaction.id) || transaction);
   for (const transaction of transactions) {
+    // Protected observations retain every review reason, including missing zero
+    // amounts and candidate conflicts. Balance equality is not source evidence.
+    if (isEvidenceOnly(transaction)) continue;
     const isFeeWaiverRow = isFeeWaiver(transaction);
     const isConfirmedZeroSettlement = isBalanceConfirmedZeroSettlement(transaction, analyzedTransactions);
     if ((isFeeWaiverRow || isConfirmedZeroSettlement) && transaction.dataQualityIssues) {
@@ -40,7 +48,7 @@ export function normalizeRecognizedData(
         transaction.reviewStatus = 'AUTO_PASSED';
       }
     }
-    refreshFieldEvidence(transaction);
+    if (!isEvidenceOnly(transaction)) refreshFieldEvidence(transaction);
   }
   const transactionsByAccount = new Map<string, StandardTransaction[]>();
   for (const transaction of analyzedTransactions) {
@@ -136,7 +144,7 @@ export function normalizeRecognizedData(
       totalIn, totalOut, transactionCount: accountTransactions.length,
       startDate: dates[0] || '', endDate: dates[dates.length - 1] || '',
       startBalance, endBalance, balanceAvailable,
-      balanceDiff, isBalanced: balanceAvailable && balanceDiff < 1,
+      balanceDiff, isBalanced: balanceAvailable && Math.round(balanceDiff * 100) === 0,
       parseWarnings, coveredPages: pages,
       parseStatus: parseWarnings.length || hasDerivedIssues ? 'NEEDS_REVIEW' : 'COMPLETE',
       balanceContinuityIssueCount: continuityIssues.length,
@@ -486,12 +494,14 @@ export function cleanAccountHolderName(value: string): string {
 
 function stabilizePageAccountIdentities(input: StandardTransaction[]): StandardTransaction[] {
   const transactions = input.map(transaction => ({ ...transaction }));
-  const pages = new Map<number, StandardTransaction[]>();
+  const pages = new Map<string, StandardTransaction[]>();
   for (const transaction of transactions) {
     if (!transaction.rawPageNumber) continue;
-    pages.set(transaction.rawPageNumber, [...(pages.get(transaction.rawPageNumber) || []), transaction]);
+    const key = JSON.stringify([transaction.sourceDocumentId || transaction.rawSourceFile, transaction.rawPageNumber]);
+    pages.set(key, [...(pages.get(key) || []), transaction]);
   }
-  for (const [page, pageTransactions] of [...pages.entries()].sort((a, b) => a[0] - b[0])) {
+  for (const pageTransactions of [...pages.values()].sort((a, b) => (a[0].rawPageNumber || 0) - (b[0].rawPageNumber || 0))) {
+    const page = pageTransactions[0].rawPageNumber!;
     const reliable = pageTransactions.filter(item => isReliableAccountNumber(item.accountNumber));
     const reliableKeys = new Set(reliable.map(accountNumberKey));
     if (reliableKeys.size === 1) {
@@ -510,11 +520,10 @@ function stabilizePageAccountIdentities(input: StandardTransaction[]): StandardT
       }
       continue;
     }
-    const previous = [...transactions].reverse().find(item => (item.rawPageNumber || 0) < page && isReliableAccountNumber(item.accountNumber));
-    const next = transactions.find(item => (item.rawPageNumber || 0) > page && isReliableAccountNumber(item.accountNumber));
+    if (reliableKeys.size > 1) continue;
+    const previous = [...transactions].reverse().find(item => sameSource(item, pageTransactions[0]) && (item.rawPageNumber || 0) < page && isReliableAccountNumber(item.accountNumber));
+    const next = transactions.find(item => sameSource(item, pageTransactions[0]) && (item.rawPageNumber || 0) > page && isReliableAccountNumber(item.accountNumber));
     if (previous && next && accountNumberKey(previous) === accountNumberKey(next)) {
-      for (const transaction of pageTransactions) copyIdentity(transaction, previous);
-    } else if (previous) {
       for (const transaction of pageTransactions) copyIdentity(transaction, previous);
     }
   }
@@ -572,7 +581,11 @@ function unifyInterleavedStatementAccounts(transactions: StandardTransaction[]):
         // strings themselves are an obvious OCR variant and the page sequence
         // also provides corroborating continuity.
         const duplicateHits = crossAccountDuplicateHits(combined, acc1, acc2);
-        if (areLikelyOcrAccountAliases(acc1, acc2) && (continuousHits > 0 || transitions >= 2 || duplicateHits >= 2)) {
+        const conflictingOverlapHits = crossAccountConflictingOverlapHits(combined, acc1, acc2);
+        const hasMixedDuplicateAndConflictEvidence = duplicateHits >= 2 && conflictingOverlapHits >= 2;
+        if (areLikelyOcrAccountAliases(acc1, acc2)
+          && !hasMixedDuplicateAndConflictEvidence
+          && (continuousHits > 0 || transitions >= 2 || duplicateHits >= 2)) {
           const count1 = combined.filter(t => normalizeAccountIdentityPart(t.accountNumber) === acc1).length;
           const count2 = combined.filter(t => normalizeAccountIdentityPart(t.accountNumber) === acc2).length;
           const targetAcc = count1 >= count2 ? acc1 : acc2;
@@ -591,6 +604,29 @@ function unifyInterleavedStatementAccounts(transactions: StandardTransaction[]):
   }
 
   return transactions;
+}
+
+function crossAccountConflictingOverlapHits(
+  transactions: StandardTransaction[], leftAccount: string, rightAccount: string
+): number {
+  const left = transactions.filter(item => normalizeAccountIdentityPart(item.accountNumber) === leftAccount);
+  const right = transactions.filter(item => normalizeAccountIdentityPart(item.accountNumber) === rightAccount);
+  let conflicts = 0;
+  for (const a of left) {
+    const sameEvent = right.find(b =>
+      a.transactionDate === b.transactionDate
+      && a.direction === b.direction
+      && Math.abs(a.amount - b.amount) < 0.01
+    );
+    if (!sameEvent) continue;
+    const balanceConflict = a.balanceAvailable !== false && sameEvent.balanceAvailable !== false
+      && Math.abs(a.balance - sameEvent.balance) >= 0.01;
+    const timeA = extractTimeOfDay(a.transactionTime);
+    const timeB = extractTimeOfDay(sameEvent.transactionTime);
+    const timeConflict = Boolean(timeA && timeB && !timesCompatible(timeA, timeB));
+    if (balanceConflict || timeConflict) conflicts += 1;
+  }
+  return conflicts;
 }
 
 function areLikelyOcrAccountAliases(left: string, right: string): boolean {
@@ -887,6 +923,7 @@ export function deduplicateTransactions(transactions: StandardTransaction[]): De
 }
 
 function areTransactionsDuplicate(a: StandardTransaction, b: StandardTransaction): boolean {
+  if ((isEvidenceOnly(a) || isEvidenceOnly(b)) && a.rawPageNumber === b.rawPageNumber && sameSource(a, b)) return false;
   if (a.sourceDocumentId && b.sourceDocumentId && a.sourceDocumentId !== b.sourceDocumentId) return false;
   if ((!a.sourceDocumentId || !b.sourceDocumentId) && a.rawSourceFile !== b.rawSourceFile) return false;
   // 1. Account matching
@@ -927,6 +964,10 @@ function areTransactionsDuplicate(a: StandardTransaction, b: StandardTransaction
 
     // Both have identical balance, date, direction, amount, and compatible time
     if (a.rawPageNumber && b.rawPageNumber && a.rawPageNumber !== b.rawPageNumber) {
+      // Exact owner/date/direction/nonzero amount/balance across two printed
+      // pages is stronger than wording, which often changes across reprints.
+      if (isEvidenceOnly(a) && isEvidenceOnly(b) && isReliableAccountNumber(accA)
+        && accA === accB && a.amount > 0 && a.direction !== 'UNKNOWN' && a.direction === b.direction) return true;
       const sA = cleanSummaryForMatch(a.summary);
       const sB = cleanSummaryForMatch(b.summary);
       const cpA = cleanSummaryForMatch(a.counterpartyName);

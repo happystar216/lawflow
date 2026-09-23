@@ -61,7 +61,7 @@ export function normalizeMinerUPages(value: unknown): MinerUPageText[] {
     .sort(([left], [right]) => left - right)
     .map(([pageIndex, fragments]) => ({
       page: pageIndex + 1,
-      text: uniqueFragments(fragments).join('\n').replace(/\n{3,}/g, '\n\n').trim().slice(0, 12_000)
+      text: uniqueFragments(fragments).join('\n').replace(/\n{3,}/g, '\n\n').trim()
     }));
 }
 

@@ -1,13 +1,16 @@
 import { BankAccount, EvidenceReviewIssue, StandardTransaction } from '../types/transaction';
-import { transactionBelongsToAccount } from '../utils/accountIdentity';
+import { transactionBelongsToAccount, isReliableAccountNumber } from '../utils/accountIdentity';
 import { balanceContinuityIssues, daysBetween, isBalanceConfirmedZeroSettlement, isCreditCardStatement, isFeeWaiver } from '../utils/transactionSequence';
+import { isEvidenceOnly } from '../recognition/decisionPolicy';
+import { candidateReviewDescription, hasPendingCandidateReview } from './candidateReview';
 
 export function buildEvidenceReviewIssues(
   account: BankAccount,
   allTransactions: StandardTransaction[]
 ): EvidenceReviewIssue[] {
-  const transactions = allTransactions
-    .filter(transaction => transactionBelongsToAccount(transaction, account) && !transaction.excludedFromAnalysis)
+  const observations = allTransactions.filter(transaction => transactionBelongsToAccount(transaction, account));
+  const transactions = observations
+    .filter(transaction => !transaction.excludedFromAnalysis)
     .sort(compareSourceOrder);
   const generated: EvidenceReviewIssue[] = [];
   const unscopedWarnings: string[] = [];
@@ -15,9 +18,28 @@ export function buildEvidenceReviewIssues(
   for (const warning of account.parseWarnings || []) {
     if (isLegacyDerivedWarning(warning)) continue;
     let pageNumber = numberFrom(warning, /第\s*(\d+)\s*页/) || numberFrom(warning, /原PDF第\s*(\d+)\s*页/);
-    const isBlank = /空白|扫描残页|未识别到交易/.test(warning);
-    const isIntegrity = /汇总|缺少|漏|不完整|页面覆盖|识别失败|独立清点|独立行数复核|页面行数报告/.test(warning);
+    const isPlanningNotice = /账单分组提示：/.test(warning);
+    const isOwnerContinuation = /系统未据此改写流水账号/.test(warning);
+    if (pageNumber && (isPlanningNotice || isOwnerContinuation)) {
+      const affected = transactions.filter(row => row.rawPageNumber === pageNumber && !isReliableAccountNumber(row.accountNumber));
+      if (isOwnerContinuation && !affected.length) continue;
+      generated.push({
+        id: stableIssueId(`${account.accountNumber}|statement|${warning}`), category: 'DATA_WARNING',
+        severity: isOwnerContinuation ? 'REQUIRED' : 'ADVISORY',
+        title: `第 ${pageNumber} 页${isOwnerContinuation ? '确认流水所属账号' : '分组参考不可用'}`,
+        description: warning,
+        instructions: isOwnerContinuation
+          ? ['同时打开本页和提示中的参考页', '核对本方账号、表头和连续打印页码，确认是否同一账单', '只有归属明确后才填写相关流水的本方账号；不要仅凭相邻页判断']
+          : ['本页已独立识别，不需要仅因分组提示修改金额或日期', '若本方账号不明确，再对照原件确认归属'],
+        pageNumber, transactionIds: isOwnerContinuation ? affected.map(row => row.id) : [], status: 'PENDING'
+      });
+      continue;
+    }
+    const isBankIdentityNotice = /银行名称.*(?:原文依据|不一致)/.test(warning);
+    const isBlank = !isBankIdentityNotice && /空白|扫描残页|未识别到交易/.test(warning);
     const countComparison = parseCountComparison(warning);
+    const isIntegrity = !isBankIdentityNotice && (Boolean(countComparison)
+      || /汇总|缺少|漏|不完整|页面覆盖|识别失败|独立清点|独立行数复核|页面行数报告|请清点原件行数/.test(warning));
     if (!pageNumber && countComparison) pageNumber = inferUniquePageByCount(transactions, countComparison.detailCount);
     if (!pageNumber) {
       unscopedWarnings.push(warning);
@@ -57,15 +79,25 @@ export function buildEvidenceReviewIssues(
     });
   }
 
+  // Deduplication controls counting, not whether source identity/field doubts
+  // have been reviewed. Otherwise merging an account could hide its own task.
+  for (const row of observations.filter(hasPendingCandidateReview)) {
+    generated.push({ id: stableIssueId(`${account.accountNumber}|candidate|${row.id}`),
+      category: 'CANDIDATE_CONFLICT', severity: 'REQUIRED',
+      title: `第 ${row.rawPageNumber || '?'} 页第 ${row.rawRowIndex || '?'} 行：${row.candidateReview?.kind === 'SOURCE_CHECK' ? '核对标出的账号或数字' : row.candidateReview?.kind === 'FIELD_CONFLICT' ? '两次读取的字段不同' : '确认这行是否完整读取'}`,
+      description: candidateReviewDescription(row), instructions: ['找到原件对应行', '按列出的差异核对并填写原件值，不以余额推算值代替原件'],
+      pageNumber: row.rawPageNumber, transactionIds: [row.id], status: 'PENDING' });
+  }
   appendTransactionIssueGroup(generated, account, transactions, 'LOW_CONFIDENCE',
     transaction => (transaction.extractionConfidence ?? 1) < 0.8
-      || (transaction.reviewStatus === 'CORRECTED' && transaction.reviewedBy !== '律师人工核对'),
+      || (!isEvidenceOnly(transaction) && transaction.reviewStatus === 'CORRECTED' && transaction.reviewedBy !== '律师人工核对'),
     '识别或自动修正结果待核对', '本页有交易字段读取把握较低，或系统曾依据余额关系提出自动修正，需与原件逐字段核对。',
     ['核对交易日期和收支方向', '核对金额及交易后余额', '核对对手方和摘要']);
   appendTransactionIssueGroup(generated, account, transactions, 'INVALID_AMOUNT',
-    transaction => (transaction.amount <= 0 || Boolean(transaction.dataQualityIssues?.includes('INVALID_AMOUNT')))
-      && !isFeeWaiver(transaction)
-      && !isBalanceConfirmedZeroSettlement(transaction, transactions),
+    transaction => isEvidenceOnly(transaction)
+      ? Boolean(transaction.dataQualityIssues?.includes('INVALID_AMOUNT')) || transaction.amount < 0
+      : (transaction.amount <= 0 || Boolean(transaction.dataQualityIssues?.includes('INVALID_AMOUNT')))
+        && !isFeeWaiver(transaction) && !isBalanceConfirmedZeroSettlement(transaction, transactions),
     '交易金额异常', '本页有交易金额为零或未能可靠读取。',
     ['核对原件发生额', '确认相关行是否属于交易明细', '修正金额或说明无法确认的原因']);
   appendTransactionIssueGroup(generated, account, transactions, 'INVALID_DATE',

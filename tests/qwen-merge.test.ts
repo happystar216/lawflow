@@ -76,6 +76,28 @@ test('Qwen chunk merge separates multiple banks in one PDF into account tabs', (
   assert.equal(merged.accounts.every(item => item.balanceContinuityIssueCount === 0), true);
 });
 
+test('Qwen chunk merge prefers a page-local owner account over identity inherited from a previous bank', () => {
+  const first = chunk(1, 1, [transaction('first', 1, 1, 'IN', 1, 101)]);
+  first.totalPages = 2;
+  const localNumber = '6214570680000071050';
+  const localRow = {
+    ...transaction('local', 2, 1, 'IN', 0.82, 1069.53),
+    accountNumber: first.account.accountNumber,
+    bankName: first.account.bankName
+  };
+  const second = chunk(2, 2, [localRow]);
+  second.account = { ...account(), accountNumber: localNumber, bankName: '中国邮政储蓄银行' };
+  second.accounts = [second.account];
+  second.pageQuality = [{
+    page: 2, expectedCount: 1, extractedCount: 1, status: 'COMPLETE', pageType: 'TRANSACTIONS'
+  }];
+  const merged = mergeQwenChunkResults([first, second], '多银行流水.pdf', 2);
+
+  const row = merged.transactions.find(item => item.rawPageNumber === 2);
+  assert.equal(row?.accountNumber, localNumber);
+  assert.equal(row?.bankName, '中国邮政储蓄银行');
+});
+
 test('Qwen chunk merge preserves listed accounts that have no transaction rows', () => {
   const withAccountList = chunk(1, 1, [transaction('a', 1, 1, 'OUT', 100, 900)]);
   withAccountList.totalPages = 1;
@@ -88,6 +110,28 @@ test('Qwen chunk merge preserves listed accounts that have no transaction rows',
   assert.equal(merged.accounts.length, 2);
   assert.equal(merged.accounts.find(item => item.accountNumber === '62220002')?.transactionCount, 0);
   assert.equal(merged.accounts.find(item => item.accountNumber === '62220002')?.balanceAvailable, false);
+});
+
+test('Qwen chunk merge uses account-list identity instead of a generic bank guessed on a transaction page', () => {
+  const accountList = chunk(1, 1, []);
+  accountList.accounts = [{
+    ...account(), accountNumber: '22255301100017262', bankName: '中国农业银行', transactionCount: 0
+  }];
+  accountList.account = accountList.accounts[0];
+  accountList.pageQuality = [{
+    page: 1, expectedCount: 0, extractedCount: 0, status: 'COMPLETE', pageType: 'ACCOUNT_INFO'
+  }];
+  const ledgerTransaction = {
+    ...transaction('ledger', 2, 1, 'IN', 0.03, 57.48),
+    accountNumber: '255301100017262', bankName: '商业银行'
+  };
+  const ledger = chunk(2, 2, [ledgerTransaction]);
+  ledger.account = { ...account(), accountNumber: ledgerTransaction.accountNumber, bankName: ledgerTransaction.bankName };
+  const merged = mergeQwenChunkResults([accountList, ledger], '农业银行流水.pdf', 2);
+
+  assert.equal(merged.transactions[0].accountNumber, '22255301100017262');
+  assert.equal(merged.transactions[0].bankName, '中国农业银行');
+  assert.equal(merged.accounts[0].bankName, '中国农业银行');
 });
 
 test('Qwen chunk merge inherits the surrounding owner account for a headerless continuation page', () => {
@@ -134,6 +178,16 @@ test('Qwen chunk merge marks an incomplete-page warning for lawyer review withou
   assert.equal(merged.transactions.length, 1);
   assert.equal(merged.account.parseStatus, 'NEEDS_REVIEW');
   assert.match(merged.account.parseWarnings?.[0] || '', /补充核验/);
+});
+
+test('Qwen chunk merge does not create a count warning when review routes agree on the row count', () => {
+  const warned = chunk(1, 1, [transaction('a', 1, 1, 'OUT', 100, 900)]);
+  warned.totalPages = 1;
+  warned.pageQuality = [{
+    page: 1, expectedCount: 1, extractedCount: 1, status: 'NEEDS_REVIEW', pageType: 'TRANSACTIONS'
+  }];
+  const merged = mergeQwenChunkResults([warned], '流水.pdf', 1);
+  assert.doesNotMatch(merged.account.parseWarnings?.join('') || '', /页面行数报告/);
 });
 
 test('Qwen chunk merge detects reverse-chronological statements before reconciling balances', () => {

@@ -5,10 +5,11 @@ import { parseExcelBankStatement } from '../parsers/excelParser';
 import type { GeminiProgressInfo } from '../parsers/geminiPdfParser';
 import { parsePdfWithMinerU } from '../parsers/mineruBankStatementParser';
 import { deleteSourceDocument, saveSourceDocument } from '../store/sourceDocumentStore';
+import { createRecognitionCheckpointStore, clearRecognitionCheckpoints } from '../store/recognitionCheckpointStore';
 import { accountIdentityKey, transactionBelongsToAccount } from '../utils/accountIdentity';
 import { importErrorForUser } from '../utils/userFacingError';
 import { attachSourceProvenance, createExtractionRun, identifySourceDocument, sourceFilesWithoutTransactions, sourceIdentity, transactionCountsBySource } from '../utils/evidenceProvenance';
-import { publishAutomationImportState } from '../debug/automationBridge';
+import { publishAutomationImportState, publishRecognitionCheckpoint } from '../debug/automationBridge';
 import { normalizeRecognizedData } from '../utils/recognizedDataNormalizer';
 import { businessAccounts, incompleteRecognitionPages, isDocumentReviewAccount } from '../review/recognitionCompleteness';
 import {
@@ -149,6 +150,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
   const [progressInfo, setProgressInfo] = useState<GeminiProgressInfo | null>(null);
   const [statusText, setStatusText] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [resumeNotice, setResumeNotice] = useState<string | null>(null);
   const [isCancellable, setIsCancellable] = useState(false);
   const [importTasks, setImportTasks] = useState<ImportTask[]>([]);
   const [pendingPdfPlans, setPendingPdfPlans] = useState<PdfBankSplitPlan[]>([]);
@@ -252,7 +254,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
     setStatusText('正在停止当前文件解析…');
   };
 
-  const processFiles = async (files: FileList | File[]) => {
+  const processFiles = async (files: FileList | File[], forceFresh = false) => {
     if (isProcessing) {
       setErrorMessage('当前文件仍在处理中，请等待完成或停止后再添加文件。');
       return;
@@ -271,6 +273,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
 
     setIsProcessing(true);
     setErrorMessage(null);
+    setResumeNotice(null);
     setProgressInfo(null);
     setStatusText(null);
 
@@ -335,9 +338,12 @@ export const Step1Upload: React.FC<Step1Props> = ({
           const controller = new AbortController();
           abortControllerRef.current = controller;
           setIsCancellable(true);
-          // The previous visual classification/splitting pipeline is bypassed.
-          // MinerU extracts the complete document first; that complete result is
-          // then sent to the language model once for the final account and row JSON.
+          if (forceFresh) {
+            try { await clearRecognitionCheckpoints(caseId, file.name, source.documentId); }
+            catch { setResumeNotice('旧进度未能清除，但本次会忽略旧进度，从头识别。'); }
+          }
+          // Read the document once, organize individual pages, retain evidence,
+          // and validate without guessing changes to extracted financial fields.
           const { accounts: parsedAccounts, transactions: parsedTx } = await parsePdfWithMinerU(
             file,
             (info: GeminiProgressInfo) => {
@@ -346,7 +352,14 @@ export const Step1Upload: React.FC<Step1Props> = ({
             },
             controller.signal,
             {
-              respondentName: caseRespondentName
+              respondentName: caseRespondentName,
+              resumeStore: createRecognitionCheckpointStore(caseId, source.documentId, file.name, caseRespondentName || ''),
+              forceFresh,
+              onResumeWarning: setResumeNotice,
+              onPageCheckpoint: checkpoint => publishRecognitionCheckpoint(checkpoint, {
+                documentId: source.documentId, runId: extractionRun.id,
+                fileName: file.name, totalPages: checkpoint.selected.totalPages
+              })
             }
           );
           let sourceStored = true;
@@ -386,12 +399,12 @@ export const Step1Upload: React.FC<Step1Props> = ({
           status: 'WARNING',
           title: `“${file.name}”仅完成部分识别`,
           message: `已保留 ${importedTransactionCount} 笔流水和 ${importedAccountCount} 个账户，但仍有 ${incompletePages.length} 页未能可靠识别。`,
-          impact: `未完成页面：第 ${incompletePages.join('、')} 页。请点击“重新识别”自动补齐；补齐或人工录入前不能进入资金分析。`,
+          impact: `未完成页面：第 ${incompletePages.join('、')} 页。请点击“继续未完成页”补齐；补齐或人工录入前不能进入资金分析。`,
           retryable: true,
           transactionCount: importedTransactionCount,
           accountCount: importedAccountCount,
           diagnosticCode: 'PDF_INCOMPLETE_PAGES',
-          diagnosis: '识别服务在这些页面连续失败。已成功页面已经缓存，重新识别时会优先补偿失败页。'
+          diagnosis: '这些页面尚未完整读取。点击“继续未完成页”会读取本机保存的进度，补齐失败或仍需复核的页面；如怀疑原文提取有问题，可选择“从头识别”。'
         } : sourceStorageWarning ? {
           status: 'WARNING',
           title: `“${file.name}”已导入，但原件未保存`,
@@ -403,7 +416,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
         } : {
           status: 'SUCCESS',
           title: `“${file.name}”已导入`,
-          message: `${name.endsWith('.pdf') ? 'MinerU 提取及大模型整理完成，' : ''}共读取 ${importedTransactionCount} 笔流水，识别出 ${importedAccountCount} 个账户。`,
+          message: `共读取 ${importedTransactionCount} 笔流水，识别出 ${importedAccountCount} 个账户。`,
           transactionCount: importedTransactionCount,
           accountCount: importedAccountCount
         });
@@ -1062,7 +1075,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
               {zeroTransactionFiles.length} 个文件未识别到流水明细
             </div>
             <p className="text-xs mt-1 leading-relaxed">
-              这些文件已保留，但不会计入后续资金分析，也不能单独进入下一步。请确认原件是否确实无交易；如有流水，请点击下方“重新识别”，或删除后上传更清晰的文件。
+              这些文件已保留，但不会计入后续资金分析，也不能单独进入下一步。请确认原件是否确实无交易；如有流水，请选择“从头识别”，或删除后上传更清晰的文件。
             </p>
             <p className="text-[11px] mt-2 text-amber-800 break-all">
               {zeroTransactionFiles.join('、')}
@@ -1128,17 +1141,26 @@ export const Step1Upload: React.FC<Step1Props> = ({
                       </div>
                     </div>
                     {task.retryable && !isActive && (
+                      <div className="flex flex-col gap-2 flex-shrink-0">
                       <button
                         type="button"
-                        onClick={() => task.file.type === 'application/pdf'
-                          ? processFiles([task.file])
+                        onClick={() => task.file.type === 'application/pdf' || task.file.name.toLowerCase().endsWith('.pdf')
+                          ? processFiles([task.file], task.status === 'EMPTY')
                           : handleFiles([task.file])}
                         disabled={isProcessing}
                         className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-slate-300 bg-white text-slate-700 hover:bg-slate-50 text-[11px] font-medium disabled:opacity-50 flex-shrink-0"
                       >
                         <RotateCcw className="w-3.5 h-3.5" />
-                        重新识别
+                        {task.file.name.toLowerCase().endsWith('.pdf') ? task.status === 'EMPTY' ? '从头识别' : '继续未完成页' : '重新识别'}
                       </button>
+                      {task.file.name.toLowerCase().endsWith('.pdf') && task.status !== 'EMPTY' && (
+                        <button type="button" disabled={isProcessing}
+                          onClick={() => processFiles([task.file], true)}
+                          className="text-[11px] text-slate-500 underline disabled:opacity-50">
+                          从头识别（不使用上次进度）
+                        </button>
+                      )}
+                      </div>
                     )}
                   </div>
                 </div>
@@ -1147,6 +1169,8 @@ export const Step1Upload: React.FC<Step1Props> = ({
           </div>
         </div>
       )}
+
+      {resumeNotice && <p role="status" className="rounded-lg bg-amber-50 p-3 text-xs text-amber-800">{resumeNotice}</p>}
 
       {/* Uploaded Accounts List */}
       {accounts.length > 0 && (

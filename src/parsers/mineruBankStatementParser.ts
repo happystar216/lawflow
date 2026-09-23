@@ -1,6 +1,17 @@
 import { BankAccount, FlowDirection, StandardTransaction } from '../types/transaction';
 import { extractPdfStructureWithMinerU, MinerUProgress } from './mineruPdfParser';
 import { MinerUStructuredBlock, MinerUStructuredDocument } from './mineruResultParser';
+import { mergeQwenChunkResults, QwenChunkResult } from './qwenResultMerger';
+import { preserveExtraction } from '../recognition/decisionPolicy';
+import { selectPageCandidate } from '../recognition/pageCandidates';
+import { resolveDocumentOwners } from '../recognition/documentOwners';
+import { buildPageContexts, buildStatementContexts, type PageContext } from '../recognition/pageContext';
+import { recognitionInputKey, reusablePage, type RecognitionResumeStore } from '../recognition/resume';
+import { buildStatementPlan, type StatementPagePlan } from '../recognition/statementPlan';
+import { requestStatementPlan } from '../recognition/statementPlanningClient';
+import { requireSourceCheck, sourceValidationRisks } from '../recognition/documentValidation';
+import { canonicalBank } from '../recognition/bankEvidence';
+import { isReliableAccountNumber } from '../utils/accountIdentity';
 
 export interface MinerUDirectProgressInfo {
   statusText: string;
@@ -13,6 +24,43 @@ export interface MinerUDirectProgressInfo {
 export interface MinerUDirectOptions {
   respondentName?: string;
   sourceTotalPages?: number;
+  normalizationMode?: 'PAGE' | 'DOCUMENT';
+  onPageCheckpoint?: (checkpoint: MinerUPageCheckpoint) => void;
+  resumeStore?: RecognitionResumeStore;
+  forceFresh?: boolean;
+  onResumeWarning?: (message: string) => void;
+  statementPlanning?: boolean;
+}
+
+export interface MinerUPageCheckpoint {
+  version: 1;
+  page: number;
+  source: MinerUPageContent;
+  candidates: Array<{ route: 'MINERU' | 'ORIGINAL_PDF'; result: QwenChunkResult }>;
+  selected: QwenChunkResult;
+  context?: PageContext;
+  reused?: boolean;
+  statement?: StatementPagePlan;
+  sourceValidation?: { status: 'COMPARED' | 'FAILED'; reasons: string[] };
+}
+
+interface MinerUPageContent {
+  page: number;
+  blocks: Array<{
+    order: number;
+    type: string;
+    content: string;
+    bbox?: [number, number, number, number];
+  }>;
+}
+
+interface MinerUDocumentRequest {
+  mode?: 'DOCUMENT' | 'PAGE';
+  sourceFileName: string;
+  respondentName: string;
+  totalPages: number;
+  pages: MinerUPageContent[];
+  context?: PageContext;
 }
 
 interface ParsedTable {
@@ -30,7 +78,7 @@ interface ListedAccount {
   balance?: number;
 }
 
-const ACCOUNT_NUMBER_HEADERS = ['账号', '账户号', '账户号码', '本方账号', '交易账号', '卡号'];
+const ACCOUNT_NUMBER_HEADERS = ['账号', '账户号', '账户号码', '本方账号', '交易账号', '客户账号', '账/卡号', '卡号'];
 const ACCOUNT_NAME_HEADERS = ['姓名', '户名', '账户名称', '客户名称', '客户姓名'];
 const DATE_HEADERS = ['交易日期', '交易日', '记账日期', '入账日期', '发生日期', '账务日期', '日期'];
 const TIME_HEADERS = ['交易时间', '记账时间', '发生时间', '时间'];
@@ -56,23 +104,35 @@ export async function parsePdfWithMinerU(
   onProgress?.({
     statusText: '正在把原始 PDF 提交给 MinerU…', totalTransactions: 0, percent: 1, isStreaming: true
   });
-  const document = await extractPdfStructureWithMinerU(file, totalPages, progress => {
+  const resume = options?.resumeStore;
+  let cachedDocument: MinerUStructuredDocument | undefined;
+  if (resume && !options?.forceFresh) {
+    try { cachedDocument = await resume.loadDocument(); }
+    catch { options?.onResumeWarning?.('无法读取上次进度，本次将从头识别；案件原有数据不受影响。'); }
+  }
+  assertNotAborted(signal);
+  const document = cachedDocument || await extractPdfStructureWithMinerU(file, totalPages, progress => {
     onProgress?.(mineruProgress(progress, totalPages));
   }, signal);
+  if (resume && !cachedDocument) {
+    try { await resume.saveDocument(document); }
+    catch { options?.onResumeWarning?.('浏览器无法保存识别进度。本次仍会继续，但关闭页面后可能需要从头识别。'); }
+  }
+  const normalizationMode = options?.normalizationMode || 'PAGE';
   onProgress?.({
-    statusText: 'MinerU 已返回完整结果，正在一次性交给大模型整理…',
-    totalTransactions: 0,
-    percent: 92,
-    isStreaming: true
+    statusText: normalizationMode === 'PAGE'
+      ? cachedDocument ? '已恢复文档读取结果，正在补齐尚未完成或需要复核的页面…' : '文档读取完成，正在逐页整理文字和表格…'
+      : 'MinerU 已返回完整结果，正在一次性交给大模型整理…',
+    totalTransactions: 0, percent: 27, isStreaming: true
   });
-  const result = await normalizeWholeMinerUDocument(
-    document,
-    file.name,
-    options?.respondentName || '',
-    totalPages,
-    onProgress,
-    signal
-  );
+  const result = normalizationMode === 'DOCUMENT'
+    ? await normalizeWholeMinerUDocument(
+        document, file.name, options?.respondentName || '', totalPages, onProgress, signal
+      )
+    : await normalizeMinerUDocumentByPage(
+        file, document, file.name, options?.respondentName || '', totalPages, onProgress, signal, options?.onPageCheckpoint,
+        { ...options, statementPlanning: options?.statementPlanning !== false }
+      );
   onProgress?.({
     statusText: `MinerU 提取及大模型整理完成，共读取 ${result.transactions.length} 笔流水`,
     totalTransactions: result.transactions.length,
@@ -149,7 +209,7 @@ export function buildMinerUWholeDocumentRequest(
   sourceFileName: string,
   respondentName: string,
   totalPages: number
-): Record<string, unknown> {
+): MinerUDocumentRequest {
   const blocksByPage = new Map<number, MinerUStructuredBlock[]>();
   for (const block of document.blocks) {
     blocksByPage.set(block.page, [...(blocksByPage.get(block.page) || []), block]);
@@ -158,14 +218,683 @@ export function buildMinerUWholeDocumentRequest(
   const pages = Array.from({ length: totalPages }, (_, index) => {
     const page = index + 1;
     const blocks = blocksByPage.get(page) || [];
-    const textBlocks = blocks.filter(block => !block.tableHtml).map(block => block.text).filter(Boolean);
+    const orderedBlocks = blocks.flatMap((block, blockIndex) => {
+      const content = String(block.tableHtml || block.text || '').trim();
+      if (!content) return [];
+      return [{
+        order: blockIndex + 1,
+        type: block.tableHtml ? 'table' : (block.type || 'text'),
+        content,
+        ...(block.bbox ? { bbox: block.bbox } : {})
+      }];
+    });
+    const fallbackText = String(pageText.get(page) || '').trim();
     return {
       page,
-      text: textBlocks.length ? [...new Set(textBlocks)].join('\n') : pageText.get(page) || '',
-      tables: blocks.filter(block => block.tableHtml).map(block => block.tableHtml || '').filter(Boolean)
+      blocks: orderedBlocks.length ? orderedBlocks : (fallbackText ? [{
+        order: 1, type: 'raw_text', content: fallbackText
+      }] : [])
     };
   });
   return { sourceFileName, respondentName, totalPages, pages };
+}
+
+const MINERU_PAGE_NORMALIZATION_CONCURRENCY = 2;
+
+export async function normalizeMinerUDocumentByPage(
+  sourceFile: File,
+  document: MinerUStructuredDocument,
+  sourceFileName: string,
+  respondentName: string,
+  totalPages: number,
+  onProgress?: (info: MinerUDirectProgressInfo) => void,
+  signal?: AbortSignal,
+  onPageCheckpoint?: (checkpoint: MinerUPageCheckpoint) => void,
+  options?: Pick<MinerUDirectOptions, 'resumeStore' | 'forceFresh' | 'onResumeWarning' | 'statementPlanning'>
+): Promise<{ account: BankAccount; accounts: BankAccount[]; transactions: StandardTransaction[] }> {
+  const request = buildMinerUWholeDocumentRequest(document, sourceFileName, respondentName, totalPages);
+  const contextPages = request.pages.map(page => {
+    const firstTable = page.blocks.findIndex(block => block.type === 'table');
+    const headerBlocks = page.blocks.slice(0, firstTable < 0 ? page.blocks.length : firstTable)
+      .filter(block => block.content.length <= 1000 && !/(?:\d{4}[-/]\d{2}[-/]\d{2}|\b(?:19|20)\d{2}[01]\d[0-3]\d\b)/.test(block.content));
+    // Carry only explicit HTML header cells, never neighboring transaction rows.
+    const tableHeaders = page.blocks.filter(block => block.type === 'table').flatMap(block => {
+      const thead = block.content.match(/<thead\b[^>]*>[\s\S]*?<\/thead>/i)?.[0];
+      const thRow = block.content.match(/<tr\b[^>]*>\s*<th\b[\s\S]*?<\/tr>/i)?.[0];
+      const content = thead || thRow;
+      return content && content.length <= 2000 ? [{ order: block.order, type: 'table_header', content }] : [];
+    });
+    return {
+      page: page.page, ownerAccounts: explicitOwnerAccountsFromMinerUPage(page),
+      bank: inferBankName(headerBlocks.map(block => block.content).join('\n'), '') || '',
+      headers: [...headerBlocks.slice(0, 4), ...tableHeaders.slice(0, 2)]
+    };
+  });
+  let statements: Map<number, StatementPagePlan> | undefined;
+  if (options?.statementPlanning) {
+    onProgress?.({ statusText: '正在分析账单边界和续页关系…', percent: 27, totalTransactions: 0, isStreaming: true });
+    const descriptors = await requestStatementPlan(request.pages, {
+      signal, resumeStore: options.resumeStore, forceFresh: options.forceFresh, onWarning: options.onResumeWarning,
+      onProgress: completed => onProgress?.({ statusText: `已分析 ${completed}/${totalPages} 页的账单边界`,
+        percent: 27 + Math.floor(Math.min(completed, totalPages) / Math.max(1, totalPages) * 8),
+        totalTransactions: 0, isStreaming: true })
+    });
+    for (const descriptor of descriptors) {
+      const printed = contextPages.find(page => page.page === descriptor.page)!;
+      const proposed = descriptor.accounts.map(account => account.value.replace(/[\s-]/g, ''));
+      const bankKey = canonicalBank;
+      if ((printed.ownerAccounts.length && proposed.length && (printed.ownerAccounts.length !== proposed.length
+        || printed.ownerAccounts.some(number => !proposed.includes(number))))
+        || (printed.bank && descriptor.bank && bankKey(printed.bank) !== bankKey(descriptor.bank.value))) {
+        descriptor.relation = 'UNKNOWN';
+        descriptor.issues.push('分组判断与本页明确账号或银行抬头冲突，已停止跨页关联');
+      }
+    }
+    statements = buildStatementPlan(descriptors, totalPages);
+  }
+  const contexts = statements ? buildStatementContexts(statements, contextPages) : buildPageContexts(contextPages);
+  const pageTextByNumber = new Map(document.pages.map(page => [page.page, page.text]));
+  const plans = await Promise.all(request.pages.map(async page => {
+    const context = contexts.get(page.page);
+    const statement = statements?.get(page.page);
+    const inputKey = options?.resumeStore ? await recognitionInputKey({ page, context, statement,
+      sourcePageText: pageTextByNumber.get(page.page) || '', totalPages, sourceFileName, respondentName }) : '';
+    let cached: MinerUPageCheckpoint | undefined;
+    if (options?.resumeStore && !options.forceFresh) {
+      try { cached = await options.resumeStore.loadPage(page.page, inputKey); }
+      catch { options.onResumeWarning?.('无法读取部分页面的进度，相关页面会重新识别。'); }
+    }
+    return { page, context, statement, inputKey, cached: reusablePage(cached, page.page) ? cached : undefined, strategy: mineruPageStrategy(page) };
+  }));
+  const fallbackPages = plans
+    .filter(plan => !plan.cached && (plan.strategy === 'ORIGINAL_PDF' || plan.strategy === 'MODEL_AND_ORIGINAL_PDF'))
+    .map(plan => plan.page.page);
+  const fallbackFiles = fallbackPages.length
+    ? await createOriginalPageFiles(sourceFile, fallbackPages)
+    : new Map<number, File>();
+  const checkpoints: MinerUPageCheckpoint[] = [];
+  let cursor = 0;
+  let completed = 0;
+  let totalTransactions = 0;
+
+  const report = (page: number, status: string) => onProgress?.({
+    statusText: `${status}（${completed}/${totalPages} 页），累计 ${totalTransactions} 笔流水`,
+    totalTransactions,
+    percent: Math.min(90, 35 + Math.floor(completed / Math.max(1, totalPages) * 55)),
+    currentBank: `第 ${page} 页`,
+    isStreaming: true
+  });
+
+  const worker = async () => {
+    while (true) {
+      assertNotAborted(signal);
+      const index = cursor++;
+      if (index >= plans.length) return;
+      const plan = plans[index];
+      if (plan.cached) {
+        const checkpoint = { ...structuredClone(plan.cached), reused: true };
+        checkpoints.push(checkpoint);
+        onPageCheckpoint?.(checkpoint);
+        completed += 1;
+        totalTransactions += checkpoint.selected.transactions.length;
+        report(plan.page.page, `已恢复第 ${plan.page.page} 页`);
+        continue;
+      }
+      const candidates: MinerUPageCheckpoint['candidates'] = [];
+      let result: QwenChunkResult;
+      if (plan.strategy === 'BLANK') {
+        result = emptyMinerUPageResult(plan.page.page, totalPages, sourceFileName, respondentName);
+      } else if (plan.strategy === 'MODEL_AND_ORIGINAL_PDF') {
+        const fallback = fallbackFiles.get(plan.page.page);
+        const [modelAttempt, originalAttempt] = await Promise.all([
+          attemptPageResult(requestMinerUPageWithRetry(
+            { ...request, mode: 'PAGE', pages: [plan.page], context: plan.context }, plan.page.page, sourceFileName,
+            respondentName, totalPages, signal
+          ), signal),
+          fallback
+            ? attemptPageResult(requestOriginalPdfPage(
+                fallback, plan.page.page, totalPages, sourceFileName, respondentName, signal
+              ), signal)
+            : Promise.resolve<{ result?: QwenChunkResult; error?: unknown }>({
+                error: new Error('未能生成原PDF单页补救文件')
+              })
+        ]);
+        if (modelAttempt.result) candidates.push({ route: 'MINERU', result: structuredClone(modelAttempt.result) });
+        if (originalAttempt.result) candidates.push({ route: 'ORIGINAL_PDF', result: structuredClone(originalAttempt.result) });
+        if (modelAttempt.result && originalAttempt.result) {
+          result = selectPageCandidate(modelAttempt.result, originalAttempt.result, plan.page.page, true);
+        } else if (modelAttempt.result || originalAttempt.result) {
+          result = addPageRecoveryWarning(
+            (modelAttempt.result || originalAttempt.result)!, plan.page.page,
+            modelAttempt.error || originalAttempt.error
+          );
+        } else {
+          result = failedMinerUPageResult(
+            plan.page.page, totalPages, sourceFileName, respondentName,
+            originalAttempt.error || modelAttempt.error || new Error('MinerU 与原PDF均未能读取本页')
+          );
+        }
+      } else if (plan.strategy === 'ORIGINAL_PDF') {
+        const fallback = fallbackFiles.get(plan.page.page);
+        result = fallback
+          ? await requestOriginalPdfPage(fallback, plan.page.page, totalPages, sourceFileName, respondentName, signal)
+              .catch(error => recoverPageFailure(
+                error, signal, plan.page.page, totalPages, sourceFileName, respondentName
+              ))
+          : failedMinerUPageResult(
+              plan.page.page, totalPages, sourceFileName, respondentName, new Error('未能生成原PDF单页补救文件')
+            );
+      } else {
+        result = await requestMinerUPageWithRetry(
+          { ...request, mode: 'PAGE', pages: [plan.page], context: plan.context }, plan.page.page, sourceFileName,
+          respondentName, totalPages, signal
+        ).catch(error => recoverPageFailure(
+          error, signal, plan.page.page, totalPages, sourceFileName, respondentName
+        ));
+      }
+      if (!candidates.length) candidates.push({
+        route: plan.strategy === 'ORIGINAL_PDF' ? 'ORIGINAL_PDF' : 'MINERU', result: structuredClone(result)
+      });
+      result = { ...result, transactions: result.transactions.map(preserveExtraction) };
+      const sourcePage = {
+        ...plan.page,
+        blocks: [
+          ...plan.page.blocks,
+          ...((pageTextByNumber.get(plan.page.page) || '').trim() ? [{
+            order: plan.page.blocks.length + 1,
+            type: 'source_page_text',
+            content: pageTextByNumber.get(plan.page.page) || ''
+          }] : [])
+        ]
+      };
+      // OCR text is another observation, not an authority over a PDF reading.
+      if (!candidates.some(candidate => candidate.route === 'ORIGINAL_PDF')) result = anchorPageResultToMinerUOwner(result, sourcePage);
+      if (plan.context?.basis === 'PROPOSED_CONTINUATION'
+        && result.transactions.some(row => !isReliableAccountNumber(row.accountNumber))) {
+        const reference = plan.context.references[0];
+        result.warnings = [...(result.warnings || []),
+          `第 ${plan.page.page} 页未明确列出本方账号，可能续接第 ${reference.page} 页（账号 ${reference.matchedAccountNumbers[0]}）。请对照两页的打印页码和表头确认归属；系统未据此改写流水账号。`];
+      }
+      if (plan.statement?.descriptor.issues.length) result.warnings = [...(result.warnings || []),
+        `第 ${plan.page.page} 页账单分组提示：${plan.statement.descriptor.issues.join('；')}。本页流水仍独立读取。`];
+      const checkpoint: MinerUPageCheckpoint = { version: 1, page: plan.page.page, source: sourcePage,
+        context: plan.context, statement: plan.statement, candidates, selected: structuredClone(result) };
+      checkpoints.push(checkpoint);
+      if (options?.resumeStore) {
+        try { await options.resumeStore.savePage(checkpoint, plan.inputKey); }
+        catch { options.onResumeWarning?.('浏览器无法保存部分页面的进度。本次仍会继续，重试时这些页面可能需要重新识别。'); }
+      }
+      onPageCheckpoint?.(checkpoint);
+      completed += 1;
+      totalTransactions += result.transactions.length;
+      report(
+        plan.page.page,
+        plan.strategy === 'ORIGINAL_PDF' || plan.strategy === 'MODEL_AND_ORIGINAL_PDF'
+          ? `已补识别第 ${plan.page.page} 页`
+          : `已整理第 ${plan.page.page} 页`
+      );
+    }
+  };
+
+  await Promise.all(Array.from(
+    { length: Math.min(MINERU_PAGE_NORMALIZATION_CONCURRENCY, plans.length) }, () => worker()
+  ));
+  assertNotAborted(signal);
+  // A structurally complete OCR table can still contain wrong digits. Validate
+  // the full document before accepting it and reread only suspect source pages.
+  const risks = sourceValidationRisks(checkpoints);
+  const resolved = resolveDocumentOwners(checkpoints);
+  const identityPages = new Set(checkpoints.filter((_checkpoint, i) => resolved[i].transactions.some(row =>
+    row.candidateReview?.kind === 'SOURCE_CHECK' && (row.candidateReview.differences.some(item => item.field === 'accountNumber')
+      || row.candidateReview.requiredFields?.includes('accountNumber')))).map(checkpoint => checkpoint.page));
+  const suspect = checkpoints.filter(checkpoint => (risks.has(checkpoint.page) || identityPages.has(checkpoint.page))
+    && !checkpoint.candidates.some(candidate => candidate.route === 'ORIGINAL_PDF') && !checkpoint.sourceValidation);
+  let verificationFiles = new Map<number, File>();
+  if (suspect.length) {
+    report(0, `正在对照原PDF复核 ${suspect.length} 页的数字或账号`);
+    try { verificationFiles = await createOriginalPageFiles(sourceFile, suspect.map(checkpoint => checkpoint.page)); }
+    catch (error) { assertNotAborted(signal); options?.onResumeWarning?.('无法准备原页复核，疑点将保留供人工核对。'); }
+  }
+  let verifyCursor = 0;
+  let verified = 0;
+  await Promise.all(Array.from({ length: Math.min(MINERU_PAGE_NORMALIZATION_CONCURRENCY, suspect.length) }, async () => {
+    while (verifyCursor < suspect.length) {
+      assertNotAborted(signal);
+      const checkpoint = suspect[verifyCursor++];
+      const file = verificationFiles.get(checkpoint.page);
+      const attempt = file ? await attemptPageResult(requestOriginalPdfPage(file, checkpoint.page, totalPages,
+        sourceFileName, respondentName, signal), signal) : { error: new Error('无法读取原PDF页') };
+      const reasons = [...new Set(risks.get(checkpoint.page)?.values() || [])];
+      if (identityPages.has(checkpoint.page)) reasons.push('本方账号存在不同读法，直接查看原页确认');
+      if (attempt.result) {
+        checkpoint.candidates.push({ route: 'ORIGINAL_PDF', result: structuredClone(attempt.result) });
+        const previousCount = checkpoint.selected.transactions.length;
+        checkpoint.selected = selectPageCandidate(checkpoint.selected, attempt.result, checkpoint.page);
+        totalTransactions += checkpoint.selected.transactions.length - previousCount;
+      }
+      checkpoint.sourceValidation = { status: attempt.result ? 'COMPARED' : 'FAILED', reasons };
+      // Agreement between two readings does not explain a remaining arithmetic
+      // discontinuity. Keep the precise rows pending; never repair their values.
+      const remaining = sourceValidationRisks([checkpoint]).get(checkpoint.page);
+      for (const row of checkpoint.selected.transactions) {
+        const reason = remaining?.get(row.id);
+        if (reason) requireSourceCheck(row, ['amount', 'direction', 'balance'], reason);
+      }
+      if (!attempt.result) checkpoint.selected.warnings = [...(checkpoint.selected.warnings || []),
+        `第 ${checkpoint.page} 页原页复核未完成：${attempt.error instanceof Error ? attempt.error.message.slice(0, 200) : '服务未返回结果'}。已有识别保留，疑点未自动通过。`];
+      const plan = plans.find(plan => plan.page.page === checkpoint.page)!;
+      if (options?.resumeStore) {
+        try { await options.resumeStore.savePage(checkpoint, plan.inputKey); }
+        catch { options.onResumeWarning?.('原页复核结果未能保存，下次可能需要重新复核。'); }
+      }
+      onPageCheckpoint?.(structuredClone(checkpoint));
+      verified++;
+      onProgress?.({
+        statusText: `已复核原页 ${verified}/${suspect.length}（${completed}/${totalPages} 页），累计 ${totalTransactions} 笔流水`,
+        totalTransactions,
+        percent: 90 + Math.floor(verified / suspect.length * 9),
+        currentBank: `第 ${checkpoint.page} 页`,
+        isStreaming: true
+      });
+    }
+  }));
+  assertNotAborted(signal);
+  return mergeQwenChunkResults(resolveDocumentOwners(checkpoints), sourceFileName, totalPages);
+}
+
+function mineruPageStrategy(page: MinerUPageContent): 'MODEL' | 'ORIGINAL_PDF' | 'MODEL_AND_ORIGINAL_PDF' | 'BLANK' {
+  const text = page.blocks.map(block => block.content).join('\n').trim();
+  const tableBlocks = page.blocks.filter(block => block.type === 'table');
+  if (!tableBlocks.length && /Ground Truth image|OCR result should be empty|UNDERSCORE\s*&\s*LINE RULES/i.test(text)) {
+    return 'BLANK';
+  }
+  if (!tableBlocks.length && (
+    !text
+    || /无法识别/.test(text)
+    || /^\s*[{}]\s*$/.test(text)
+    || /\\therefore|\b1\.\s*2\.\s*3\.\s*4\.\s*5\./i.test(text)
+  )) return 'ORIGINAL_PDF';
+  if (tableBlocks.some(block => isStructurallyDamagedTransactionTable(block.content))) return 'MODEL_AND_ORIGINAL_PDF';
+  return 'MODEL';
+}
+
+function isStructurallyDamagedTransactionTable(tableHtml: string): boolean {
+  if (!/交易日期|记账日期|交易金额|发生额/.test(tableHtml)) return false;
+  // MinerU occasionally collapses the remainder of a dense ledger into one
+  // very wide cell. Sending that HTML to the organizer silently loses every
+  // following row, so this page must be reread from the original PDF image.
+  return [...tableHtml.matchAll(/<td\b[^>]*\bcolspan\s*=\s*["']?(\d+)/gi)]
+    .some(match => Number(match[1]) >= 4);
+}
+
+
+async function attemptPageResult(
+  promise: Promise<QwenChunkResult>, signal?: AbortSignal
+): Promise<{ result?: QwenChunkResult; error?: unknown }> {
+  try {
+    return { result: await promise };
+  } catch (error) {
+    assertNotAborted(signal);
+    return { error };
+  }
+}
+
+
+function addPageRecoveryWarning(result: QwenChunkResult, page: number, error: unknown): QwenChunkResult {
+  const message = error instanceof Error ? error.message : String(error || '未知错误');
+  return {
+    ...result,
+    warnings: [...new Set([...(result.warnings || []), `第 ${page} 页双路读取有一路失败：${message}；已保留可用结果并列为待核对`])],
+    countComplete: false,
+    pageQuality: [{
+      page,
+      expectedCount: Number.NaN,
+      extractedCount: result.transactions.length,
+      status: 'NEEDS_REVIEW',
+      pageType: 'TRANSACTIONS'
+    }]
+  };
+}
+
+async function requestMinerUPageWithRetry(
+  request: MinerUDocumentRequest,
+  page: number,
+  sourceFileName: string,
+  respondentName: string,
+  totalPages: number,
+  signal?: AbortSignal
+): Promise<QwenChunkResult> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      assertNotAborted(signal);
+      const response = await fetch('/api/normalize-mineru-result', {
+        method: 'POST', signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request)
+      });
+      if (!response.ok) throw apiError(await responseJson(response), `第 ${page} 页 MinerU 结果整理失败`);
+      const payload = response.headers.get('content-type')?.includes('text/event-stream')
+        ? await readMinerUNormalizationStream(response)
+        : await responseJson(response);
+      return mineruModelPageResult(
+        payload, page, sourceFileName, respondentName, totalPages, request.pages[0]
+      );
+    } catch (error) {
+      if (signal?.aborted) throw signal.reason || error;
+      lastError = error;
+      if (attempt === 0) await delay(1_000, signal);
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError || `第 ${page} 页整理失败`));
+}
+
+function mineruModelPageResult(
+  payload: ModelNormalizationResult,
+  page: number,
+  sourceFileName: string,
+  respondentName: string,
+  totalPages: number,
+  sourcePage?: MinerUPageContent
+): QwenChunkResult {
+  const normalized: ModelNormalizationResult = {
+    ...payload,
+    transactions: (payload.transactions || []).map((transaction, index) => ({
+      ...transaction, p: page, r: positiveInteger(transaction?.r ?? transaction?.row) || index + 1
+    })),
+    pageChecks: (payload.pageChecks || []).slice(0, 1).map(check => ({ ...check, p: page }))
+  };
+  const parsed = parseMinerUWholeModelResult(
+    normalized, sourceFileName, respondentName, totalPages, { expectedPages: [page] }
+  );
+  const check = normalized.pageChecks?.[0];
+  const expected = Math.max(0, Number(check?.extracted ?? check?.transactionCount) || parsed.transactions.length);
+  const status = cleanText(check?.status).toUpperCase() === 'NEEDS_REVIEW' || expected !== parsed.transactions.length
+    ? 'NEEDS_REVIEW' as const : 'COMPLETE' as const;
+  const pageType = cleanText(check?.type ?? check?.pageType).toUpperCase() || (parsed.transactions.length ? 'TRANSACTIONS' : 'UNKNOWN');
+  const warnings = [...new Set([
+    ...(payload.warnings || []).map(cleanText).filter(Boolean),
+    ...(status === 'NEEDS_REVIEW' ? [`第 ${page} 页需要核对：${cleanText(check?.note) || 'MinerU 单页结构可能不完整'}`] : [])
+  ])];
+  return {
+    account: parsed.account,
+    accounts: parsed.accounts,
+    transactions: parsed.transactions,
+    warnings,
+    coveredPages: [page], pageStart: page, pageEnd: page, totalPages,
+    expectedTransactionCount: expected,
+    countComplete: status === 'COMPLETE',
+    pageQuality: [{
+      page, expectedCount: expected, extractedCount: parsed.transactions.length, status,
+      pageType: pageType as NonNullable<QwenChunkResult['pageQuality']>[number]['pageType']
+    }]
+  };
+}
+
+function explicitOwnerAccountsFromMinerUPage(page: MinerUPageContent): string[] {
+  const accounts = new Set<string>();
+  for (const block of page.blocks) {
+    if (block.type === 'table') {
+      const table = parseMinerUTable({
+        page: page.page,
+        type: 'table',
+        text: '',
+        tableHtml: block.content,
+        bbox: block.bbox
+      });
+      if (!table) continue;
+      const schema = tableSchema(table.headers);
+      if (schema.kind !== 'TRANSACTIONS' || schema.accountNumber < 0) continue;
+      for (const row of table.rows) {
+        const accountNumber = normalizeAccountNumber(cell(row.cells, schema.accountNumber));
+        if (isUsefulAccountNumber(accountNumber)) accounts.add(accountNumber);
+      }
+      continue;
+    }
+    const searchableText = block.content
+      .replace(/<[^>]+>/g, '\n')
+      .replace(/&nbsp;|&#160;/gi, ' ');
+    for (const match of searchableText.matchAll(
+      /(?:^|[\n\r])[ \t]*(?:账\/卡号|本方账号|客户账号|交易账号|账户号(?:码)?|账号)[ \t]*[:：]?[ \t]*([A-Za-z0-9 \t\-_—–·•]{8,40})/g
+    )) {
+      const accountNumber = normalizeAccountNumber(match[1]);
+      if (isUsefulAccountNumber(accountNumber)) accounts.add(accountNumber);
+    }
+  }
+  return [...accounts];
+}
+
+function anchorPageResultToMinerUOwner(
+  result: QwenChunkResult,
+  sourcePage: MinerUPageContent
+): QwenChunkResult {
+  const sourceAccounts = explicitOwnerAccountsFromMinerUPage(sourcePage);
+  if (sourceAccounts.length !== 1) return result;
+
+  const accountNumber = sourceAccounts[0];
+  const sourceText = sourcePage.blocks.filter(block => block.type !== 'table' && block.type !== 'source_page_text')
+    .map(block => block.content).join('\n');
+  const matchingAccount = (result.accounts || [result.account]).find(account => account.accountNumber === accountNumber);
+  const bankName = usefulBankName(inferBankName(sourceText, ''))
+    || usefulBankName(matchingAccount?.bankName || '')
+    || '待核验银行';
+  const account: BankAccount = {
+    ...result.account,
+    accountNumber,
+    bankName,
+    coveredPages: [sourcePage.page]
+  };
+  const transactions = result.transactions.map(transaction => ({
+    ...transaction,
+    accountNumber,
+    bankName,
+    fieldEvidence: {
+      ...(transaction.fieldEvidence || {}),
+      accountNumber: {
+        originalValue: transaction.fieldEvidence?.accountNumber?.originalValue ?? transaction.accountNumber,
+        currentValue: accountNumber,
+        confidence: 1,
+        origin: transaction.accountNumber === accountNumber ? 'EXTRACTION' as const : 'AUTO_NORMALIZATION' as const,
+        decision: transaction.accountNumber === accountNumber ? 'ACCEPTED' as const : 'SUGGESTED' as const,
+        reason: transaction.accountNumber === accountNumber
+          ? '与 MinerU 页面中的明确本方账号一致'
+          : '按 MinerU 页面中的明确本方账号纠正'
+      }
+    }
+  }));
+  // A disagreeing printed header may itself be misread. Do not overwrite an
+  // already explicit model account; expose the account field for source review.
+  for (let index = 0; index < transactions.length; index++) {
+    const original = result.transactions[index];
+    if (!isReliableAccountNumber(original.accountNumber) || original.accountNumber === accountNumber) continue;
+    transactions[index] = preserveExtraction(original) as typeof transactions[number];
+    requireSourceCheck(transactions[index], ['accountNumber'],
+      `本方账号读取为“${original.accountNumber}”，页面文字读法为“${accountNumber}”。请对照原件账号栏确认，未按文字结果覆盖。`);
+  }
+  if (transactions.some(transaction => transaction.accountNumber !== accountNumber)) return { ...result, transactions };
+  return {
+    ...result,
+    account,
+    accounts: [account],
+    transactions
+  };
+}
+
+async function createOriginalPageFiles(sourceFile: File, pages: number[]): Promise<Map<number, File>> {
+  const { PDFDocument } = await import('pdf-lib');
+  const source = await PDFDocument.load(await sourceFile.arrayBuffer(), { ignoreEncryption: true });
+  const files = new Map<number, File>();
+  for (const page of pages) {
+    if (page < 1 || page > source.getPageCount()) continue;
+    const target = await PDFDocument.create();
+    const [copied] = await target.copyPages(source, [page - 1]);
+    target.addPage(copied);
+    const bytes = await target.save({ useObjectStreams: true });
+    files.set(page, new File(
+      [Uint8Array.from(bytes).buffer],
+      `${sourceFile.name.replace(/\.pdf$/i, '')}__补识别_第${page}页.pdf`,
+      { type: 'application/pdf', lastModified: sourceFile.lastModified }
+    ));
+  }
+  return files;
+}
+
+export async function requestOriginalPdfPage(
+  file: File, page: number, totalPages: number, sourceFileName: string, respondentName: string, signal?: AbortSignal
+): Promise<QwenChunkResult> {
+  const controller = new AbortController();
+  const abort = () => controller.abort(signal?.reason);
+  const timeout = setTimeout(() => controller.abort(new Error(`第 ${page} 页原页复核超时（180秒），请重试或人工核对`)), 180_000);
+  signal?.addEventListener('abort', abort, { once: true });
+  if (signal?.aborted) abort();
+  try { return await readOriginalPdfPage(file, page, totalPages, sourceFileName, respondentName, controller.signal); }
+  finally { clearTimeout(timeout); signal?.removeEventListener('abort', abort); }
+}
+
+async function readOriginalPdfPage(
+  file: File,
+  page: number,
+  totalPages: number,
+  sourceFileName: string,
+  respondentName: string,
+  signal?: AbortSignal
+): Promise<QwenChunkResult> {
+  const formData = new FormData();
+  formData.append('file', file);
+  formData.append('sourceFileName', sourceFileName);
+  formData.append('respondentName', respondentName);
+  formData.append('pageStart', String(page));
+  formData.append('pageEnd', String(page));
+  formData.append('totalPages', String(totalPages));
+  formData.append('chunkId', `MINERU_FALLBACK_P${page}`);
+  formData.append('isPageSlice', 'true');
+  formData.append('verificationMode', 'always');
+  const response = await fetch('/api/parse-bank-statement-stream', { method: 'POST', body: formData, signal });
+  if (!response.ok) throw new Error(`第 ${page} 页原PDF补识别服务异常（${response.status}）`);
+  if (!response.body) throw new Error(`第 ${page} 页原PDF补识别连接不可读`);
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let completed: QwenChunkResult | undefined;
+  let streamError: any;
+  const consumeLine = (line: string) => {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('data:')) return;
+    const data = trimmed.slice(5).trim();
+    if (!data) return;
+    const event = JSON.parse(data);
+    if (event?.type === 'complete') completed = event as QwenChunkResult;
+    if (event?.type === 'error') streamError = event;
+  };
+  while (true) {
+    const { done, value } = await reader.read();
+    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+    const lines = buffer.split(/\r?\n/);
+    buffer = done ? '' : lines.pop() || '';
+    lines.forEach(consumeLine);
+    if (done) break;
+  }
+  if (buffer.trim()) consumeLine(buffer);
+  if (streamError) {
+    const error = new Error(String(streamError.message || `第 ${page} 页原PDF补识别失败`));
+    Object.assign(error, {
+      diagnosticCode: streamError.diagnosticCode,
+      diagnosis: streamError.diagnostics ? JSON.stringify(streamError.diagnostics) : undefined
+    });
+    throw error;
+  }
+  if (!completed?.account || !Array.isArray(completed.transactions)) {
+    throw new Error(`第 ${page} 页原PDF补识别未返回完整结果`);
+  }
+  const isGenericReviewWarning = (warning: string) =>
+    cleanText(warning) === '智能识别结果须由律师对照原件复核';
+  const normalizeAccount = (account: QwenChunkResult['account']) => ({
+    ...account,
+    fileName: sourceFileName,
+    totalPages,
+    parseWarnings: (account.parseWarnings || []).filter(warning => !isGenericReviewWarning(warning))
+  });
+  return {
+    ...completed,
+    account: normalizeAccount(completed.account),
+    warnings: (completed.warnings || []).filter(warning => !isGenericReviewWarning(warning)),
+    coveredPages: [page], pageStart: page, pageEnd: page, totalPages,
+    accounts: completed.accounts?.map(normalizeAccount),
+    transactions: completed.transactions.map(transaction => ({
+      ...transaction, rawSourceFile: sourceFileName, sourceFileName, rawPageNumber: page
+    }))
+  };
+}
+
+function emptyMinerUPageResult(
+  page: number, totalPages: number, sourceFileName: string, respondentName: string
+): QwenChunkResult {
+  return {
+    account: pagePlaceholderAccount(page, totalPages, sourceFileName, respondentName),
+    accounts: [], transactions: [], warnings: [], coveredPages: [page],
+    pageStart: page, pageEnd: page, totalPages, expectedTransactionCount: 0, countComplete: true,
+    pageQuality: [{ page, expectedCount: 0, extractedCount: 0, status: 'COMPLETE', pageType: 'BLANK' }]
+  };
+}
+
+function failedMinerUPageResult(
+  page: number,
+  totalPages: number,
+  sourceFileName: string,
+  respondentName: string,
+  error: unknown
+): QwenChunkResult {
+  const message = error instanceof Error ? error.message : String(error || '未知错误');
+  return {
+    account: pagePlaceholderAccount(page, totalPages, sourceFileName, respondentName),
+    accounts: [], transactions: [],
+    warnings: [`第 ${page} 页连续识别失败：${message}；已保留为待核对页面，其他页面继续处理`],
+    coveredPages: [page], pageStart: page, pageEnd: page, totalPages,
+    expectedTransactionCount: 0, countComplete: false,
+    pageQuality: [{ page, expectedCount: Number.NaN, extractedCount: 0, status: 'NEEDS_REVIEW', pageType: 'UNKNOWN' }]
+  };
+}
+
+function recoverPageFailure(
+  error: unknown,
+  signal: AbortSignal | undefined,
+  page: number,
+  totalPages: number,
+  sourceFileName: string,
+  respondentName: string
+): QwenChunkResult {
+  assertNotAborted(signal);
+  return failedMinerUPageResult(page, totalPages, sourceFileName, respondentName, error);
+}
+
+function pagePlaceholderAccount(
+  page: number, totalPages: number, sourceFileName: string, respondentName: string
+): BankAccount {
+  return {
+    accountNumber: `待核验-第${page}页`, accountName: respondentName || '待核验户名', bankName: '待核验银行',
+    ownerType: 'UNKNOWN', fileName: sourceFileName, fileType: 'pdf', totalIn: 0, totalOut: 0,
+    transactionCount: 0, startDate: '', endDate: '', startBalance: 0, endBalance: 0,
+    balanceAvailable: false, isBalanced: false, balanceDiff: 0, parseStatus: 'NEEDS_REVIEW',
+    parseWarnings: [], coveredPages: [page], totalPages
+  };
+}
+
+function assertNotAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  throw signal.reason instanceof Error ? signal.reason : new DOMException('已停止', 'AbortError');
+}
+
+function delay(milliseconds: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const finish = () => {
+      signal?.removeEventListener('abort', abort);
+      resolve();
+    };
+    const timer = setTimeout(finish, milliseconds);
+    const abort = () => {
+      clearTimeout(timer);
+      reject(signal?.reason instanceof Error ? signal.reason : new DOMException('已停止', 'AbortError'));
+    };
+    signal?.addEventListener('abort', abort, { once: true });
+  });
 }
 
 async function normalizeWholeMinerUDocument(
@@ -277,7 +1006,8 @@ export function parseMinerUWholeModelResult(
   result: ModelNormalizationResult,
   sourceFileName: string,
   respondentName: string,
-  totalPages: number
+  totalPages: number,
+  options?: { expectedPages?: number[] }
 ): { account: BankAccount; accounts: BankAccount[]; transactions: StandardTransaction[] } {
   const rawAccounts = Array.isArray(result.accounts) ? result.accounts : [];
   const listed: ListedAccount[] = [];
@@ -339,12 +1069,15 @@ export function parseMinerUWholeModelResult(
       reviewStatus: issues.length || confidence < 0.8 ? 'PENDING' : 'AUTO_PASSED',
       dataQualityIssues: issues
     };
-    return [transaction];
+    return [preserveExtraction(transaction)];
   });
 
   const pageChecks = Array.isArray(result.pageChecks) ? result.pageChecks : [];
   const warnings = [...new Set((result.warnings || []).map(cleanText).filter(Boolean))];
   const checkedPages = new Set<number>();
+  const expectedPages = options?.expectedPages?.length
+    ? [...new Set(options.expectedPages.filter(page => Number.isInteger(page) && page >= 1 && page <= totalPages))]
+    : Array.from({ length: totalPages }, (_, index) => index + 1);
   let declaredTransactions = 0;
   for (const check of pageChecks) {
     const page = positiveInteger(check?.p ?? check?.page);
@@ -355,7 +1088,10 @@ export function parseMinerUWholeModelResult(
       warnings.push(`第 ${page} 页需要核对：${cleanText(check?.note) || 'MinerU 结构可能不完整'}`);
     }
   }
-  if (checkedPages.size !== totalPages) warnings.push(`大模型仅返回 ${checkedPages.size}/${totalPages} 页完整性检查`);
+  const uncheckedPages = expectedPages.filter(page => !checkedPages.has(page));
+  if (uncheckedPages.length) {
+    warnings.push(`大模型未返回第 ${uncheckedPages.join('、')} 页完整性检查`);
+  }
   if (declaredTransactions !== transactions.length) {
     warnings.push(`逐页清点为 ${declaredTransactions} 笔，但返回了 ${transactions.length} 笔流水`);
   }
@@ -895,7 +1631,12 @@ function normalizeDateTime(rawDate: string, rawTime: string): string {
 }
 
 function normalizeAccountNumber(value: string): string {
-  return cleanText(value).replace(/[\s\-_—–·•]/g, '');
+  const normalized = cleanText(value).replace(/[\s\-_—–·•]/g, '');
+  // MinerU occasionally merges the next currency/sub-account cell into a
+  // numeric owner account (for example "123937014771CNY0"). This suffix is
+  // layout residue, not part of a Chinese bank account number.
+  const currencySuffix = normalized.match(/^(\d{8,})(?:CNY|RMB)0?$/i);
+  return currencySuffix?.[1] || normalized;
 }
 
 function isUsefulAccountNumber(value: string): boolean {
@@ -970,8 +1711,8 @@ async function pdfPageCount(file: File): Promise<number> {
 function mineruProgress(progress: MinerUProgress, totalPages: number): MinerUDirectProgressInfo {
   const completed = Math.max(0, Math.min(totalPages, progress.completed));
   const percent = progress.stage === 'SUBMITTING'
-    ? Math.max(2, Math.round(completed / Math.max(1, totalPages) * 80))
-    : Math.min(90, 5 + Math.round(completed / Math.max(1, totalPages) * 85));
+    ? Math.max(2, Math.round(completed / Math.max(1, totalPages) * 15))
+    : Math.min(25, 5 + Math.round(completed / Math.max(1, totalPages) * 20));
   return {
     statusText: progress.message,
     totalTransactions: 0,

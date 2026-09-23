@@ -1,5 +1,6 @@
 import { getCurrentSessionUser } from './authStore';
 import { identifySourceDocument, SourceDocumentRef } from '../utils/evidenceProvenance';
+import { clearRecognitionCheckpoints } from './recognitionCheckpointStore';
 
 const DB_NAME = 'LawFlow_Source_Documents_v1';
 const STORE_NAME = 'documents';
@@ -68,6 +69,7 @@ export async function getSourceDocument(caseId: string, fileName: string, source
 }
 
 export async function deleteSourceDocument(caseId: string, fileName: string, sourceDocumentId?: string): Promise<void> {
+  await clearRecognitionCheckpoints(caseId, fileName, sourceDocumentId).catch(() => undefined);
   try {
     const db = await openDb();
     const transaction = db.transaction(STORE_NAME, 'readwrite');
@@ -93,6 +95,7 @@ export async function deleteSourceDocument(caseId: string, fileName: string, sou
 }
 
 export async function deleteSourceDocumentsForCase(caseId: string): Promise<void> {
+  await clearRecognitionCheckpoints(caseId).catch(() => undefined);
   try {
     const db = await openDb();
     const transaction = db.transaction(STORE_NAME, 'readwrite');

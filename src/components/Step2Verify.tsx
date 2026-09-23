@@ -37,6 +37,8 @@ import { estimatedSourceRegion } from "../utils/sourceLocator";
 import { isBlockingRecognitionIssue, isDocumentReviewAccount } from "../review/recognitionCompleteness";
 import { formatRecognitionDiagnostics } from "../review/recognitionDiagnostics";
 import { copyText } from "../utils/copyText";
+import { buildReviewGroups, reviewDocumentKey, accountReviewLabel, EvidenceReviewGroup } from "../review/reviewGroups";
+import { candidateReviewDescription } from "../review/candidateReview";
 
 interface Step2Props {
   caseId: string;
@@ -56,13 +58,6 @@ interface MissingTransactionDraft {
   balance: string;
   counterpartyName: string;
   summary: string;
-}
-
-interface EvidenceReviewGroup {
-  key: string;
-  account: BankAccount;
-  pageNumber?: number;
-  issues: EvidenceReviewIssue[];
 }
 
 const EVIDENCE_FIELDS = new Set<TransactionEvidenceField>([
@@ -142,14 +137,19 @@ export const Step2Verify: React.FC<Step2Props> = ({
   const issues = useMemo(
     () =>
       selectedAccount
-        ? buildEvidenceReviewIssues(selectedAccount, transactions)
+        ? accounts.filter(account => reviewDocumentKey(account) === reviewDocumentKey(selectedAccount))
+          .flatMap(account => buildEvidenceReviewIssues(account, transactions))
         : [],
-    [selectedAccount, transactions],
+    [accounts, selectedAccount, transactions],
   );
   const selectedIssue = issues.find((issue) => issue.id === selectedIssueId);
   const selectedIssueGroup = selectedIssue
     ? issues.filter((issue) => sameReviewPage(issue, selectedIssue))
     : [];
+  // Row-specific explanations live on the focused task card, not in a second
+  // long checklist above it. Shared page notices are displayed only once.
+  const pageReviewNotices = [...new Map(selectedIssueGroup.filter(issue => !isTransactionLevelIssue(issue))
+    .map(issue => [`${issue.category}|${issue.description}`, issue])).values()];
   const affectedTransactionIds = [
     ...new Set(selectedIssueGroup.flatMap((issue) => issue.transactionIds)),
   ];
@@ -179,7 +179,7 @@ export const Step2Verify: React.FC<Step2Props> = ({
     [accounts, transactions],
   );
   const pageLevelIssueGroups = reviewQueueGroups.filter((group) =>
-    Boolean(group.pageNumber) && group.issues.some((issue) => issue.severity === "REQUIRED"),
+    Boolean(group.pageNumber) && group.issues.some(isOutstandingRequired),
   );
   const documentAdvisoryGroups = reviewQueueGroups.filter((group) => (
     !group.pageNumber
@@ -374,31 +374,14 @@ export const Step2Verify: React.FC<Step2Props> = ({
   const commitTransactions = (updated: StandardTransaction[]) => {
     onTransactionsUpdated(updated);
     if (!selectedAccount) return;
-    const accountTransactions = updated.filter((transaction) =>
-      transactionBelongsToAccount(transaction, selectedAccount),
-    );
-    const dates = accountTransactions
-      .map((transaction) => transaction.transactionDate)
-      .filter(Boolean)
-      .sort();
     onAccountsUpdated(
-      accounts.map((account) =>
-        accountIdentityKey(account) === accountIdentityKey(selectedAccount)
-          ? {
-              ...account,
-              reviewIssues: preserveReviewIssues(account.reviewIssues || [], selectedIssueGroup),
-              transactionCount: accountTransactions.length,
-              totalIn: accountTransactions
-                .filter((transaction) => transaction.direction === "IN")
-                .reduce((sum, transaction) => sum + transaction.amount, 0),
-              totalOut: accountTransactions
-                .filter((transaction) => transaction.direction === "OUT")
-                .reduce((sum, transaction) => sum + transaction.amount, 0),
-              startDate: dates[0] || account.startDate,
-              endDate: dates[dates.length - 1] || account.endDate,
-            }
-          : account,
-      ),
+      accounts.map(account => {
+        if (reviewDocumentKey(account) !== reviewDocumentKey(selectedAccount)) return account;
+        const ownIds = new Set(buildEvidenceReviewIssues(account, transactions).map(issue => issue.id));
+        return summarizeAccount({ ...account,
+          reviewIssues: preserveReviewIssues(account.reviewIssues || [], selectedIssueGroup.filter(issue => ownIds.has(issue.id)))
+        }, updated);
+      }),
     );
   };
 
@@ -411,27 +394,28 @@ export const Step2Verify: React.FC<Step2Props> = ({
     const groupIssues = issues.filter((item) => sameReviewPage(item, issue));
     const groupIssueIds = new Set(groupIssues.map((item) => item.id));
     const reviewedAt = new Date().toISOString();
-    const updatedIssues = issues.map((item) =>
-      groupIssueIds.has(item.id)
+    const updatedIssues = issues.map((item) => {
+      const confirmedRows = isTransactionLevelIssue(item) && item.transactionIds.length > 0 && item.transactionIds.every(id => {
+        const row = transactionSource.find(row => row.id === id);
+        return row?.reviewedBy === '律师人工核对' && Boolean(row.reviewedAt)
+          && (row.reviewStatus === 'VERIFIED' || row.reviewStatus === 'CORRECTED')
+          && !row.dataQualityIssues?.length && (!row.candidateReview || row.candidateReview.status === 'CONFIRMED');
+      });
+      return groupIssueIds.has(item.id)
         ? {
             ...item,
-            status,
+            status: status === 'UNRESOLVED' && confirmedRows ? 'CONFIRMED' as const : status,
             resolutionNote: resolutionNote.trim() || defaultNote,
             reviewedAt,
           }
-        : item,
-    );
-    onAccountsUpdated(
-      accounts.map((account) =>
-        selectedAccount &&
-        accountIdentityKey(account) === accountIdentityKey(selectedAccount)
-          ? summarizeAccount(
-              { ...account, reviewIssues: updatedIssues },
-              transactionSource,
-            )
-          : account,
-      ),
-    );
+        : item;
+    });
+    onAccountsUpdated(accounts.map(account => {
+      if (!selectedAccount || reviewDocumentKey(account) !== reviewDocumentKey(selectedAccount)) return account;
+      const ownIssues = buildEvidenceReviewIssues(account, transactions);
+      const updatedById = new Map(updatedIssues.map(item => [item.id, item]));
+      return summarizeAccount({ ...account, reviewIssues: ownIssues.map(item => updatedById.get(item.id) || item) }, transactionSource);
+    }));
     const groupTransactionIds = new Set(
       groupIssues
         .filter(isTransactionLevelIssue)
@@ -456,6 +440,10 @@ export const Step2Verify: React.FC<Step2Props> = ({
           const hasUnresolvedEvidence = Object.values(fieldEvidence || {}).some(evidence => evidence?.decision === "UNRESOLVED");
           return {
             ...transaction,
+            candidateReview: transaction.candidateReview ? { ...transaction.candidateReview,
+              status: status === 'UNRESOLVED' && transaction.candidateReview.status !== 'CONFIRMED'
+                ? 'UNRESOLVED' as const : 'CONFIRMED' as const, reviewedAt
+            } : undefined,
             reviewStatus:
               status === "CORRECTED"
                 ? "CORRECTED" as const
@@ -492,14 +480,9 @@ export const Step2Verify: React.FC<Step2Props> = ({
       (transaction) => !selectedRemovalIds.includes(transaction.id),
     );
     commitTransactions(updated);
-    saveIssueStatus(
-      selectedIssue,
-      "CORRECTED",
-      `已对照原件删除 ${selectedRemovalIds.length} 笔重复或误识别记录`,
-      updated,
-    );
+    // Deleting a duplicate does not confirm the remaining page's fields.
+    setHasEditedReview(true);
     setSelectedRemovalIds([]);
-    advanceAfterResolution(selectedIssue.id);
   };
 
   const handleCellEdit = (
@@ -726,7 +709,7 @@ export const Step2Verify: React.FC<Step2Props> = ({
                 ? '账号待核对'
                 : isUnbalanced
                   ? '未平账'
-                  : '人工核对完成';
+                  : accountReviewLabel(account, transactions);
             const badgeClass = pending
               ? 'bg-amber-400 text-amber-950'
               : hasUnknownAccount || isUnbalanced
@@ -773,7 +756,7 @@ export const Step2Verify: React.FC<Step2Props> = ({
           </div>
           <div className="flex gap-2 overflow-x-auto mt-3 pb-1">
             {pageLevelIssueGroups.map((group) => {
-              const requiredIssueCount = group.issues.filter(issue => issue.severity === "REQUIRED").length;
+              const requiredIssueCount = new Set(group.issues.filter(issue => issue.severity === "REQUIRED").map(issue => issue.category)).size;
               const advisoryIssueCount = group.issues.filter(issue => issue.severity === "ADVISORY").length;
               const pendingIssue =
                 group.issues.find(
@@ -789,7 +772,7 @@ export const Step2Verify: React.FC<Step2Props> = ({
                 >
                   <div className="flex justify-between gap-2">
                     <span className="text-[10px] font-semibold text-amber-800">
-                      {group.account.bankName} · 第{group.pageNumber || "?"}页
+                      {group.account.fileName} · 第{group.pageNumber || "?"}页
                     </span>
                     <span className={`text-[10px] ${statusColor(state)}`}>
                       {statusLabel(state)}
@@ -800,7 +783,7 @@ export const Step2Verify: React.FC<Step2Props> = ({
                     {advisoryIssueCount > 0 ? ` · ${advisoryIssueCount} 项参考提示` : ""}
                   </div>
                   <div className="text-[11px] text-slate-500 mt-1 line-clamp-2">
-                    {group.issues.map(plainIssueName).join("；")}
+                    {[...new Set(group.issues.map(plainIssueName))].join("；")}
                   </div>
                 </button>
               );
@@ -1236,11 +1219,11 @@ export const Step2Verify: React.FC<Step2Props> = ({
                       <div className="flex items-center gap-2">
                         <ShieldAlert className="w-4 h-4 text-amber-600" />
                         <h3 className="font-bold text-sm text-slate-900">
-                          本页有 {selectedIssueGroup.length} 类问题，涉及 {affectedTransactions.length} 笔流水
+                          本页有 {new Set(selectedIssueGroup.map(issue => issue.category)).size} 类问题，需逐行确认 {fieldIssueTransactions.length} 笔流水
                         </h3>
                       </div>
                       <div className="mt-2 space-y-2">
-                        {selectedIssueGroup.map((issue, index) => {
+                        {pageReviewNotices.map((issue, index) => {
                           const issueTransactions = affectedTransactions.filter(transaction => issue.transactionIds.includes(transaction.id));
                           const explanation = reviewIssueExplanation(issue, issueTransactions);
                           return (
@@ -1486,7 +1469,7 @@ export const Step2Verify: React.FC<Step2Props> = ({
   );
 };
 
-type ReviewField = "transactionTime" | "direction" | "amount" | "balance" | "counterpartyName" | "summary";
+type ReviewField = TransactionEvidenceField;
 
 const TransactionReviewTask: React.FC<{
   taskNumber: number;
@@ -1508,7 +1491,7 @@ const TransactionReviewTask: React.FC<{
       <div className="flex items-start justify-between gap-3">
         <div>
           <div className="text-xs font-bold text-slate-900">
-            任务 {taskNumber} · 第 {transaction.rawPageNumber || "?"} 页第 {transaction.rawRowIndex || "?"} 行
+            任务 {taskNumber} · 尾号 {transaction.accountNumber.slice(-4)} · 第 {transaction.rawPageNumber || "?"} 页第 {transaction.rawRowIndex || "?"} 行
           </div>
           <div className="mt-1 text-[11px] text-amber-900">
             <span className="font-semibold">需要你做：</span>{reviewTaskInstruction(fields)}
@@ -1626,7 +1609,7 @@ const ReviewFieldInput: React.FC<{
       {evidenceSummary}
       <input
         type={numeric ? "number" : "text"}
-        value={field === "amount" && transaction.amount === 0 ? "" : String(transaction[field] ?? "")}
+        value={String(transaction[field] ?? "")}
         onChange={event => onEdit(transaction.id, field, numeric ? Number(event.target.value) : event.target.value)}
         className="mt-1.5 w-full rounded-lg border border-blue-300 bg-white px-2 py-2 text-xs font-semibold text-slate-900"
       />
@@ -1926,6 +1909,7 @@ interface ReviewIssueExplanation {
 function plainIssueName(issue: EvidenceReviewIssue): string {
   const count = issue.transactionIds.length;
   switch (issue.category) {
+    case "CANDIDATE_CONFLICT": return issue.title;
     case "LOW_CONFIDENCE": return `${count} 笔流水的字段需要确认`;
     case "BALANCE_BREAK": return `${count} 笔相关流水的余额接不上`;
     case "INVALID_AMOUNT": return `${count} 笔流水的金额缺失或异常`;
@@ -1942,6 +1926,10 @@ function reviewIssueExplanation(
   affected: StandardTransaction[],
 ): ReviewIssueExplanation {
   switch (issue.category) {
+    case "CANDIDATE_CONFLICT": return {
+      detected: issue.description, possible: ['两次读取的内容不同或其中一次漏行'],
+      confirm: ['找到原件对应行', '核对列出的具体字段，填写原件值']
+    };
     case "LOW_CONFIDENCE": {
       const corrected = affected.filter(transaction => transaction.correctionReason).length;
       const lowConfidence = affected.filter(transaction => (transaction.extractionConfidence ?? 1) < 0.8).length;
@@ -2001,6 +1989,7 @@ function transactionReviewReason(
   issues: EvidenceReviewIssue[],
 ): string {
   const reasons: string[] = [];
+  if (transaction.candidateReview) reasons.push(candidateReviewDescription(transaction));
   if ((transaction.extractionConfidence ?? 1) < 0.8) reasons.push("这笔的字段读取把握较低");
   if (transaction.correctionReason) reasons.push(transaction.correctionReason);
   if (transaction.dataQualityIssues?.includes("INVALID_AMOUNT")) reasons.push("金额未能可靠读取");
@@ -2027,6 +2016,12 @@ function reviewFieldsForTransaction(
   issues: EvidenceReviewIssue[],
 ): ReviewField[] {
   const fields = new Set<ReviewField>();
+  if (transaction.candidateReview?.kind === 'FIELD_CONFLICT' || transaction.candidateReview?.kind === 'SOURCE_CHECK') {
+    for (const field of transaction.candidateReview.requiredFields || []) fields.add(field);
+    for (const difference of transaction.candidateReview.differences) fields.add(difference.field);
+  } else if (transaction.candidateReview) {
+    for (const field of EVIDENCE_FIELDS) fields.add(field);
+  }
   if (transaction.dataQualityIssues?.includes("INVALID_DATE") || issues.some(issue => issue.category === "INVALID_DATE"))
     fields.add("transactionTime");
   if (transaction.dataQualityIssues?.includes("UNKNOWN_DIRECTION") || transaction.direction === "UNKNOWN" || issues.some(issue => issue.category === "INVALID_DIRECTION"))
@@ -2046,13 +2041,10 @@ function reviewFieldsForTransaction(
     fields.add("amount");
     fields.add("balance");
   }
-  if (issues.some(issue => issue.category === "LOW_CONFIDENCE") && fields.size === 0) {
-    fields.add("transactionTime");
-    fields.add("direction");
-    fields.add("amount");
-    fields.add("balance");
-    fields.add("counterpartyName");
-    fields.add("summary");
+  if (issues.some(issue => issue.category === "LOW_CONFIDENCE")) {
+    // A specific candidate difference does not clear a separate, unlocalized
+    // extraction doubt. Keep that independent review scope visible.
+    for (const field of EVIDENCE_FIELDS) fields.add(field);
   }
   if (fields.size === 0) {
     fields.add("amount");
@@ -2062,7 +2054,8 @@ function reviewFieldsForTransaction(
 }
 
 function reviewFieldLabel(field: ReviewField): string {
-  return field === "transactionTime" ? "交易日期／时间"
+  return field === "accountNumber" ? "本方账号" : field === "counterpartyAccount" ? "对手方账号"
+    : field === "transactionTime" ? "交易日期／时间"
     : field === "direction" ? "收入还是支出"
       : field === "amount" ? "交易金额"
         : field === "balance" ? "交易后余额"
@@ -2071,7 +2064,9 @@ function reviewFieldLabel(field: ReviewField): string {
 }
 
 function reviewFieldHint(field: ReviewField): string {
-  return field === "transactionTime" ? "填写原件中的完整日期"
+  return field === "accountNumber" ? "填写原件本方账号，不要填写对手方账号"
+    : field === "counterpartyAccount" ? "按原件填写对手方账号，未提供则留空"
+    : field === "transactionTime" ? "填写原件中的完整日期"
     : field === "direction" ? "按借／贷或收／支栏选择"
       : field === "amount" ? "填写原件发生额"
         : field === "balance" ? "填写这一行交易后的余额"
@@ -2142,6 +2137,7 @@ function transactionReviewState(
 
 function isTransactionLevelIssue(issue: EvidenceReviewIssue): boolean {
   return (
+    issue.category === "CANDIDATE_CONFLICT" ||
     issue.category === "LOW_CONFIDENCE" ||
     issue.category === "BALANCE_BREAK" ||
     issue.category === "INVALID_AMOUNT" ||
@@ -2174,35 +2170,6 @@ function sameReviewPage(
   return left.pageNumber && right.pageNumber
     ? left.pageNumber === right.pageNumber
     : left.id === right.id;
-}
-
-function buildReviewGroups(
-  accounts: BankAccount[],
-  transactions: StandardTransaction[],
-): EvidenceReviewGroup[] {
-  const groups = new Map<string, EvidenceReviewGroup>();
-  for (const account of accounts) {
-    for (const issue of buildEvidenceReviewIssues(account, transactions)) {
-      const key = `${accountIdentityKey(account)}|${issue.pageNumber ? `page:${issue.pageNumber}` : `issue:${issue.id}`}`;
-      const existing = groups.get(key);
-      if (existing) existing.issues.push(issue);
-      else
-        groups.set(key, {
-          key,
-          account,
-          pageNumber: issue.pageNumber,
-          issues: [issue],
-        });
-    }
-  }
-  return [...groups.values()].sort(
-    (left, right) =>
-      accountIdentityKey(left.account).localeCompare(
-        accountIdentityKey(right.account),
-      ) ||
-      (left.pageNumber || Number.MAX_SAFE_INTEGER) -
-        (right.pageNumber || Number.MAX_SAFE_INTEGER),
-  );
 }
 
 function reviewGroupStatus(group: EvidenceReviewGroup): ReviewIssueStatus {

@@ -1,6 +1,7 @@
 import { BankAccount, StandardTransaction } from '../types/transaction';
 import { balanceContinuityIssues, chronologicalTransactions } from '../utils/transactionSequence';
 import { isReliableAccountNumber, normalizeAccountIdentityPart } from '../utils/accountIdentity';
+import { canInheritOwner, isEvidenceOnly, sameSource } from '../recognition/decisionPolicy';
 
 export interface QwenChunkResult {
   account: BankAccount;
@@ -41,7 +42,10 @@ export function mergeQwenChunkResults(
       if (!existing || (transaction.extractionConfidence || 0) > (existing.extractionConfidence || 0)) deduped.set(key, transaction);
     }
   }
-  const inheritedTransactions = inheritMissingAccountIdentity([...deduped.values()].sort(compareSourceOrder).map(transaction => ({
+  const evidenceAlignedTransactions = alignTransactionsWithAccountEvidence(
+    [...deduped.values()].sort(compareSourceOrder), results
+  );
+  const inheritedTransactions = inheritMissingAccountIdentity(evidenceAlignedTransactions.map(transaction => ({
     ...transaction,
     rawSourceFile: sourceFileName,
     id: `TX_PDF_${stableHash(`${sourceFileName}|${sourceLocatorKey(transaction)}`)}`
@@ -49,7 +53,9 @@ export function mergeQwenChunkResults(
   const reconciled = reconcileGlobalTransactions(inheritedTransactions);
   const transactions = reconciled.transactions;
   const pageQualityWarnings = results.flatMap(result => result.pageQuality || [])
-    .filter(page => page.status === 'NEEDS_REVIEW' && Number.isFinite(page.expectedCount))
+    .filter(page => page.status === 'NEEDS_REVIEW'
+      && Number.isFinite(page.expectedCount)
+      && page.expectedCount !== page.extractedCount)
     .map(page => `第 ${page.page} 页页面行数报告为 ${page.expectedCount} 笔，逐笔提取为 ${page.extractedCount} 笔；两者尚未核实，请对照原件确认`);
   const invalidCountWarnings = results.flatMap(result => result.pageQuality || [])
     .filter(page => page.status === 'NEEDS_REVIEW' && !Number.isFinite(page.expectedCount))
@@ -65,6 +71,61 @@ export function mergeQwenChunkResults(
   return { account: accounts[0], accounts, transactions };
 }
 
+function alignTransactionsWithAccountEvidence(
+  transactions: StandardTransaction[], results: QwenChunkResult[]
+): StandardTransaction[] {
+  const pageAccounts = new Map<number, BankAccount>();
+  for (const result of results) {
+    const candidates = (result.accounts?.length ? result.accounts : [result.account])
+      .filter(account => isReliableAccountNumber(account.accountNumber));
+    const unique = [...new Map(candidates.map(account => [
+      normalizeAccountIdentityPart(account.accountNumber), account
+    ])).values()];
+    if (unique.length !== 1) continue;
+    for (const page of result.coveredPages) pageAccounts.set(page, unique[0]);
+  }
+  const listedAccounts = results
+    .filter(result => result.pageQuality?.some(page => page.pageType === 'ACCOUNT_INFO' || page.pageType === 'ACCOUNT_LIST'))
+    .flatMap(result => result.accounts?.length ? result.accounts : [result.account])
+    .filter(account => isReliableAccountNumber(account.accountNumber));
+  if (!listedAccounts.length && !pageAccounts.size) return transactions;
+  const normalizedNumber = (value: string) => normalizeAccountIdentityPart(value);
+  return transactions.map(transaction => {
+    if (isEvidenceOnly(transaction)) return transaction;
+    const transactionNumber = normalizedNumber(transaction.accountNumber);
+    const listed = listedAccounts.find(account => {
+      const accountNumber = normalizedNumber(account.accountNumber);
+      return accountNumber === transactionNumber || (
+        Math.min(accountNumber.length, transactionNumber.length) >= 12
+        && (accountNumber.endsWith(transactionNumber) || transactionNumber.endsWith(accountNumber))
+      );
+    });
+    const local = pageAccounts.get(transaction.rawPageNumber || 0);
+    // A printed owner account on this exact page is stronger evidence than an
+    // account-list match carried from another section of the same PDF. Without
+    // this precedence, a stale model account can make `listed` match itself and
+    // override the explicit page header/table identity.
+    const compatibleListed = local && listed && (
+      normalizedNumber(local.accountNumber) === normalizedNumber(listed.accountNumber)
+      || (normalizedNumber(local.accountNumber).length >= 12
+        && normalizedNumber(listed.accountNumber).endsWith(normalizedNumber(local.accountNumber)))
+    ) ? listed : undefined;
+    const evidence = compatibleListed || local || listed;
+    if (!evidence) return transaction;
+    return {
+      ...transaction,
+      accountNumber: evidence.accountNumber,
+      accountName: evidence.accountName || transaction.accountName,
+      bankName: isSpecificBankName(evidence.bankName) ? evidence.bankName : transaction.bankName
+    };
+  });
+}
+
+function isSpecificBankName(value: string): boolean {
+  const normalized = value.replace(/\s+/g, '').trim();
+  return Boolean(normalized && !/^(?:待核验银行|未知银行|商业银行|银行)$/.test(normalized));
+}
+
 function reconcileGlobalTransactions(input: StandardTransaction[]): { transactions: StandardTransaction[]; warnings: string[] } {
   const transactions = input.map(transaction => ({ ...transaction }));
   const warnings: string[] = [];
@@ -74,6 +135,7 @@ function reconcileGlobalTransactions(input: StandardTransaction[]): { transactio
     byAccount.set(key, [...(byAccount.get(key) || []), transaction]);
   }
   for (const accountTransactions of byAccount.values()) {
+    if (accountTransactions.some(isEvidenceOnly)) continue;
     const ordered = [...accountTransactions].sort(compareSourceOrder);
     const pages = new Map<number, StandardTransaction[]>();
     for (const transaction of ordered) {
@@ -191,7 +253,7 @@ function buildAccountSummaries(
       totalIn, totalOut, transactionCount: sourceOrdered.length,
       startDate: dates[0] || '', endDate: dates[dates.length - 1] || '',
       startBalance, endBalance, balanceAvailable,
-      isBalanced: balanceAvailable && balanceDiff < 1,
+      isBalanced: balanceAvailable && Math.round(balanceDiff * 100) === 0,
       balanceDiff,
       parseStatus: parseWarnings.length || lowConfidence.length || continuityIssues.length ? 'NEEDS_REVIEW' : 'COMPLETE',
       parseWarnings,
@@ -272,12 +334,11 @@ function sameAccountIdentity(left: BankAccount, right: BankAccount): boolean {
 }
 
 function inheritMissingAccountIdentity(transactions: StandardTransaction[]): StandardTransaction[] {
-  const isKnown = (transaction: StandardTransaction) => !transaction.accountNumber.startsWith('待核验-')
-    && !transaction.bankName.includes('待核验');
+  const isKnown = (transaction: StandardTransaction) => isReliableAccountNumber(transaction.accountNumber);
   const inherited = transactions.map((transaction, index) => {
-    if (isKnown(transaction)) return transaction;
-    const previous = [...transactions.slice(0, index)].reverse().find(isKnown);
-    const next = transactions.slice(index + 1).find(isKnown);
+    if (!canInheritOwner(transaction)) return transaction;
+    const previous = [...transactions.slice(0, index)].reverse().find(item => isKnown(item) && sameSource(item, transaction));
+    const next = transactions.slice(index + 1).find(item => isKnown(item) && sameSource(item, transaction));
     const previousKey = previous ? ownerAccountKey(previous) : '';
     const nextKey = next ? ownerAccountKey(next) : '';
     const cleanBank = (name: string) => name.replace(/中国|银行|个人|活期|结算|账户/g, '').trim();
@@ -290,9 +351,8 @@ function inheritMissingAccountIdentity(transactions: StandardTransaction[]): Sta
         (cleanBank(transaction.bankName) && cleanBank(transaction.bankName) === cleanBank(previous.bankName))
       )
     );
-    const inherited = previous && next
-      ? (previousKey === nextKey || matchesPreviousBank ? previous : undefined)
-      : previous || next;
+    const inherited = previous && next && previousKey === nextKey && matchesPreviousBank
+      ? previous : undefined;
     return inherited ? {
       ...transaction,
       accountNumber: inherited.accountNumber,
@@ -309,7 +369,8 @@ function inheritMissingAccountIdentity(transactions: StandardTransaction[]): Sta
   for (const page of pageNumbers) {
     const pageTransactions = pages.get(page) || [];
     const identities = new Set(pageTransactions.map(ownerAccountKey));
-    if (pageTransactions.length < 2 || identities.size !== pageTransactions.length) continue;
+    if (pageTransactions.length < 2 || identities.size !== pageTransactions.length
+      || pageTransactions.some(item => !canInheritOwner(item))) continue;
     const previous = [...inherited].reverse().find(item => (item.rawPageNumber || 0) < page && isReliableAccountNumber(item.accountNumber));
     const next = inherited.find(item => (item.rawPageNumber || 0) > page && isReliableAccountNumber(item.accountNumber));
     if (!previous || !next || ownerAccountKey(previous) !== ownerAccountKey(next)) continue;
