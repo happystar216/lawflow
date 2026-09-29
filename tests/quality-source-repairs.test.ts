@@ -64,8 +64,9 @@ test('an empty purpose column cannot overwrite a mapped summary-code column with
 });
 
 test('printed deposit transfers are stable without model type dictionaries and repayment purpose still takes precedence', () => {
-  for (const text of ['转账', '跨行汇款', '他行汇入', '网银转账', '超网汇兑往账'])
+  for (const text of ['转账', '跨行汇款', '他行汇入', '网银转账', '超网汇兑往账', '电子账户资金转出', '网银跨行汇款跨行转出'])
     assert.equal(printedTransactionType(text, [text], 'OUT', 'deposit')?.type, '账户转账');
+  assert.equal(printedTransactionType('网银跨行汇款跨行转出', ['网银支付收到轧差通知'], 'IN', 'deposit')?.type, '账户转账');
   assert.equal(printedTransactionType('转账', ['信用卡还款'], 'OUT', 'deposit')?.type, '信用卡还款');
   assert.equal(printedTransactionType('转账', ['贷款还款'], 'OUT', 'deposit')?.type, '贷款还款');
   assert.equal(printedTransactionType('批处理归还欠款', ['个人贷款每日扣款'], 'OUT', 'deposit')?.type, '贷款还款');
