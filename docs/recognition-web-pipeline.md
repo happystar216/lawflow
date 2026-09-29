@@ -10,7 +10,7 @@
 2. 按检查结果旋转完整页，Qwen V3 逐格照录，Qwen Context V1 补充页眉原文。
    Gemini Keys V4 独立读取关键字段，不接收 Qwen 的答案。
 3. Gemini Mapping V7 一次接收全部页的原文列表，只输出来源映射；不再读取 PDF。
-   与实验相同的 TypeScript 程序从来源组装 12 列、处理重复版式和标出冲突。
+   唯一的 TypeScript 程序从来源组装 12 列、处理重复版式和标出冲突。
 4. 结构差异最多补读 6 页，本方账号最多补读 12 页，关键字段差异最多补读 12 页。
    补读仍使用完整页。未解决的问题必须保留为人工待确认项。
 5. 原文和模型调用证据保存在独立 IndexedDB 中，按用户、案件、PDF 内容、流程版本、输入哈希隔离。
@@ -23,7 +23,7 @@
 
 权威提示词位于 `scripts/prompts/`。`npm run recognition:prompts` 生成服务器模块。
 构建会检查生成模块是否与实验提示词逐字一致，避免两套提示词各自演进。
-生产需要 `GEMINI_API_KEY` 和 `DASHSCOPE_API_KEY`，模型默认与实验相同。
+生产需要 `GEMINI_API_KEY` 和 `DASHSCOPE_API_KEY`。测试客户端不读取这些密钥，也不配置模型或提示词。
 流水、图像和密钥不提交 Git；密钥只放服务端。
 
 ## 验证范围
@@ -39,3 +39,58 @@
 
 旧 MinerU 网页回测不属于这条流程的验收结果。
 此前 99.92% / 3.34% / 未提示关键错误 0 为中文候选标准的开发回归，尚非独立盲测认证。
+
+## 唯一的正式回测入口（2026-09-29）
+
+网页和测试使用同一个 `/api/recognize-quality`。测试驱动只负责打开目标网页、上传 PDF、等待并保存结果；
+PDF.js 转图、方向判断、模型请求、补读、恢复、12 列组装、网页归一化全部执行正式网页代码。
+`/debug/runs` 只是本机浏览器测试驱动，不是另一个识别服务。它不调用模型。
+
+先在一个终端启动本机驱动：
+
+```sh
+npm run debug:online
+```
+
+再执行全新回测（每份 PDF 使用独立浏览器和案件，不继承历史模型结果）：
+
+```sh
+npm run recognition:regression -- --pdf /absolute/path/input.pdf --output tmp/new-run
+# 批量；仍然逐份通过正式网页上传
+npm run recognition:regression -- --pdf-directory /absolute/path/pdfs --output tmp/new-suite
+# 可选：明确指定待测部署，网页与 API 必须来自同一站点
+npm run recognition:regression -- --pdf /absolute/path/input.pdf --output tmp/new-preview --target https://lawtool.cocoaiagent.com/
+```
+
+目标网页必须已部署本版本。默认目标为生产站点；其他主机需加入 `LAWFLOW_DEBUG_ALLOWED_HOSTS`。
+可用 `LAWFLOW_SITE_PASSWORD` 提供现有站点访问口令。识别错误会使回测失败；完整性待确认仍保留为识别结果，
+不会自动确认律师审查事项。测试不会进入后续法律分析。
+
+旧的 `runQualityExperiment.py`、`runQualitySuite.py` 现在只转发到这个客户端。
+旧 `--preflight`、`--page-context`、`--images`、`--single-issuer`、历史结果复用等独立配置不再接受。
+旧脚本实现在 Git 历史中；其他历史 `experiment*` / `replay*` 工具仅供研究或规则重放，不能作为正式端到端验收。
+
+### 运行记录与评分
+
+每次运行保存原 PDF 哈希、实际网页代码地址、接口地址、模型、提示词哈希、生成参数、转图参数，
+以及每次成功调用的输入哈希、完整回复、尝试次数和缓存来源。
+完整记录包括补读前的回复，不只保留最后覆盖后的页面结果。
+`FRESH` 表示没有复用缓存；`RESUMED` 表示使用过缓存。旧导出缺少这些信息时标记 `LEGACY_UNKNOWN`。
+参数和提示词由服务器统一发布并计算配置指纹；客户端固定该指纹，运行中配置改变会停止。
+缓存键包含配置指纹，旧缓存不会被冒充为本版本的新结果。
+
+每份输出目录的 `recognition-record.json` 与网页“下载识别记录”使用同一个格式；
+`result.json` 是评分输入，`registry.json` 是来源登记表。
+冻结前逐笔核对网页实际导入的 12 列、来源和必需提示，保留原始整行提示及字段提示。
+不把整行提示拆成 12 个字段提示，否则会错误计算多出交易的未提示错误数。
+人工修改后的记录不能作为初始识别结果评分。
+
+已下载的网页记录可离线冻结（不调用模型）：
+
+```sh
+npm run recognition:freeze-web -- /absolute/path/识别记录.json tmp/new-frozen
+python3 scripts/evaluateWholeQualityTrial.py --trial tmp/new-frozen --gold-directory test-data/recognition --output tmp/new-evaluation
+```
+
+标准答案只在冻结完成后交给评分程序。开发回归不等于独立盲测；冻结旧结果不等于新跑模型。
+离线测试覆盖正式 HTTP 接口、流式回复解析、共享编排与网页归一化的一致性，并已加入部署检查。

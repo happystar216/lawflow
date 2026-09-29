@@ -26,6 +26,9 @@ jobs:
       - name: Build Web Application
         run: npm run build
 
+      - name: Verify the production recognition contract
+        run: npx tsx --test tests/quality-single-entry.test.ts tests/quality-web.test.ts
+
       - name: Configure Qwen for the PDF recognition pipeline
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

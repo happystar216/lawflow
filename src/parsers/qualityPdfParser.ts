@@ -1,14 +1,15 @@
-import { createPdfPageImageRenderer } from './pdfPageImageRenderer';
+import { createPdfPageImageRenderer, PDF_RENDER_POLICY } from './pdfPageImageRenderer';
 import type { GeminiProgressInfo } from './geminiPdfParser';
 import { runQualityWorkflow } from '../recognition/qualityWorkflow';
-import { QUALITY_REVISION, qualityWireRequest, validateQualityResult, type ModelReply, type QualityRequest } from '../recognition/qualityProtocol';
+import { QUALITY_ENDPOINT, QUALITY_POLICY_HEADER, QUALITY_REVISION, qualityWireRequest, validateQualityResult, type ModelReply, type QualityRequest } from '../recognition/qualityProtocol';
+import type { QualityCallRecord, QualityRunManifest } from '../recognition/qualityRunRecord';
 import type { QualityCheckpointStore } from '../store/qualityCheckpointStore';
 import { qualityToWeb } from '../recognition/qualityWebAdapter';
 
-export async function requestQualityModel(input: QualityRequest, signal: AbortSignal): Promise<ModelReply> {
+export async function requestQualityModel(input: QualityRequest, signal: AbortSignal, policySHA256?: string): Promise<ModelReply> {
   const wire = qualityWireRequest(input);
-  const response = await fetch('/api/recognize-quality', { method: 'POST', signal,
-    headers: { 'Content-Type': wire.contentType }, body: wire.body });
+  const response = await fetch(QUALITY_ENDPOINT, { method: 'POST', signal,
+    headers: { 'Content-Type': wire.contentType, ...(policySHA256 ? { [QUALITY_POLICY_HEADER]: policySHA256 } : {}) }, body: wire.body });
   if (!response.ok) {
     let message = `识别服务请求失败（HTTP ${response.status}）`;
     const body = await response.text();
@@ -34,15 +35,18 @@ export async function requestQualityModel(input: QualityRequest, signal: AbortSi
   } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
   signal.throwIfAborted();
   if (!completed || !['STOP', 'stop'].includes(completed.finishReason)) throw new Error('识别响应中断，可继续之前的进度');
+  if (policySHA256 && completed.policySHA256 !== policySHA256) throw new Error('识别配置已更新，请刷新网页后重试');
   validateQualityResult(input.stage, completed.result); return completed;
 }
 
 export async function parsePdfWithQualityPipeline(file: File, onProgress: (p: GeminiProgressInfo) => void, signal: AbortSignal,
   options: { store: QualityCheckpointStore; onResumeWarning?: (message: string) => void }) {
-  const config = await fetch('/api/recognize-quality', { signal, cache: 'no-store' });
+  const startedAt = new Date().toISOString();
+  const calls: QualityCallRecord[] = [];
+  const config = await fetch(QUALITY_ENDPOINT, { signal, cache: 'no-store' });
   const status = await config.json();
   if (!config.ok || !status.ready) throw new Error(`识别服务尚未配置完整：${(status.missing || []).join('、')}`);
-  if (status.revision !== QUALITY_REVISION) throw new Error('识别流程已更新，请刷新网页后重试');
+  if (status.revision !== QUALITY_REVISION || !status.policySHA256) throw new Error('识别流程已更新，请刷新网页后重试');
   const renderer = await createPdfPageImageRenderer(file);
   let cacheWarning = false;
   let resumed = false;
@@ -76,21 +80,29 @@ export async function parsePdfWithQualityPipeline(file: File, onProgress: (p: Ge
       },
       image: async (page, rotation, dpi) => { signal.throwIfAborted(); return base64((await renderer.renderPage(page, rotation, dpi / 72)).file); },
       call: async (input, page) => {
-        signal.throwIfAborted(); const key = `${input.stage}:${page}:${await hash(JSON.stringify(input))}`;
+        signal.throwIfAborted();
+        const inputSHA256 = await hash(JSON.stringify(input));
+        const key = `${status.policySHA256}:${input.stage}:${page}:${inputSHA256}`;
+        const callStartedAt = new Date().toISOString();
+        const record = (reply: ModelReply, fromCache: boolean, attempts: number) => {
+          calls.push({ stage: input.stage, page, inputSHA256, fromCache, attempts,
+            startedAt: callStartedAt, completedAt: new Date().toISOString(), reply: structuredClone(reply) });
+          return reply;
+        };
         const expectedModel = ['primary', 'context', 'primaryRecovery'].includes(input.stage) ? status.models?.qwen : status.models?.gemini;
         let saved: ModelReply | undefined;
         try { saved = await options.store.read(key); } catch { warn(); }
-        if (saved && saved.promptSHA256 === status.prompts?.[input.stage] && saved.model === expectedModel) {
+        if (saved && saved.policySHA256 === status.policySHA256 && saved.promptSHA256 === status.prompts?.[input.stage] && saved.model === expectedModel) {
           let valid = true;
           try { validateQualityResult(input.stage, saved.result); } catch { valid = false; }
           if (valid) {
             if (!resumed) { resumed = true; options.onResumeWarning?.('已恢复这个原始文件的识别进度，已完成的步骤会直接复用。'); }
-            return saved;
+            return record(saved, true, 0);
           }
         }
-        let reply: ModelReply | undefined;
+        let reply: ModelReply | undefined, attempts = 0;
         for (let attempt = 0; attempt < 3; attempt++) {
-          try { reply = await requestQualityModel(input, signal); break; }
+          try { attempts++; reply = await requestQualityModel(input, signal, status.policySHA256); break; }
           catch (error) {
             signal.throwIfAborted(); if (attempt === 2 || /配置|401|403/.test(String(error))) throw error;
             await new Promise<void>((resolve, reject) => {
@@ -103,10 +115,18 @@ export async function parsePdfWithQualityPipeline(file: File, onProgress: (p: Ge
         if (!reply) throw new Error('识别未完成');
         // Evidence is required, not an optional resume optimization.
         try { await options.store.write(key, reply); } catch { warn(); throw new Error('原文证据未能保存，请释放浏览器空间后继续'); }
-        return reply;
+        return record(reply, false, attempts);
       }
     });
-    await options.store.saveDelivery(delivery);
-    return qualityToWeb(delivery.result, delivery.registry, file.name, renderer.totalPages, delivery.mapping);
+    const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer());
+    const run: QualityRunManifest = { schemaVersion: 1, runId: crypto.randomUUID(), endpoint: new URL(QUALITY_ENDPOINT, location.href).href,
+      clientEntry: import.meta.url, revision: QUALITY_REVISION, totalPages: renderer.totalPages,
+      sourceSHA256: Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join(''),
+      startedAt, completedAt: new Date().toISOString(), runKind: calls.some(c => c.fromCache) ? 'RESUMED' : 'FRESH',
+      policySHA256: status.policySHA256, models: status.models, prompts: status.prompts, settings: status.settings,
+      renderer: PDF_RENDER_POLICY, calls };
+    const evidence = { ...delivery, run };
+    await options.store.saveDelivery(evidence);
+    return { ...qualityToWeb(delivery.result, delivery.registry, file.name, renderer.totalPages, delivery.mapping), evidence };
   } finally { await renderer.destroy(); }
 }

@@ -1,7 +1,20 @@
 import { qualityPrompts } from './qualityPrompts.generated';
-import { QUALITY_STAGES, QUALITY_IMAGE_CONTENT_TYPE, validateQualityResult, type QualityRequest, type ModelReply } from '../../src/recognition/qualityProtocol';
+import { QUALITY_REVISION, QUALITY_STAGES, QUALITY_IMAGE_CONTENT_TYPE, validateQualityResult, type QualityRequest, type ModelReply } from '../../src/recognition/qualityProtocol';
 
 export interface QualityEnvironment { GEMINI_API_KEY?: string; GEMINI_MODEL?: string; DASHSCOPE_API_KEY?: string; QWEN_MODEL?: string }
+const qwenSettings = { response_format: { type: 'json_object' }, reasoning_effort: 'low',
+  vl_high_resolution_images: true, temperature: 0, max_tokens: 16000 };
+const geminiSettings = (stage: QualityRequest['stage']) => ({ temperature: 0, thinkingConfig: { thinkingLevel: 'low' },
+  responseMimeType: 'application/json', maxOutputTokens: stage === 'mapping' ? 65536 : stage === 'preflight' ? 2048 : 24000 });
+export async function qualityModelConfig(env: QualityEnvironment) {
+  const policy = { revision: QUALITY_REVISION,
+    prompts: Object.fromEntries(Object.entries(qualityPrompts).map(([stage, p]) => [stage, p.sha256])),
+    models: { gemini: env.GEMINI_MODEL || 'gemini-3.8-flash', qwen: env.QWEN_MODEL || 'qwen3.8-flash' },
+    settings: { qwen: qwenSettings, gemini: Object.fromEntries(QUALITY_STAGES.map(s => [s, geminiSettings(s)])) }
+  };
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(policy)));
+  return { ...policy, policySHA256: Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('') };
+}
 /** Scan for invalid bytes without a backtracking match proportional to the image size. */
 export function validImageBase64(value: unknown): value is string {
   if (typeof value !== 'string' || !value.length || value.length >= 26_000_000 || value.length % 4 !== 0) return false;
@@ -33,8 +46,7 @@ export function decodeQualityRequest(body: string, contentType: string): Quality
 /** Called only after decodeQualityRequest validates every base64 byte. Validated
  * image strings contain no JSON metacharacters and can be copied unchanged. */
 function qwenBody(input: QualityRequest, model: string, prompt: string) {
-  const config = JSON.stringify({ model, response_format: { type: 'json_object' }, reasoning_effort: 'low',
-    vl_high_resolution_images: true, temperature: 0, max_tokens: 16000 });
+  const config = JSON.stringify({ model, ...qwenSettings });
   return config.slice(0, -1) + ',"messages":[{"role":"user","content":[{"type":"text","text":'
     + JSON.stringify(prompt) + '},{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,'
     + input.images![0] + '"}}]}]}';
@@ -46,8 +58,7 @@ function geminiBody(input: QualityRequest, prompt: string) {
     if (input.stage === 'preflight') parts.push(JSON.stringify({ text: `候选${'ABCD'[index]}` }));
     parts.push('{"inlineData":{"mimeType":"image/jpeg","data":"' + data + '"}}');
   });
-  const generationConfig = { temperature: 0, thinkingConfig: { thinkingLevel: 'low' }, responseMimeType: 'application/json',
-    maxOutputTokens: input.stage === 'mapping' ? 65536 : input.stage === 'preflight' ? 2048 : 24000 };
+  const generationConfig = geminiSettings(input.stage);
   return '{"contents":[{"role":"user","parts":[' + parts.join(',') + ']}],"generationConfig":' + JSON.stringify(generationConfig) + '}';
 }
 
@@ -102,5 +113,5 @@ export async function runQualityModel(input: QualityRequest, env: QualityEnviron
   try { result = JSON.parse(text); } catch { throw new Error('模型未返回完整 JSON，未将片段当作成功结果'); }
   if (input.stage === 'context' && result && Object.keys(result).length === 1 && Array.isArray(result.nearTableText)) result.tables = [];
   validateQualityResult(input.stage, result);
-  return { result, finishReason, usage, model, promptSHA256: policy.sha256 };
+  return { result, finishReason, usage, model, promptSHA256: policy.sha256, policySHA256: (await qualityModelConfig(env)).policySHA256 };
 }

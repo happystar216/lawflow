@@ -13,9 +13,9 @@ async function getPdfjs() {
   return pdfjsPromise;
 }
 
-const MAX_IMAGE_PIXELS = 12_000_000;
-const MAX_IMAGE_EDGE = 5_000;
-const MAX_IMAGE_BYTES = 18 * 1024 * 1024;
+export const PDF_RENDER_POLICY = { engine: 'pdfjs-dist', maxPixels: 12_000_000,
+  maxEdge: 5_000, maxBytes: 18 * 1024 * 1024, jpegQuality: 0.92, fallbackJpegQuality: 0.78 } as const;
+const { maxPixels: MAX_IMAGE_PIXELS, maxEdge: MAX_IMAGE_EDGE, maxBytes: MAX_IMAGE_BYTES } = PDF_RENDER_POLICY;
 
 export interface PdfPageImage {
   id: string;
@@ -87,8 +87,8 @@ async function renderPage(
   let blob: Blob;
   try {
     await page.render({ canvasContext: context, viewport, background: '#ffffff' }).promise;
-    blob = await canvasBlob(canvas, 'image/jpeg', 0.92);
-    if (blob.size > MAX_IMAGE_BYTES) blob = await canvasBlob(canvas, 'image/jpeg', 0.78);
+    blob = await canvasBlob(canvas, 'image/jpeg', PDF_RENDER_POLICY.jpegQuality);
+    if (blob.size > MAX_IMAGE_BYTES) blob = await canvasBlob(canvas, 'image/jpeg', PDF_RENDER_POLICY.fallbackJpegQuality);
     if (blob.size > MAX_IMAGE_BYTES) throw new Error(`第 ${pageNumber} 页图像体积过大，请降低原件分辨率后重试`);
   } finally {
     page.cleanup();

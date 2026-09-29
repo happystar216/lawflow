@@ -1,4 +1,6 @@
-# Evidence-based statement recognition
+# Historical recognition experiments
+
+> Archived design notes. Since 2026-09-29, the sole production and regression entry is the web upload through `/api/recognize-quality`. See [current pipeline and commands](recognition-web-pipeline.md). The commands and provider-specific settings below describe historical experiments and are not the acceptance path.
 
 The experimental pipeline extracts complete PDF pages, maps fields to their original cells, compares independent readings, and emits a 12-column CSV with separate review evidence.
 

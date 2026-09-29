@@ -16,7 +16,9 @@
     "test:recognition-review": "tsx scripts/testRecognitionReview.ts",
     "preview": "vite preview",
     "deploy": "npm run build && wrangler pages deploy dist --project-name=lawflow",
-    "recognition:prompts": "tsx scripts/syncQualityPrompts.ts"
+    "recognition:prompts": "tsx scripts/syncQualityPrompts.ts",
+    "recognition:regression": "tsx scripts/runRecognitionRegression.ts",
+    "recognition:freeze-web": "tsx scripts/freezeWebRecognition.ts"
   },
   "dependencies": {
     "clsx": "^2.1.1",

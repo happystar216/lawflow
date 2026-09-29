@@ -1,19 +1,19 @@
 import { guardParseRequest, secureResponseHeaders } from '../lib/requestSecurity';
-import { decodeQualityRequest, missingQualityConfig, runQualityModel } from '../lib/qualityModel';
-import { QUALITY_REVISION, type QualityRequest } from '../../src/recognition/qualityProtocol';
-import { qualityPrompts } from '../lib/qualityPrompts.generated';
+import { decodeQualityRequest, missingQualityConfig, runQualityModel, qualityModelConfig } from '../lib/qualityModel';
+import { QUALITY_POLICY_HEADER, type QualityRequest } from '../../src/recognition/qualityProtocol';
 
 export async function onRequestGet(context: any): Promise<Response> {
   const rejected = guardParseRequest(context); if (rejected) return rejected;
   const missing = missingQualityConfig(context.env);
-  return Response.json({ revision: QUALITY_REVISION, ready: !missing.length, missing,
-    prompts: Object.fromEntries(Object.entries(qualityPrompts).map(([stage, p]) => [stage, p.sha256])),
-    models: { gemini: context.env.GEMINI_MODEL || 'gemini-3.8-flash', qwen: context.env.QWEN_MODEL || 'qwen3.8-flash' }
+  return Response.json({ ...await qualityModelConfig(context.env), ready: !missing.length, missing
   }, { headers: secureResponseHeaders, status: missing.length ? 503 : 200 });
 }
 
 export async function onRequestPost(context: any): Promise<Response> {
   const rejected = guardParseRequest(context); if (rejected) return rejected;
+  const expectedPolicy = context.request.headers.get(QUALITY_POLICY_HEADER);
+  if (expectedPolicy && expectedPolicy !== (await qualityModelConfig(context.env)).policySHA256)
+    return Response.json({ error: '识别配置已更新，请刷新网页后重试' }, { status: 409, headers: secureResponseHeaders });
   let input: QualityRequest;
   try {
     const body = await context.request.text();

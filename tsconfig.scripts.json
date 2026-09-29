@@ -30,6 +30,8 @@
     "scripts/runQualityTrial.ts",
     "scripts/scoreQualityTrial.ts",
     "scripts/testQualityReview.ts",
-    "scripts/planPrimaryRecovery.ts"
+    "scripts/planPrimaryRecovery.ts",
+    "scripts/runRecognitionRegression.ts",
+    "scripts/freezeWebRecognition.ts"
   ]
 }

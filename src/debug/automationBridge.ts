@@ -2,6 +2,7 @@ import type { CaseMetadata } from '../types/case';
 import type { CaseEvaluationReport } from '../types/evidence';
 import type { BankAccount, EvidenceReviewIssue, StandardTransaction } from '../types/transaction';
 import type { MinerUPageCheckpoint } from '../parsers/mineruBankStatementParser';
+import type { QualityRecognitionRecord } from '../recognition/qualityRunRecord';
 
 export interface AutomationImportTask {
   id: string;
@@ -52,6 +53,7 @@ export interface LawFlowAutomationSnapshot {
   updatedAt: string;
   app?: AutomationAppState;
   import?: AutomationImportState;
+  qualityRecords?: QualityRecognitionRecord[];
   recognitionPages?: Array<MinerUPageCheckpoint & { documentId: string; runId: string; fileName: string; totalPages: number }>;
 }
 
@@ -88,6 +90,13 @@ export function publishAutomationAppState(state: AutomationAppState): void {
 
 export function publishAutomationImportState(state: AutomationImportState): void {
   publish({ import: state });
+}
+
+export function publishQualityRecognitionRecord(record: QualityRecognitionRecord): void {
+  if (!isAutomationRequested()) return;
+  publish({});
+  const snapshot = window.__LAWFLOW_AUTOMATION__!;
+  snapshot.qualityRecords = [...(snapshot.qualityRecords || []).filter(r => r.documentId !== record.documentId), structuredClone(record)];
 }
 
 export function publishRecognitionCheckpoint(

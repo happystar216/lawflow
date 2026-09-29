@@ -9,7 +9,8 @@ import { deleteSourceDocument, saveSourceDocument } from '../store/sourceDocumen
 import { accountIdentityKey, transactionBelongsToAccount } from '../utils/accountIdentity';
 import { importErrorForUser } from '../utils/userFacingError';
 import { attachSourceProvenance, createExtractionRun, identifySourceDocument, sourceFilesWithoutTransactions, sourceIdentity, transactionCountsBySource } from '../utils/evidenceProvenance';
-import { publishAutomationImportState } from '../debug/automationBridge';
+import { publishAutomationImportState, publishQualityRecognitionRecord } from '../debug/automationBridge';
+import { createQualityRecognitionRecord, type QualityEvidence } from '../recognition/qualityRunRecord';
 import { normalizeRecognizedData } from '../utils/recognizedDataNormalizer';
 import { businessAccounts, incompleteRecognitionPages, isDocumentReviewAccount } from '../review/recognitionCompleteness';
 import { formatRecognitionDiagnostics } from '../review/recognitionDiagnostics';
@@ -254,7 +255,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
           const controller = new AbortController();
           abortControllerRef.current = controller;
           setIsCancellable(true);
-          const { accounts: parsedAccounts, transactions: parsedTx } = await parsePdfWithQualityPipeline(
+          const { accounts: parsedAccounts, transactions: parsedTx, evidence } = await parsePdfWithQualityPipeline(
             file,
             (info: GeminiProgressInfo) => {
               setProgressInfo(info);
@@ -291,6 +292,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
           importedAccountCount = businessAccounts(canonical.accounts).length;
           incompletePages = incompleteRecognitionPages(canonical.accounts);
           incompleteDocument = canonical.accounts.some(account => account.parseStatus === 'INCOMPLETE');
+          publishQualityRecognitionRecord(createQualityRecognitionRecord(source.documentId, file.name, evidence, newAccounts, newTransactions));
         } else {
           throw new Error('不支持的文件格式');
         }
@@ -413,9 +415,7 @@ export const Step1Upload: React.FC<Step1Props> = ({
       if (!account.sourceDocumentId) throw new Error('这个文件没有可下载的识别记录');
       const evidence = await createQualityCheckpointStore(caseId, account.sourceDocumentId, false).loadDelivery();
       if (!evidence) throw new Error('本机未找到这个文件的原文识别记录，请在完成识别的浏览器中下载');
-      const record = { documentId: account.sourceDocumentId, fileName: account.fileName, exportedAt: new Date().toISOString(), evidence,
-        transactions: transactions.filter(t => t.sourceDocumentId === account.sourceDocumentId),
-        accounts: accounts.filter(a => a.sourceDocumentId === account.sourceDocumentId) };
+      const record = createQualityRecognitionRecord(account.sourceDocumentId, account.fileName || '', evidence as QualityEvidence, accounts, transactions);
       const url = URL.createObjectURL(new Blob([JSON.stringify(record, null, 2)], { type: 'application/json' }));
       const anchor = document.createElement('a'); anchor.href = url; anchor.download = `识别记录_${account.fileName}.json`;
       document.body.appendChild(anchor); anchor.click(); anchor.remove(); setTimeout(() => URL.revokeObjectURL(url), 10_000);

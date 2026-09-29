@@ -6,6 +6,8 @@ import { basename, join, resolve } from 'node:path';
 import { BrowserContext, chromium, Page } from 'playwright-core';
 import { auditAccountBalance } from '../src/parsers/sanityChecker';
 import { accountIdentityKey } from '../src/utils/accountIdentity';
+import { freezeQualityRecognitionRecord, type QualityRecognitionRecord } from '../src/recognition/qualityRunRecord';
+import { QUALITY_ENDPOINT } from '../src/recognition/qualityProtocol';
 
 const HOST = '127.0.0.1';
 const PORT = positiveInteger(process.env.LAWFLOW_DEBUG_PORT, 4318);
@@ -32,6 +34,7 @@ interface DebugRun {
   completedAt?: string;
   target: string;
   apiTarget?: string;
+  recognitionOnly?: boolean;
   respondentName: string;
   fileNames: string[];
   filePaths: string[];
@@ -95,6 +98,8 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
     const target = validateTarget(textField(form, 'target') || DEFAULT_TARGET);
     const apiTargetText = textField(form, 'apiTarget');
     const apiTarget = apiTargetText ? validateTarget(apiTargetText) : undefined;
+    const recognitionOnly = textField(form, 'mode') === 'recognition';
+    if (recognitionOnly && apiTarget) throw new HttpError(400, '正式回测使用目标网页自己的识别接口，不接受 apiTarget');
     const respondentName = textField(form, 'respondentName') || '自动化调试案件';
     const files = [...form.entries()]
       .filter(([key, value]) => (key === 'file' || key === 'files') && typeof value !== 'string')
@@ -129,6 +134,7 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
       createdAt: new Date().toISOString(),
       target,
       apiTarget,
+      recognitionOnly,
       respondentName,
       fileNames,
       filePaths,
@@ -261,20 +267,6 @@ async function executeRun(run: DebugRun): Promise<void> {
     monitor.unref();
 
     await uploadInput.setInputFiles(run.filePaths);
-    // PDF imports now stop after bank/page sorting so a person can confirm the
-    // generated sub-files before recognition. In an isolated debug case the
-    // automation may accept the displayed proposal, but it never edits fields
-    // or impersonates a lawyer's later evidence confirmation.
-    const splitConfirmation = page.getByRole('button', { name: '确认分拣并开始识别' });
-    await Promise.race([
-      splitConfirmation.waitFor({ state: 'visible', timeout: RUN_TIMEOUT_MS }),
-      page.waitForFunction(({ expectedTasks, terminalStatuses }: { expectedTasks: number; terminalStatuses: string[] }) => {
-        const state = (window as any).__LAWFLOW_AUTOMATION__?.import;
-        if (!state || state.isProcessing || state.tasks.length < expectedTasks) return false;
-        return state.tasks.every((task: { status: string }) => terminalStatuses.includes(task.status));
-      }, { expectedTasks: run.filePaths.length, terminalStatuses: [...TERMINAL_TASK_STATUSES] }, { timeout: RUN_TIMEOUT_MS, polling: 1000 })
-    ]);
-    if (await splitConfirmation.isVisible().catch(() => false)) await splitConfirmation.click();
     await page.waitForFunction(({ expectedTasks, terminalStatuses }: { expectedTasks: number; terminalStatuses: string[] }) => {
       const state = (window as any).__LAWFLOW_AUTOMATION__?.import;
       if (!state || state.isProcessing || state.tasks.length < expectedTasks) return false;
@@ -293,7 +285,29 @@ async function executeRun(run: DebugRun): Promise<void> {
     workflowScreens.upload = { text: uploadText, screenshot: `/debug/runs/${run.id}/artifacts/upload-result.png` };
 
     const uploadSnapshot = await page.evaluate(() => (window as any).__LAWFLOW_AUTOMATION__ || null) as any;
-    if ((uploadSnapshot?.app?.transactions?.length || 0) > 0) {
+    if (run.recognitionOnly) {
+      const tasks = uploadSnapshot?.import?.tasks || [];
+      if (tasks.some((t: any) => ['ERROR', 'CANCELLED'].includes(t.status)))
+        throw new Error('正式网页导入失败；保留错误记录，不将失败运行记为成功');
+      const records: QualityRecognitionRecord[] = uploadSnapshot?.qualityRecords || [];
+      if (records.length !== run.fileNames.length) throw new Error('缺少正式网页识别记录；请先部署统一入口版本，且每次提交不同的 PDF');
+      for (const [index, record] of records.entries()) {
+        const manifest = record.evidence.run;
+        if (!manifest || manifest.runKind !== 'FRESH' || new URL(manifest.endpoint).origin !== new URL(run.target).origin
+          || new URL(manifest.endpoint).pathname !== QUALITY_ENDPOINT)
+          throw new Error('正式回测要求目标网页自己的接口和全新模型调用');
+        const actual = { ...record,
+          accounts: (uploadSnapshot.app?.accounts || []).filter((a: any) => a.sourceDocumentId === record.documentId),
+          transactions: (uploadSnapshot.app?.transactions || []).filter((t: any) => t.sourceDocumentId === record.documentId) };
+        const frozen = freezeQualityRecognitionRecord(actual);
+        const dir = join(run.outputDir, 'documents', String(index + 1).padStart(2, '0'));
+        await mkdir(dir, { recursive: true });
+        await writeFile(join(dir, 'recognition-record.json'), JSON.stringify(actual, null, 2));
+        await writeFile(join(dir, 'result.json'), JSON.stringify(frozen, null, 2));
+        await writeFile(join(dir, 'registry.json'), JSON.stringify(record.evidence.registry, null, 2));
+      }
+    }
+    if (!run.recognitionOnly && (uploadSnapshot?.app?.transactions?.length || 0) > 0) {
       if (!await clickButtonContaining(page, '下一步：核对原件')) throw new Error('识别完成后没有找到“下一步：核对原件”按钮');
       await waitForWorkflowStep(page, 2, '银行流水数据准确性复核');
       await new Promise(resolve => setTimeout(resolve, 1000));
@@ -356,6 +370,8 @@ async function executeRun(run: DebugRun): Promise<void> {
       },
       import: snapshot?.import || null,
       recognitionPages: snapshot?.recognitionPages || [],
+      qualityRecords: snapshot?.qualityRecords || [],
+      runKind: run.recognitionOnly ? 'PRODUCTION_WEB_FRESH' : 'WEB_DEBUG',
       caseMetadata: app?.caseMetadata || null,
       accounts: app?.accounts || [],
       transactions: app?.transactions || [],
