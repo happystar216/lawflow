@@ -20,3 +20,23 @@ test('clipped own account requires a full printed header and separate corroborat
   assert.equal(recoverPrintedOwnerPrefixes(rows, context, registry, { 3: info }).length, 0);
   assert.equal(rows[0].values[0], '12345678', 'recovery plan retains raw transcription');
 });
+
+test('single-page clipped account requires both independent and focused full-header readings', () => {
+  const number = '4518108309148003', short = '451810830';
+  const rows: AssembledRow[] = [{ id: 'T1', sourceRows: [1], values: [short, ...Array(11).fill('')],
+    fields: Array.from({ length: 12 }, () => []) }];
+  const context = [{ page: 1, table: 1, order: 1, directOwner: true, accountKind: 'credit', description: '' }];
+  const registry: SourceRegistry = { pages: [1], rows: {}, cells: { 1: { id: 1, page: 1, row: null, column: null,
+    text: `胡艳红 4518108309148003 2023-05-08~2026-07-24` } } };
+  const independent: IndependentPage = { pageType: 'transactions', coverage: 'complete', rows: [], pageIssues: [],
+    ownerIdentifiers: [{ role: 'card', value: number }] };
+  const focused = { bankName: '', issues: [], identifiers: [{ role: 'card' as const, value: number, characters: [...number],
+    table: 1, scope: 'header' as const, label: '', uncertainPositions: [] }] };
+  assert.equal(recoverPrintedOwnerPrefixes(rows, context, registry, { 1: independent }).length, 0);
+  assert.equal(recoverPrintedOwnerPrefixes(rows, context, registry, { 1: independent }, { 1: focused })[0].value, number);
+  assert.equal(recoverPrintedOwnerPrefixes(rows, context, registry, { 1: independent }, { 1: { ...focused,
+    identifiers: [{ ...focused.identifiers[0], value: '4518108309148004' }] } }).length, 0);
+  registry.cells[2] = { ...registry.cells[1], id: 2, text: '4518108309148004' };
+  assert.equal(recoverPrintedOwnerPrefixes(rows, context, registry, { 1: independent }, { 1: focused }).length, 0,
+    'two full printed accounts with the same prefix remain ambiguous');
+});

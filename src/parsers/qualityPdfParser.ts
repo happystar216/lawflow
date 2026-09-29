@@ -104,7 +104,7 @@ export async function parsePdfWithQualityPipeline(file: File, onProgress: (p: Ge
         for (let attempt = 0; attempt < 3; attempt++) {
           try { attempts++; reply = await requestQualityModel(input, signal, status.policySHA256); break; }
           catch (error) {
-            signal.throwIfAborted(); if (attempt === 2 || /配置|401|403/.test(String(error))) throw error;
+            signal.throwIfAborted(); if (attempt === 2 || /配置|401|402|403/.test(String(error))) throw error;
             await new Promise<void>((resolve, reject) => {
               const stop = () => { clearTimeout(timer); reject(signal.reason); };
               const timer = setTimeout(() => { signal.removeEventListener('abort', stop); resolve(); }, 1000 * 2 ** attempt);

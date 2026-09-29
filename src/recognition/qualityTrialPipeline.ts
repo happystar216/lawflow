@@ -37,11 +37,13 @@ export function runQualityTrial(mapping: TableMappingPlan, registry: SourceRegis
     change(repair.observation - 1, 5, repair.value, 'JOINED_PRINTED_DIRECTION_WITH_INDEPENDENT_MARKER', [`cell:${repair.cell}`, repair.source]);
     rows[repair.observation - 1].fields[5] = [{ id: repair.cell, text: repair.marker, normalized: repair.value }];
   }
-  const recoveredOwnerPrefixes = recoverPrintedOwnerPrefixes(rows, materialized.metadata, registry, independent);
+  const recoveredOwnerPrefixes = recoverPrintedOwnerPrefixes(rows, materialized.metadata, registry, independent, accountRecovery);
   for (const recovered of recoveredOwnerPrefixes) {
     const original = rows[recovered.observation - 1].values[0], page = materialized.metadata[recovered.observation - 1].page;
     for (const alternate of independent[page]?.rows || []) if (accountFromSource(alternate.values[0]) === original) alternate.values[0] = recovered.value;
-    change(recovered.observation - 1, 0, recovered.value, 'PRINTED_FULL_HEADER_AND_SEPARATE_ACCOUNT_CONFIRM_CLIPPED_OWNER_COLUMN', recovered.sources);
+    change(recovered.observation - 1, 0, recovered.value, recovered.sources.some(source => source.startsWith('focused:'))
+      ? 'PRINTED_FULL_HEADER_WITH_INDEPENDENT_AND_FOCUSED_CONFIRMATION'
+      : 'PRINTED_FULL_HEADER_AND_SEPARATE_ACCOUNT_CONFIRM_CLIPPED_OWNER_COLUMN', recovered.sources);
   }
   rows.forEach((row, i) => {
     if (row.values[5]) return;

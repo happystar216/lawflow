@@ -32,6 +32,14 @@ test('server resource exhaustion is retryable and does not mislabel a file as ov
   }
 });
 
+test('upstream HTTP 402 points to service account status and preserves resume', () => {
+  const result = importErrorForUser(new Error('Qwen 服务请求失败（HTTP 402）'), '流水.pdf');
+  assert.equal(result.diagnosticCode, 'UPSTREAM_PAYMENT_REQUIRED');
+  assert.equal(result.retryable, true);
+  assert.match(result.message, /服务账户状态.*进度可以复用/);
+  assert.doesNotMatch(result.message, /暂时不可用/);
+});
+
 test('gateway timeout identifies the final normalization stage instead of blaming the PDF', () => {
   const result = importErrorForUser(new Error('服务返回异常（524）'), '长流水.pdf');
   assert.match(result.message, /最终整理等待超时/);

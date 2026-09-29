@@ -79,6 +79,14 @@ export function importErrorForUser(error: unknown, fileName: string): UserFacing
       retryable: false
     };
   }
+  if (/\b402\b/.test(details)) {
+    return {
+      ...base,
+      message: '上游识别服务返回额度或计费相关错误。请检查服务账户状态后继续识别，已保存的进度可以复用。',
+      retryable: true,
+      diagnosticCode: diagnosticCode || 'UPSTREAM_PAYMENT_REQUIRED'
+    };
+  }
   if (/429|频繁|繁忙|限流|rate.?limit/i.test(details)) {
     return {
       ...base,
