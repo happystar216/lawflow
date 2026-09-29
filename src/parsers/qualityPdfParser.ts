@@ -78,13 +78,16 @@ export async function parsePdfWithQualityPipeline(file: File, onProgress: (p: Ge
       call: async (input, page) => {
         signal.throwIfAborted(); const key = `${input.stage}:${page}:${await hash(JSON.stringify(input))}`;
         const expectedModel = ['primary', 'context', 'primaryRecovery'].includes(input.stage) ? status.models?.qwen : status.models?.gemini;
-        try { const saved = await options.store.read(key);
-          if (saved && saved.promptSHA256 === status.prompts?.[input.stage] && saved.model === expectedModel) {
-            validateQualityResult(input.stage, saved.result);
+        let saved: ModelReply | undefined;
+        try { saved = await options.store.read(key); } catch { warn(); }
+        if (saved && saved.promptSHA256 === status.prompts?.[input.stage] && saved.model === expectedModel) {
+          let valid = true;
+          try { validateQualityResult(input.stage, saved.result); } catch { valid = false; }
+          if (valid) {
             if (!resumed) { resumed = true; options.onResumeWarning?.('已恢复这个原始文件的识别进度，已完成的步骤会直接复用。'); }
             return saved;
           }
-        } catch { warn(); }
+        }
         let reply: ModelReply | undefined;
         for (let attempt = 0; attempt < 3; attempt++) {
           try { reply = await requestQualityModel(input, signal); break; }

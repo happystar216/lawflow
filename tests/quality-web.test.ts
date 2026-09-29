@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { decidePreflight, qualityWireRequest, type QualityRequest } from '../src/recognition/qualityProtocol';
+import { decidePreflight, qualityWireRequest, validateQualityResult, type QualityRequest } from '../src/recognition/qualityProtocol';
 import { runQualityWorkflow } from '../src/recognition/qualityWorkflow';
 import { qualityToWeb } from '../src/recognition/qualityWebAdapter';
 import { buildQualitySources, stabilizeQualityMapping } from '../src/recognition/qualitySources';
@@ -61,6 +61,22 @@ const sourcePage = { nearTableText: ['某银行', '001234567890'], tables: [{ ro
 const mapping: TableMappingPlan = { tables: [{ page: 1, table: 1, kind: 'transactions', accountKind: 'deposit', groups: [[1]], ignored: [], directionCodes: null,
   fields: { bankName: { fixed: 1 }, accountNumber: { fixed: 2 }, transactionDate: { row: 0, col: 1 }, direction: { row: 0, col: 2 }, amount: { row: 0, col: 3 }, balance: { row: 0, col: 4 },
     description: { row: 0, col: 5 }, counterpartyName: { row: 0, col: 6 }, counterpartyAccount: { row: 0, col: 7 } } }], typeRules: [{ accountKind: 'deposit', text: '账户转账', type: '账户转账' }] };
+test('mapping rejects malformed nontransaction rows before they can become resumable responses', async () => {
+  validateQualityResult('mapping', mapping);
+  for (const ignored of [{ r: 2, kind: 'header' }, { r: [2], kind: 'footer' }, { r: ['2'], kind: 'header' }, null]) {
+    const invalid = structuredClone(mapping) as any;
+    invalid.tables[0].ignored = [ignored];
+    assert.throws(() => validateQualityResult('mapping', invalid), /非交易行标记/);
+    const fetcher = (async () => new Response('data: ' + JSON.stringify({ candidates: [
+      { content: { parts: [{ text: JSON.stringify(invalid) }] }, finishReason: 'STOP' }
+    ] }) + '\n\n')) as typeof fetch;
+    await assert.rejects(runQualityModel({ stage: 'mapping', source: [{}] }, { GEMINI_API_KEY: 'test', DASHSCOPE_API_KEY: 'test' },
+      new AbortController().signal, fetcher), /非交易行标记/);
+  }
+  const valid = structuredClone(mapping);
+  valid.tables[0].ignored = [{ r: [2], kind: 'other' }];
+  validateQualityResult('mapping', valid);
+});
 test('workflow preflights ALL pages first, skips confirmed blank and sends one text-only full list to mapping', async () => {
   const calls: Array<{ input: QualityRequest; page: number }> = [], rotations: number[] = [];
   const out = await runQualityWorkflow({ totalPages: 2, signal: new AbortController().signal, progress() {},

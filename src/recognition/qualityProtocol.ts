@@ -40,6 +40,22 @@ export function validateQualityResult(stage: QualityStage, value: any): void {
       || v.ownerIdentifiers !== undefined && (!Array.isArray(v.ownerIdentifiers) || v.ownerIdentifiers.some(x => !['account', 'card'].includes(x.role) || typeof x.value !== 'string'))) throw new Error('独立读取结果不完整');
   } else if (stage === 'mapping') {
     if (!Array.isArray(value.tables) || !Array.isArray(value.typeRules)) throw new Error('整理结果不完整');
+    // Validate before caching; invalid ignored lists must not poison every resume.
+    const ids = (v: unknown): v is number[] => Array.isArray(v) && v.every(id => Number.isInteger(id) && id > 0);
+    for (const table of value.tables) {
+      if (!table || !Number.isInteger(table.page) || table.page < 1 || !Number.isInteger(table.table) || table.table < 1
+        || !['transactions', 'account', 'other'].includes(table.kind)
+        || !['deposit', 'credit', 'unknown'].includes(table.accountKind)
+        || !table.fields || typeof table.fields !== 'object' || Array.isArray(table.fields)
+        || !Array.isArray(table.groups) || table.groups.some((group: unknown) => !ids(group) || !group.length)
+        || !Array.isArray(table.ignored)) throw new Error('整理结果的表格结构无效，可继续已保存的进度重新整理');
+      for (const ignored of table.ignored) {
+        if (!ignored || !ids(ignored.r)
+          || !['header', 'account', 'total', 'blank', 'no_transactions', 'other'].includes(ignored.kind)) {
+          throw new Error('整理结果的非交易行标记无效，可继续已保存的进度重新整理');
+        }
+      }
+    }
   } else if (stage === 'accounts') {
     if (typeof value.bankName !== 'string' || !Array.isArray(value.identifiers) || !strings(value.issues)
       || value.identifiers.some((x: any) => !['account', 'card'].includes(x.role) || typeof x.value !== 'string'
