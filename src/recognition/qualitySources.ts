@@ -77,7 +77,11 @@ export function stabilizeQualityMapping(old: TableMappingPlan, latest: TableMapp
   const tables = templates.map(t => {
     const prior = old.tables.find(p => p.page === t.page && p.table === t.table);
     if (!prior || !unchanged.has(t.page)) return t;
-    try { return rebase(prior); } catch { return t; }
+    try { return rebase(prior); } catch {
+      const fresh = latest.tables.find(candidate => candidate.page === t.page && candidate.table === t.table);
+      if (!fresh) throw new Error('未变化表格的跨页来源已失效，且本次整理未提供新映射');
+      return fresh;
+    }
   }).sort((a, b) => a.page - b.page || a.table - b.table);
   const typeRules = structuredClone(old.typeRules);
   const ruleKey = (r: typeof typeRules[number]) => JSON.stringify([r.accountKind, r.text.replace(/\\n|\s/g, '')]);

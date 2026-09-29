@@ -13,6 +13,9 @@ test('clipped own account requires a full printed header and separate corroborat
   const info: IndependentPage = { pageType: 'account_info', coverage: 'complete', rows: [], pageIssues: [], ownerIdentifiers: [{ role: 'card', value: number }] };
   assert.equal(recoverPrintedOwnerPrefixes(rows, context, registry, {}).length, 0);
   assert.equal(recoverPrintedOwnerPrefixes(rows, context, registry, { 3: info })[0].value, number);
+  registry.cells[1].text = `测试户名 998877665544332211 ${number} 2024-01-01~2026-01-01`;
+  assert.equal(recoverPrintedOwnerPrefixes(rows, context, registry, { 3: info })[0].value, number, 'combined header retains the complete printed account');
+  assert.equal(recoverPrintedOwnerPrefixes(rows, context, registry, {}).length, 0, 'a combined header still requires separate corroboration');
   registry.cells[2] = { ...registry.cells[1], id: 2, text: '1234567800000002' };
   assert.equal(recoverPrintedOwnerPrefixes(rows, context, registry, { 3: info }).length, 0);
   assert.equal(rows[0].values[0], '12345678', 'recovery plan retains raw transcription');

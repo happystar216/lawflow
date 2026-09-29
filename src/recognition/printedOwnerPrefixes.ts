@@ -11,8 +11,11 @@ export function recoverPrintedOwnerPrefixes(rows: AssembledRow[], context: Obser
     if (!context[i].directOwner || !/^\d{8,11}$/.test(prefix)) return;
     const headers = Object.values(registry.cells).flatMap(cell => {
       if (cell.page !== page || cell.row !== null) return [];
-      const value = accountFromSource(cell.text);
-      return value && /^\d{12,32}$/.test(value) && value.startsWith(prefix) ? [{ value, cell }] : [];
+      // OCR may combine the owner's ID number, card number and date interval
+      // into one header cell. Select the literal full number; the independent
+      // account inventory and other detailed pages below must still confirm it.
+      const values = new Set([accountFromSource(cell.text), ...[...cell.text.matchAll(/(?<!\d)\d{12,32}(?!\d)/g)].map(m => m[0])]);
+      return [...values].flatMap(value => value && /^\d{12,32}$/.test(value) && value.startsWith(prefix) ? [{ value, cell }] : []);
     });
     const choices = new Set(headers.map(h => h.value));
     if (choices.size !== 1) return;
