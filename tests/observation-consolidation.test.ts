@@ -16,6 +16,20 @@ test('same-day identical transactions in the same stream are retained separately
   const rows = [row(1, '001234567890'), row(1, '001234567890')];
   assert.equal(consolidateObservations(rows, [meta(true), meta(true)]).events.length, 2);
 });
+
+test('independent agreement can establish duplicate views with damaged balances but never erase their conflicts', () => {
+  const rows = [1, 2, 3, 4, 5].map(n => row(n, '001234567890')).concat([1, 2, 3, 4, 5].map(n => row(n, '001234567890')));
+  const context = [...Array.from({ length: 5 }, () => meta(false)), ...Array.from({ length: 5 }, () => meta(true))];
+  const readings = Object.fromEntries(rows.map((r, i) => [i + 1, [...r.values]]));
+  rows[0].values[7] = '888.00'; rows[1].values[7] = '999.00';
+  assert.equal(consolidateObservations(rows, context).events.length, 10);
+  const linked = consolidateObservations(rows, context, readings);
+  assert.equal(linked.events.length, 5);
+  assert.ok(linked.events[0].conflicts.some(c => c.field === 7));
+  assert.equal(rows[0].values[7], '888.00');
+  readings[1][7] = '123.00'; readings[2][7] = '124.00';
+  assert.equal(consolidateObservations(rows, context, readings).events.length, 10);
+});
 test('one accidental matching transaction does not establish duplicate statement views', () => {
   const rows = [row(1, '001234567891'), row(1, '001234567890')];
   assert.equal(consolidateObservations(rows, [meta(false), meta(true)]).events.length, 2);

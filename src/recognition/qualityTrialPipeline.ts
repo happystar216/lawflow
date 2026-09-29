@@ -110,7 +110,8 @@ export function runQualityTrial(mapping: TableMappingPlan, registry: SourceRegis
   const conversionRows = new Set<number>();
   const conversionInterestRows = new Set<number>();
   const loanAccounts = new Set(rows.flatMap((row, i) => row.values[5] === 'IN' && row.values[10]
-    && /^(?:放款|贷款放款|个人贷款发放)(?:$|--|[：:])/.test(materialized.metadata[i].description)
+    && materialized.metadata[i].accountKind === 'deposit'
+    && /^(?:放款|贷款放款|个人贷款发放|个人贷款)(?:$|--|[：:])/.test(materialized.metadata[i].description)
     ? [JSON.stringify([row.values[0], row.values[10]])] : []));
   rows.forEach((row, i) => {
     const next = rows[i + 1], fee = rows[i + 2];
@@ -180,7 +181,18 @@ export function runQualityTrial(mapping: TableMappingPlan, registry: SourceRegis
     if (printedType && !(printedType.requiresReview && !printedType.type && row.values[8])) {
       change(i, 8, printedType.type, printedType.basis, purposeFields.map(s => `cell:${s.id}`));
     }
-    if (printedType?.requiresReview) typeUncertainties.push(i);
+    const contextualLoanRepayment = printedType?.requiresReview && description === '批量还款'
+      && context.accountKind === 'deposit' && row.values[5] === 'OUT'
+      && /^\d{12,32}$/.test(row.values[0]) && /^\d{12,32}$/.test(row.values[10])
+      && loanAccounts.has(JSON.stringify([row.values[0], row.values[10]]));
+    if (contextualLoanRepayment) {
+      const loanSources = rows.flatMap((other, n) => other.values[0] === row.values[0] && other.values[10] === row.values[10]
+        && materialized.metadata[n].accountKind === 'deposit'
+        && other.values[5] === 'IN' && /^(?:放款|贷款放款|个人贷款发放|个人贷款)(?:$|--|[：:])/.test(materialized.metadata[n].description)
+        ? other.fields[8].map(s => `cell:${s.id}`) : []);
+      change(i, 8, '贷款还款', 'PRINTED_BATCH_REPAYMENT_TO_SAME_DOCUMENTED_LOAN_ACCOUNT', [...purposeFields.map(s => `cell:${s.id}`), ...loanSources]);
+    }
+    if (printedType?.requiresReview && !contextualLoanRepayment) typeUncertainties.push(i);
     const table = mapping.tables.find(t => t.page === context.page && t.table === context.table)!;
     const auxiliaryPurpose = printedType?.requiresReview ? null : auxiliaryPrintedPurpose(row, table, registry);
     if (auxiliaryPurpose) {
@@ -195,7 +207,8 @@ export function runQualityTrial(mapping: TableMappingPlan, registry: SourceRegis
         [...row.fields[8], ...row.fields[9]].map(s => `cell:${s.id}`));
       financialIncomeUncertainties.push(i);
     }
-    if (['消费', '退款', '缴费'].includes(row.values[8])) {
+    if (['消费', '退款', '缴费'].includes(row.values[8])
+      || row.values[8] === '分期退款' && !row.values[9] && !row.values[10]) {
       const headers = table.ignored.filter(s => s.kind === 'header').flatMap(s => s.r).map(id => registry.rows[id]);
       const merchantColumns = new Set(headers.flatMap(r => r.cells.flatMap((id, col) =>
         /^(?:交易场所简称|商户名称|商户简称|交易商户)$/.test(registry.cells[id].text.replace(/\s/g, '')) ? [col] : [])));

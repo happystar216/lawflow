@@ -5,6 +5,7 @@ import { materializeTableMapping, type MappedTable } from '../src/recognition/ta
 import { recoverDescriptionColumn, combinedPartySuffixColumn } from '../src/recognition/columnRecovery';
 import { printedTransactionType } from '../src/recognition/printedTransactionType';
 import { planPrimaryRecovery } from '../src/recognition/primaryRecoveryPlan';
+import { runQualityTrial } from '../src/recognition/qualityTrialPipeline';
 
 test('missing tables remain explicit required source issues and trigger recovery instead of aborting the whole PDF', () => {
   const { registry } = buildQualitySources([{ nearTableText: [], tables: [{ rows: [['真实交易']] }] }]);
@@ -52,12 +53,48 @@ test('combined suffix evidence survives an incorrect part selector and cannot pr
   assert.equal(combinedPartySuffixColumn(table, registry), null);
 });
 
+test('an empty purpose column cannot overwrite a mapped summary-code column with printed words', () => {
+  const { registry } = buildQualitySources([{ nearTableText: [], tables: [{ rows: [['摘要代号', '用途'], ['138 利息', '']] }] }]);
+  const table: MappedTable = { page: 1, table: 1, kind: 'transactions', accountKind: 'deposit', groups: [[2]],
+    ignored: [{ r: [1], kind: 'header' }], fields: { description: { row: 0, col: 1 } }, directionCodes: null };
+  assert.equal(recoverDescriptionColumn(table, registry), null);
+  const out = materializeTableMapping({ tables: [table], typeRules: [{ accountKind: 'deposit', text: '138 利息', type: '存款结息' }] }, registry);
+  assert.equal(out.rows[0].values[8], '存款结息');
+  assert.ok(out.rows[0].fields[8].some(f => f.text === '138 利息'));
+});
+
 test('printed deposit transfers are stable without model type dictionaries and repayment purpose still takes precedence', () => {
   for (const text of ['转账', '跨行汇款', '他行汇入', '网银转账', '超网汇兑往账'])
     assert.equal(printedTransactionType(text, [text], 'OUT', 'deposit')?.type, '账户转账');
   assert.equal(printedTransactionType('转账', ['信用卡还款'], 'OUT', 'deposit')?.type, '信用卡还款');
   assert.equal(printedTransactionType('转账', ['贷款还款'], 'OUT', 'deposit')?.type, '贷款还款');
+  assert.equal(printedTransactionType('批处理归还欠款', ['个人贷款每日扣款'], 'OUT', 'deposit')?.type, '贷款还款');
+  assert.equal(printedTransactionType('批量还款', ['批量还款'], 'OUT', 'deposit')?.requiresReview, true);
   assert.equal(printedTransactionType('转账', ['转账'], 'IN', 'credit'), null);
   for (const text of ['代扣业务', '外围批量入帐(批前运行)', '存款', '通过转账存取交易'])
     assert.equal(printedTransactionType(text, [text], 'OUT', 'deposit'), null);
+});
+
+test('batch repayment needs the exact owner and loan account pair from a printed loan disbursement', () => {
+  const { registry } = buildQualitySources([{ nearTableText: [], tables: [{ rows: [
+    ['001234567890', '009876543210', '2026-01-01', '收入', '100', '100', '个人贷款'],
+    ['001234567890', '009876543210', '2026-01-02', '支出', '10', '90', '批量还款'],
+    ['001234567890', '009876543211', '2026-01-03', '支出', '10', '80', '批量还款']
+  ] }] }]);
+  const table: MappedTable = { page: 1, table: 1, kind: 'transactions', accountKind: 'deposit', groups: [[1], [2], [3]], ignored: [], directionCodes: null,
+    fields: Object.fromEntries(['accountNumber', 'counterpartyAccount', 'transactionDate', 'direction', 'amount', 'balance', 'description'].map((field, i) => [field, { row: 0, col: i + 1 }])) };
+  const out = runQualityTrial({ tables: [table], typeRules: [] }, registry, {}, { singleIssuerDocument: false });
+  assert.equal(out.rows[1].values[8], '贷款还款');
+  assert.equal(out.rows[2].values[8], '');
+  assert.ok(out.transformations.some(t => t.basis === 'PRINTED_BATCH_REPAYMENT_TO_SAME_DOCUMENTED_LOAN_ACCOUNT'));
+});
+
+test('installment refund retains a printed merchant when both counterparty fields are absent', () => {
+  const { registry } = buildQualitySources([{ nearTableText: [], tables: [{ rows: [
+    ['001234567890', '2026-01-01', '支出', '10', '-90', '分期付款退货', '某清算单位']
+  ] }] }]);
+  const table: MappedTable = { page: 1, table: 1, kind: 'transactions', accountKind: 'credit', groups: [[1]], ignored: [], directionCodes: null,
+    fields: Object.fromEntries(['accountNumber', 'transactionDate', 'direction', 'amount', 'balance', 'description', 'merchantName'].map((field, i) => [field, { row: 0, col: i + 1 }])) };
+  const out = runQualityTrial({ tables: [table], typeRules: [] }, registry, {}, { singleIssuerDocument: false });
+  assert.equal(out.rows[0].values[9], '某清算单位');
 });

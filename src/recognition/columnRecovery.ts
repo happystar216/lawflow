@@ -2,7 +2,7 @@ import type { SourceRegistry } from './sourceAssembly';
 import type { MappedTable, ColumnSelector } from './tableMapping';
 import { semanticText } from './semanticText';
 
-const descriptionHeader = /^(?:交易摘要|摘要|交易说明|交易描述|用途)$/;
+const descriptionHeader = /^(?:交易摘要|摘要|摘要代号|交易说明|交易描述|用途)$/;
 
 /** Consistent name+four-digit suffix in a column explicitly labelled 对方信息.
  * The suffix remains partial; it is never expanded into a complete account.

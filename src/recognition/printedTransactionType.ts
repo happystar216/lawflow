@@ -9,7 +9,7 @@ export function printedTransactionType(description: string, evidence: string[], 
   const result = (type: string, basis: string) => ({ type, basis });
   if (direction === 'OUT') {
     const credit = has(/信用卡.{0,8}还款|贷记卡.{0,8}还款/);
-    const loan = has(/贷款还款|归还贷款|偿还贷款|还贷/);
+    const loan = has(/贷款还款|贷款本息|归还贷款|偿还贷款|还贷|个人贷款(?:每日扣款|结息)/);
     if (credit && loan) return result('', 'CONFLICTING_PRINTED_REPAYMENT_PURPOSES');
     if (credit) return result('信用卡还款', 'PRINTED_CREDIT_CARD_REPAYMENT_PURPOSE');
     if (loan) return result('贷款还款', 'PRINTED_LOAN_REPAYMENT_PURPOSE');

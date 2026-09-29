@@ -45,6 +45,24 @@ export function consolidateObservations(rows: AssembledRow[], context: Observati
       const right = mb.get(k);
       if (left.length === 1 && right?.length === 1) anchors.push({ left: left[0], right: right[0], basis: 'EXACT_DATE_DIRECTION_AMOUNT_BALANCE' });
     }
+    // A balance OCR error must not prevent recognizing otherwise identical
+    // duplicate views. Both independent readings must agree on the full core,
+    // and both printed rows must still agree on owner/date/direction/amount.
+    // Require three primary anchors first; preserve the balance conflict below.
+    if (anchors.length >= 3 && rows[ia[0]].values[0] && rows[ia[0]].values[0] === rows[ib[0]].values[0]) {
+      const corroborates = (i: number, j: number) => {
+        const x = independentByObservation[i + 1], y = independentByObservation[j + 1];
+        return x && y && [0, 4, 5, 6, 7].every(f => x[f] && x[f] === y[f])
+          && [0, 4, 5, 6].every(f => rows[i].values[f] === x[f] && rows[j].values[f] === y[f]);
+      };
+      for (const i of ia) {
+        if (anchors.some(p => p.left === i)) continue;
+        const candidates = ib.filter(j => corroborates(i, j));
+        if (candidates.length !== 1 || anchors.some(p => p.right === candidates[0])
+          || ia.filter(k => corroborates(k, candidates[0])).length !== 1) continue;
+        anchors.push({ left: i, right: candidates[0], basis: 'PRINTED_CORE_AND_TWO_INDEPENDENT_BALANCES_IN_DUPLICATE_VIEWS' });
+      }
+    }
     const dates = new Set(anchors.map(p => rows[p.left].values[4]));
     if (anchors.length < 3 || dates.size < 2 || anchors.length / Math.min(ia.length, ib.length) < .8) continue;
     const matches = [...anchors];
