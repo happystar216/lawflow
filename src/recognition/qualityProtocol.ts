@@ -9,7 +9,7 @@ export interface PageMetrics { darkFraction160: number; darkFraction210: number;
 export interface ModelReply { result: any; finishReason: string; model: string; usage?: unknown; promptSHA256: string; policySHA256?: string }
 export const QUALITY_ENDPOINT = '/api/recognize-quality';
 export const QUALITY_POLICY_HEADER = 'x-lawflow-quality-policy';
-export interface QualityRequest { stage: QualityStage; images?: string[]; source?: unknown }
+export interface QualityRequest { stage: QualityStage; images?: string[]; source?: unknown; mappingFeedback?: string }
 export const QUALITY_IMAGE_CONTENT_TYPE = 'application/x-lawflow-page-images';
 /** Keep image bytes out of JSON parsing/stringifying in the edge proxy. The logical input and cache hash are unchanged. */
 export function qualityWireRequest(input: QualityRequest) {

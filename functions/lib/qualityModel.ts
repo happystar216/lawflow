@@ -28,6 +28,7 @@ export function missingQualityConfig(env: QualityEnvironment) {
 }
 export function validateQualityRequest(value: any): asserts value is QualityRequest {
   if (!value || !QUALITY_STAGES.includes(value.stage)) throw new Error('未知识别步骤');
+  if (value.mappingFeedback !== undefined && (value.stage !== 'mapping' || typeof value.mappingFeedback !== 'string' || value.mappingFeedback.length > 4000)) throw new Error('整理反馈格式错误');
   if (value.stage === 'mapping') {
     if (value.images?.length || !Array.isArray(value.source) || !value.source.length || value.source.length > 1500) throw new Error('整理步骤只接受完整原文列表');
   } else if (value.source !== undefined || !Array.isArray(value.images) || value.images.length !== (value.stage === 'preflight' ? 4 : 1)
@@ -53,7 +54,10 @@ function qwenBody(input: QualityRequest, model: string, prompt: string) {
 }
 function geminiBody(input: QualityRequest, prompt: string) {
   const parts = [JSON.stringify({ text: prompt })];
-  if (input.stage === 'mapping') parts.push(JSON.stringify({ text: JSON.stringify(input.source) }));
+  if (input.stage === 'mapping') {
+    parts.push(JSON.stringify({ text: JSON.stringify(input.source) }));
+    if (input.mappingFeedback) parts.push(JSON.stringify({ text: `上次结构校验失败：${input.mappingFeedback}。请根据 tableCatalog 和原行 ID 修正来源引用，重新返回完整映射列表；不得删除真实原行或虚构表号。` }));
+  }
   else input.images!.forEach((data, index) => {
     if (input.stage === 'preflight') parts.push(JSON.stringify({ text: `候选${'ABCD'[index]}` }));
     parts.push('{"inlineData":{"mimeType":"image/jpeg","data":"' + data + '"}}');

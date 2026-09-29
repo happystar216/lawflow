@@ -69,14 +69,17 @@ export async function runQualityWorkflow(io: QualityWorkflowIO) {
   // A PDF upload can contain multiple banks; do not assume a single issuer from a filename.
   const scope = { singleIssuerDocument: false };
   let result: ReturnType<typeof runQualityTrial> | undefined;
+  let mappingFeedback = '';
   try {
-    if (!missingMappedTables(mapping, registry).length) result = runQualityTrial(mapping, registry, independent, scope);
-  } catch { /* Invalid source references require a fresh mapping, never a guessed repair. */ }
+    const missing = missingMappedTables(mapping, registry);
+    if (missing.length) mappingFeedback = `遗漏输入表格（页:表）：${missing.join('、')}`;
+    else result = runQualityTrial(mapping, registry, independent, scope);
+  } catch (error) { mappingFeedback = error instanceof Error ? error.message : '来源引用无效'; }
   if (!result) {
     io.progress('重新整理遗漏表格或无效来源引用…', 70);
     // One bounded retry of the same full list bypasses only its cached reply.
     // A second invalid reference still fails; omissions remain REQUIRED issues.
-    mapping = (await io.call({ stage: 'mapping', source }, 0, { refresh: true })).result;
+    mapping = (await io.call({ stage: 'mapping', source, mappingFeedback: mappingFeedback.slice(0, 4000) }, 0, { refresh: true })).result;
     result = runQualityTrial(mapping, registry, independent, scope);
   }
   const primaryPlan = planPrimaryRecovery(result.pending, registry);

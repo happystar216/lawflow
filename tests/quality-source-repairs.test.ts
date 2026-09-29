@@ -98,3 +98,10 @@ test('installment refund retains a printed merchant when both counterparty field
   const out = runQualityTrial({ tables: [table], typeRules: [] }, registry, {}, { singleIssuerDocument: false });
   assert.equal(out.rows[0].values[9], '某清算单位');
 });
+
+test('remark evidence supports ordinary transfers without guessing a missing purpose or overriding a loan', () => {
+  assert.equal(printedTransactionType('', ['往来款'], 'OUT', 'deposit', '001234567890')?.type, '账户转账');
+  assert.equal(printedTransactionType('', ['往来款'], 'OUT', 'deposit'), null);
+  assert.equal(printedTransactionType('', ['贷款还款', '往来款'], 'OUT', 'deposit', '001234567890')?.type, '贷款还款');
+  assert.equal(printedTransactionType('', [], 'OUT', 'deposit', '001234567890'), null);
+});

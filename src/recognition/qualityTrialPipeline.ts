@@ -11,6 +11,7 @@ import { collectAccountIssuers } from './accountIssuerEvidence';
 import { recoverSignedIncome } from './signedAmountDirection';
 import { printedTransactionType } from './printedTransactionType';
 import { applyCriticalFieldRecovery } from './criticalFieldRecovery';
+import { recoverJoinedDirections } from './joinedDirection';
 import { auxiliaryPrintedPurpose } from './auxiliaryPurpose';
 import { combinedPartySuffixColumn } from './columnRecovery';
 
@@ -31,6 +32,10 @@ export function runQualityTrial(mapping: TableMappingPlan, registry: SourceRegis
     transformations.push({ observation: i + 1, field, before: rows[i].values[field], after: value, basis, sources });
     rows[i].values[field] = value;
   };
+  for (const repair of recoverJoinedDirections(rows, registry, independent)) {
+    change(repair.observation - 1, 5, repair.value, 'JOINED_PRINTED_DIRECTION_WITH_INDEPENDENT_MARKER', [`cell:${repair.cell}`, repair.source]);
+    rows[repair.observation - 1].fields[5] = [{ id: repair.cell, text: repair.marker, normalized: repair.value }];
+  }
   const recoveredOwnerPrefixes = recoverPrintedOwnerPrefixes(rows, materialized.metadata, registry, independent);
   for (const recovered of recoveredOwnerPrefixes) {
     const original = rows[recovered.observation - 1].values[0], page = materialized.metadata[recovered.observation - 1].page;
@@ -177,7 +182,7 @@ export function runQualityTrial(mapping: TableMappingPlan, registry: SourceRegis
     if (conversionRows.has(i)) change(i, 8, '分期转换', 'MATCHED_PRINTED_INSTALLMENT_CONVERSION_SEQUENCE', rows.slice(Math.max(0, i - 1), i + 2).flatMap(r => r.fields[8].map(s => `cell:${s.id}`)));
     if (conversionInterestRows.has(i)) change(i, 8, '分期', 'INTEREST_IN_PRINTED_INSTALLMENT_CONVERSION_SEQUENCE', rows.slice(i - 2, i + 1).flatMap(r => r.fields[8].map(s => `cell:${s.id}`)));
     const purposeFields = [...row.fields[8], ...row.fields[9]];
-    const printedType = printedTransactionType(description, purposeFields.map(s => s.text), row.values[5], context.accountKind);
+    const printedType = printedTransactionType(description, purposeFields.map(s => s.text), row.values[5], context.accountKind, row.values[10]);
     if (printedType && !(printedType.requiresReview && !printedType.type && row.values[8])) {
       change(i, 8, printedType.type, printedType.basis, purposeFields.map(s => `cell:${s.id}`));
     }

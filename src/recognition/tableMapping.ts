@@ -133,11 +133,13 @@ export function materializeTableMapping(mapping: TableMappingPlan, registry: Sou
       const descriptions = new Set([description]);
       const namedTypeColumns = new Set(headerRows.flatMap(header => header.cells.flatMap((id, col) =>
         /^(?:交易类型|业务类型|交易名称|交易摘要|摘要|摘要代号|摘要描述|扩展用途|用途|交易备注|附言|交易地点[\/／]附言)$/.test(semanticText(registry.cells[id].text)) ? [col] : [])));
-      for (const col of namedTypeColumns) {
+      const memoColumns = headerRows.flatMap(header => header.cells.flatMap((id, col) =>
+        /^(?:备注|备注信息)$/.test(semanticText(registry.cells[id].text)) ? [col] : []));
+      for (const col of new Set([...namedTypeColumns, ...memoColumns])) {
         for (const sourceRow of group) {
           const cell = registry.cells[registry.rows[sourceRow].cells[col]];
           if (cell?.text.trim()) {
-            descriptions.add(semanticText(cell.text));
+            if (namedTypeColumns.has(col)) descriptions.add(semanticText(cell.text));
             if (!f[8].some(s => (typeof s === 'number' ? s : s.id) === cell.id)) f[8].push(cell.id);
           }
         }

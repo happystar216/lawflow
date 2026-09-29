@@ -92,6 +92,7 @@ for (const firstMapping of ['valid', 'missing', 'invented']) test(`workflow pref
         assert.equal(input.images, undefined); assert.equal((input.source as any[]).length, 2);
         const count = calls.filter(c => c.input.stage === 'mapping').length;
         assert.equal(options?.refresh, count === 2 ? true : undefined);
+        if (count === 2) assert.match(input.mappingFeedback || '', firstMapping === 'missing' ? /遗漏输入表格/ : /不存在的表格/);
         result = count === 1 && firstMapping === 'missing' ? { tables: [], typeRules: [] }
           : count === 1 && firstMapping === 'invented' ? { ...mapping, tables: [...mapping.tables, { ...mapping.tables[0], table: 2 }] } : mapping;
       }

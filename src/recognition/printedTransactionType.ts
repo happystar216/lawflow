@@ -1,7 +1,7 @@
 import { semanticText } from './semanticText';
 
 /** Purpose outranks the transfer/payment mechanism. No bank/account/amount-specific rules. */
-export function printedTransactionType(description: string, evidence: string[], direction: string, accountKind: string):
+export function printedTransactionType(description: string, evidence: string[], direction: string, accountKind: string, counterpartyAccount = ''):
   { type: string; basis: string; requiresReview?: boolean } | null {
   const summary = semanticText(description);
   const context = evidence.map(semanticText);
@@ -21,6 +21,8 @@ export function printedTransactionType(description: string, evidence: string[], 
   if (/分期付款退货/.test(summary)) return result('分期退款', 'PRINTED_INSTALLMENT_REFUND');
   if (/消费退货|消费退款|^退货$|^退款$/.test(summary)) return result('退款', 'PRINTED_PURCHASE_REFUND');
   if (accountKind === 'deposit') {
+    if (!summary && /^\d{8,32}$/.test(counterpartyAccount) && ['IN', 'OUT'].includes(direction) && has(/^往来款$/))
+      return result('账户转账', 'PRINTED_CURRENT_ACCOUNT_PAYMENT_WITH_COUNTERPARTY_ACCOUNT');
     if (['IN', 'OUT'].includes(direction) && /^(?:(?:跨行|行内|同行|网银|网上|手机银行)?转[账帐]|网转|他行汇入|跨行汇款|跨行转出|网银转款本金|网银支付贷记|网银支付收到轧差通知|网银互联汇兑往账|超网汇兑[来往]账|汇兑往账[（(]直通[）)])$/.test(summary))
       return result('账户转账', 'EXPLICIT_DEPOSIT_TRANSFER_DESCRIPTION');
     if (direction === 'IN' && /^(?:现金存入|现金存款|存现|.{1,12}存现)$/.test(summary)) return result('现金存入', 'PRINTED_CASH_DEPOSIT');

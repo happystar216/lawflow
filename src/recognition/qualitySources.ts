@@ -23,7 +23,7 @@ export function buildQualitySources(pages: VerbatimPage[]) {
       registry.rows[id] = { id, page, table: tableIndex + 1, row: r + 1, cells };
       return { id, b, c };
     }));
-    return { page, h, tables };
+    return { page, h, tables, tableCatalog: tables.map((rows, i) => ({ table: i + 1, rowIds: rows.map(r => r.id) })) };
   });
   return { registry, source };
 }
