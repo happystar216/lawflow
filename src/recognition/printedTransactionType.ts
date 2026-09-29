@@ -21,6 +21,8 @@ export function printedTransactionType(description: string, evidence: string[], 
   if (/分期付款退货/.test(summary)) return result('分期退款', 'PRINTED_INSTALLMENT_REFUND');
   if (/消费退货|消费退款|^退货$|^退款$/.test(summary)) return result('退款', 'PRINTED_PURCHASE_REFUND');
   if (accountKind === 'deposit') {
+    if (['IN', 'OUT'].includes(direction) && /^(?:(?:跨行|行内|同行|网银|网上|手机银行)?转[账帐]|网转|他行汇入|跨行汇款|跨行转出|网银转款本金|网银支付贷记|网银支付收到轧差通知|网银互联汇兑往账|超网汇兑[来往]账|汇兑往账[（(]直通[）)])$/.test(summary))
+      return result('账户转账', 'EXPLICIT_DEPOSIT_TRANSFER_DESCRIPTION');
     if (direction === 'IN' && /^(?:现金存入|现金存款|存现|.{1,12}存现)$/.test(summary)) return result('现金存入', 'PRINTED_CASH_DEPOSIT');
     if (direction === 'OUT' && /^(?:现金支取|现金取款|取现|.{1,12}取现)$/.test(summary)) return result('现金支取', 'PRINTED_CASH_WITHDRAWAL');
     if (direction === 'IN' && (/^银联入账|^支付机构提现/.test(summary)

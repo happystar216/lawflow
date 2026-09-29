@@ -29,7 +29,7 @@ export function buildQualitySources(pages: VerbatimPage[]) {
 }
 
 /** Rebase stable selectors after a source reread, preserving established mappings on unchanged pages. */
-export function stabilizeQualityMapping(old: TableMappingPlan, latest: TableMappingPlan, before: SourceRegistry, after: SourceRegistry): TableMappingPlan {
+function mappingRebaser(before: SourceRegistry, after: SourceRegistry) {
   if (JSON.stringify(before.pages) !== JSON.stringify(after.pages)) throw new Error('重读不能改变页面目录');
   const index = (registry: SourceRegistry) => {
     const rows = new Map(Object.values(registry.rows).map(r => [r.id, JSON.stringify([r.page, r.table, r.row])]));
@@ -51,14 +51,34 @@ export function stabilizeQualityMapping(old: TableMappingPlan, latest: TableMapp
     const fixed = cellLookup.get(a.cells.get(s.fixed)!); if (!fixed) throw new Error('Missing source cell'); return { ...s, fixed };
   };
   const fields = (v: Record<string, ColumnSelector>) => Object.fromEntries(Object.entries(v).map(([k, s]) => [k, field(s)]));
-  const tables = latest.tables.map(t => {
+  const unchanged = new Set(before.pages.filter(page => JSON.stringify(a.content.get(page)) === JSON.stringify(b.content.get(page))));
+  const rebase = (prior: TableMappingPlan['tables'][number]) => ({ ...prior, fields: fields(prior.fields), groups: prior.groups.map(g => g.map(row)),
+    ignored: prior.ignored.map(v => ({ ...v, r: v.r.map(row) })),
+    overrides: prior.overrides?.map(v => ({ firstRow: row(v.firstRow), fields: fields(v.fields) })) });
+  return { unchanged, rebase };
+}
+
+/** Port of the historical empty-page recovery: no new mapping call is needed
+ * when rereading only removes tables. Any unavailable cross-page reference
+ * forces normal remapping; it must never retain a stale cell ID.
+ */
+export function rebaseEmptyPageRecovery(old: TableMappingPlan, before: SourceRegistry, after: SourceRegistry): TableMappingPlan | null {
+  const { unchanged, rebase } = mappingRebaser(before, after);
+  if (Object.values(after.rows).some(r => !unchanged.has(r.page))) return null;
+  try {
+    return { tables: old.tables.filter(t => unchanged.has(t.page)).map(rebase), typeRules: structuredClone(old.typeRules) };
+  } catch { return null; }
+}
+
+export function stabilizeQualityMapping(old: TableMappingPlan, latest: TableMappingPlan, before: SourceRegistry, after: SourceRegistry): TableMappingPlan {
+  const { unchanged, rebase } = mappingRebaser(before, after);
+  const templates = [...latest.tables];
+  for (const table of old.tables) if (unchanged.has(table.page) && !templates.some(t => t.page === table.page && t.table === table.table)) templates.push(table);
+  const tables = templates.map(t => {
     const prior = old.tables.find(p => p.page === t.page && p.table === t.table);
-    if (!prior || JSON.stringify(a.content.get(t.page)) !== JSON.stringify(b.content.get(t.page))) return t;
-    try { return { ...prior, fields: fields(prior.fields), groups: prior.groups.map(g => g.map(row)),
-      ignored: prior.ignored.map(v => ({ ...v, r: v.r.map(row) })),
-      overrides: prior.overrides?.map(v => ({ firstRow: row(v.firstRow), fields: fields(v.fields) })) }; }
-    catch { return t; }
-  });
+    if (!prior || !unchanged.has(t.page)) return t;
+    try { return rebase(prior); } catch { return t; }
+  }).sort((a, b) => a.page - b.page || a.table - b.table);
   const typeRules = structuredClone(old.typeRules);
   const ruleKey = (r: typeof typeRules[number]) => JSON.stringify([r.accountKind, r.text.replace(/\\n|\s/g, '')]);
   const seen = new Set(typeRules.map(ruleKey));

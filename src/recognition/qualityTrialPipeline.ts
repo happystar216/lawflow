@@ -12,6 +12,7 @@ import { recoverSignedIncome } from './signedAmountDirection';
 import { printedTransactionType } from './printedTransactionType';
 import { applyCriticalFieldRecovery } from './criticalFieldRecovery';
 import { auxiliaryPrintedPurpose } from './auxiliaryPurpose';
+import { combinedPartySuffixColumn } from './columnRecovery';
 
 /** Shared web/replay pipeline; document scope is explicit, never inferred from an account prefix. */
 export function runQualityTrial(mapping: TableMappingPlan, registry: SourceRegistry,
@@ -125,6 +126,9 @@ export function runQualityTrial(mapping: TableMappingPlan, registry: SourceRegis
   const names = new Map<string, Map<string, number[]>>();
   const combinedCounterpartyTables = new Set<string>();
   for (const table of mapping.tables) {
+    if (combinedPartySuffixColumn(table, registry) !== null) {
+      combinedCounterpartyTables.add(`${table.page}:${table.table}`); continue;
+    }
     const selector = table.fields.counterpartyName;
     if (!selector || !('row' in selector) || table.fields.counterpartyAccount) continue;
     const labels = table.ignored.filter(item => item.kind === 'header').flatMap(item => item.r)

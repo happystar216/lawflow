@@ -13,3 +13,14 @@ test('structural gaps select only affected full pages, while ordinary field disa
   issues[0].sourceRows = []; issues[0].sourcePages = [2];
   assert.deepEqual(planPrimaryRecovery(issues, registry).selected.map(p => p.page), [2], 'entirely missed page has no source row IDs');
 });
+
+test('bounded recovery prioritizes disputed transactions over earlier unreadable document pages', () => {
+  const issues: AssemblyIssue[] = Array.from({ length: 8 }, (_, index) => ({ id: String(index),
+    code: index === 7 ? 'INDEPENDENT_ROW_UNMATCHED' : 'INDEPENDENT_PAGE_INCOMPLETE', field: null,
+    outputRows: index === 7 ? [1, 2, 3] : [], sourcePages: [index + 1], sourceRows: [], sourceCells: [],
+    severity: 'REQUIRED', message: 'synthetic coverage issue' }));
+  const plan = planPrimaryRecovery(issues, { pages: Array.from({ length: 8 }, (_, i) => i + 1), cells: {}, rows: {} });
+  assert.equal(plan.selected[0].page, 8);
+  assert.equal(plan.selected.length, 6);
+  assert.equal(plan.deferred.length, 2);
+});

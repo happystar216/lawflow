@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { decidePreflight, qualityWireRequest, validateQualityResult, type QualityRequest } from '../src/recognition/qualityProtocol';
 import { runQualityWorkflow } from '../src/recognition/qualityWorkflow';
 import { qualityToWeb } from '../src/recognition/qualityWebAdapter';
-import { buildQualitySources, stabilizeQualityMapping } from '../src/recognition/qualitySources';
+import { buildQualitySources, stabilizeQualityMapping, rebaseEmptyPageRecovery } from '../src/recognition/qualitySources';
 import { normalizeRecognizedData } from '../src/utils/recognizedDataNormalizer';
 import { applyRowReviewDecision } from '../src/review/fieldReview';
 import { buildEvidenceReviewIssues } from '../src/review/buildEvidenceReviewIssues';
@@ -136,6 +136,29 @@ test('unchanged page selectors are rebased after an earlier page gains source ce
   const latest = structuredClone(prior); latest.tables[0].fields.accountNumber = null;
   const fixed = stabilizeQualityMapping(prior, latest, before.registry, after.registry);
   assert.deepEqual(fixed.tables[0].fields.accountNumber, { fixed: 4 });
+});
+
+test('empty-page recovery retains untouched mappings without a model call and rejects dangling cross-page references', () => {
+  const before = buildQualitySources([sourcePage, sourcePage]);
+  const after = buildQualitySources([{ nearTableText: [], tables: [] }, sourcePage]);
+  const old = structuredClone(mapping);
+  const second = structuredClone(mapping.tables[0]);
+  second.page = 2; second.groups = [[2]]; second.fields.bankName = { fixed: 10 }; second.fields.accountNumber = { fixed: 11 };
+  old.tables.push(second);
+  const rebased = rebaseEmptyPageRecovery(old, before.registry, after.registry)!;
+  assert.equal(rebased.tables.length, 1);
+  assert.equal(rebased.tables[0].page, 2);
+  assert.deepEqual(rebased.tables[0].groups, [[1]]);
+  assert.deepEqual(rebased.tables[0].fields.accountNumber, { fixed: 2 });
+  old.tables[1].fields.bankName = { fixed: 1 };
+  assert.equal(rebaseEmptyPageRecovery(old, before.registry, after.registry), null);
+  assert.equal(rebaseEmptyPageRecovery(mapping, buildQualitySources([sourcePage]).registry,
+    buildQualitySources([{ ...sourcePage, nearTableText: ['changed'] }]).registry), null);
+});
+
+test('remapping cannot silently omit an unchanged source table', () => {
+  const { registry } = buildQualitySources([sourcePage]);
+  assert.equal(stabilizeQualityMapping(mapping, { tables: [], typeRules: [] }, registry, registry).tables.length, 1);
 });
 test('server uses Qwen only for transcription and rejects unfinished output', async () => {
   let request: any;

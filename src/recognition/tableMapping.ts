@@ -1,7 +1,7 @@
 import { assembleFromSources, type AssemblyPlan, type AssemblyRow, type SourceRegistry, type SourceSelection } from './sourceAssembly';
 import { selectSourceLine, selectSourceParty } from './sourceFragments';
 import { repairUniformRowGroups } from './rowGrouping';
-import { recoverDescriptionColumn, combinedPartyColumn } from './columnRecovery';
+import { recoverDescriptionColumn, combinedPartyColumn, combinedPartySuffixColumn } from './columnRecovery';
 import { semanticText } from './semanticText';
 
 export type ColumnSelector = null | { row: number; col: number; line?: number; part?: 'account' | 'name' } | { fixed: number; text?: string };
@@ -45,6 +45,12 @@ export function materializeTableMapping(mapping: TableMappingPlan, registry: Sou
           columnCorrections.push({ page: table.page, table: table.table, field, sources: [], basis: 'EXPLICIT_COMBINED_PARTY_HEADER' });
         }
       }
+    }
+    const suffixColumn = combinedPartySuffixColumn(table, registry);
+    if (suffixColumn !== null) {
+      safeFields.counterpartyName = { row: 0, col: suffixColumn };
+      safeFields.counterpartyAccount = null;
+      columnCorrections.push({ page: table.page, table: table.table, field: 'counterpartyName', sources: [], basis: 'CONSISTENT_LABELLED_PARTY_SUFFIX_COLUMN' });
     }
     const descriptionRecovery = recoverDescriptionColumn(table, registry);
     if (descriptionRecovery) {

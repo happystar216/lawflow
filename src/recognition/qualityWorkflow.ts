@@ -1,6 +1,6 @@
 import { runQualityTrial } from './qualityTrialPipeline';
 import { withAnalysisTypeChecks } from '../review/qualityDelivery';
-import { buildQualitySources, stabilizeQualityMapping } from './qualitySources';
+import { buildQualitySources, stabilizeQualityMapping, rebaseEmptyPageRecovery } from './qualitySources';
 import { decidePreflight, type ModelReply, type PageMetrics, type QualityRequest, type VerbatimPage } from './qualityProtocol';
 import { planPrimaryRecovery } from './primaryRecoveryPlan';
 import { planAccountRecovery } from './accountRecoveryPlan';
@@ -77,8 +77,13 @@ export async function runQualityWorkflow(io: QualityWorkflowIO) {
       primary[page - 1] = (await io.call({ stage: 'primaryRecovery', images: [image] }, page)).result;
     });
     const next = buildQualitySources(merged());
-    const fresh: TableMappingPlan = (await io.call({ stage: 'mapping', source: next.source }, 0)).result;
-    mapping = stabilizeQualityMapping(mapping, fresh, registry, next.registry); registry = next.registry; source = next.source;
+    const rebased = rebaseEmptyPageRecovery(mapping, registry, next.registry);
+    if (rebased) mapping = rebased;
+    else {
+      const fresh: TableMappingPlan = (await io.call({ stage: 'mapping', source: next.source }, 0)).result;
+      mapping = stabilizeQualityMapping(mapping, fresh, registry, next.registry);
+    }
+    registry = next.registry; source = next.source;
     result = runQualityTrial(mapping, registry, independent, scope);
   }
   const accountPlan = planAccountRecovery(result.pending, registry, independent);

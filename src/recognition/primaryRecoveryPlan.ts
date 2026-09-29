@@ -13,7 +13,18 @@ export function planPrimaryRecovery(issues: AssemblyIssue[], registry: SourceReg
       const reasons = selected.get(page) || new Set<string>(); reasons.add(issue.code); selected.set(page, reasons);
     }
   }
-  const pages = [...selected].sort((a, b) => a[0] - b[0]).map(([page, reasons]) => ({ page, reasons: [...reasons] }));
+  // A disputed transaction must not lose its reread to an earlier page that
+  // contains no transaction observations. Keep the same bounded budget.
+  const impact = (page: number) => {
+    const relevant = issues.filter(i => i.severity !== 'ADVISORY' && codes.has(i.code)
+      && (i.sourcePages?.includes(page) || i.sourceRows.some(r => registry.rows[r]?.page === page)
+        || i.sourceCells.some(c => registry.cells[c]?.page === page)));
+    const structural = relevant.some(i => i.code !== 'INDEPENDENT_PAGE_INCOMPLETE');
+    const rows = new Set(relevant.flatMap(i => i.outputRows)).size;
+    return { structural, rows };
+  };
+  const pages = [...selected].map(([page, reasons]) => ({ page, reasons: [...reasons], priority: impact(page) }))
+    .sort((a, b) => Number(b.priority.structural) - Number(a.priority.structural) || b.priority.rows - a.priority.rows || a.page - b.page);
   return { standardAnswersRead: false, mode: 'FULL_PAGE_PRIMARY_REREAD', selected: pages.slice(0, maxPages),
     deferred: pages.slice(maxPages), complete: pages.length <= maxPages };
 }
