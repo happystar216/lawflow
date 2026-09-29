@@ -11,6 +11,7 @@ import { collectAccountIssuers } from './accountIssuerEvidence';
 import { recoverSignedIncome } from './signedAmountDirection';
 import { printedTransactionType } from './printedTransactionType';
 import { applyCriticalFieldRecovery } from './criticalFieldRecovery';
+import { recoverOwnerNames } from './ownerNameEvidence';
 import { recoverJoinedDirections } from './joinedDirection';
 import { auxiliaryPrintedPurpose } from './auxiliaryPurpose';
 import { combinedPartySuffixColumn } from './columnRecovery';
@@ -104,6 +105,12 @@ export function runQualityTrial(mapping: TableMappingPlan, registry: SourceRegis
     for (const page of pages) for (const row of independent[page]?.rows || []) {
       if (accountFromSource(row.values[0]) === binding.from) row.values[0] = binding.to;
     }
+  }
+  const recoveredNames = recoverOwnerNames(rows, registry, independent, materialized.issues);
+  for (const repair of recoveredNames) {
+    change(repair.observation - 1, 1, repair.value, 'EXACT_OWNER_IDENTIFIER_AND_PRINTED_HEADER_NAME',
+      [`cell:${repair.proof.id}`, `independent:p${repair.proof.page}:ownerIdentifiersAndName`]);
+    rows[repair.observation - 1].fields[1] = [{ id: repair.proof.id, text: repair.value, normalized: repair.value }];
   }
   const inventory = new Map<string, string[]>();
   const accountIssuers = collectAccountIssuers(registry, independent);
@@ -332,6 +339,12 @@ export function runQualityTrial(mapping: TableMappingPlan, registry: SourceRegis
     return [9, 10].every(f => row.fields[f].length > 0 && row.fields[f].every(s => /^(?:\s*|--?|—|无)$/.test(s.text.trim())));
   };
   for (const issue of materialized.issues) {
+    if (issue.field === 'accountName' && ['OUTSIDE_TRANSACTION_SOURCES', 'INVALID_SOURCE_FRAGMENT'].includes(issue.code)
+      && issue.outputRows.length && issue.outputRows.every(n => recoveredNames.some(r => r.observation === n))) {
+      resolved.push({ code: issue.code, field: issue.field, event: eventForObservation.get(issue.outputRows[0])!, observations: issue.outputRows,
+        basis: 'Invalid owner-name reference replaced by a printed header and independent owner name bound to the exact owner identifier; original issue retained' });
+      continue;
+    }
     if (issue.field === 'bankName' && issue.code === 'INVALID_SOURCE_FRAGMENT' && issuer && issuerValues.has(issuer)
       && issue.outputRows.every(n => rows[n - 1].values[2] === issuer)) {
       resolved.push({ code: issue.code, field: issue.field, event: eventForObservation.get(issue.outputRows[0])!, observations: issue.outputRows,
