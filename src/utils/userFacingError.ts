@@ -80,9 +80,10 @@ export function importErrorForUser(error: unknown, fileName: string): UserFacing
     };
   }
   if (/\b402\b/.test(details)) {
+    const service = /^Qwen\b/i.test(rawDetails) ? 'Qwen' : /^Gemini\b/i.test(rawDetails) ? 'Gemini' : '上游识别服务';
     return {
       ...base,
-      message: '上游识别服务返回额度或计费相关错误。请检查服务账户状态后继续识别，已保存的进度可以复用。',
+      message: `${service} 返回额度或计费相关错误。请检查对应服务账户状态后继续识别，已保存的进度可以复用。`,
       retryable: true,
       diagnosticCode: diagnosticCode || 'UPSTREAM_PAYMENT_REQUIRED'
     };
