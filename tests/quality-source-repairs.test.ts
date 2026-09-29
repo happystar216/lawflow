@@ -4,6 +4,24 @@ import { buildQualitySources } from '../src/recognition/qualitySources';
 import { materializeTableMapping, type MappedTable } from '../src/recognition/tableMapping';
 import { recoverDescriptionColumn, combinedPartySuffixColumn } from '../src/recognition/columnRecovery';
 import { printedTransactionType } from '../src/recognition/printedTransactionType';
+import { planPrimaryRecovery } from '../src/recognition/primaryRecoveryPlan';
+
+test('missing tables remain explicit required source issues and trigger recovery instead of aborting the whole PDF', () => {
+  const { registry } = buildQualitySources([{ nearTableText: [], tables: [{ rows: [['真实交易']] }] }]);
+  const result = materializeTableMapping({ tables: [], typeRules: [] }, registry);
+  assert.equal(result.complete, false);
+  assert.equal(result.rows.length, 0);
+  assert.deepEqual(result.issues.map(i => [i.code, i.severity, i.sourceRows]), [['UNASSIGNED_SOURCE_ROW', 'REQUIRED', [1]]]);
+  assert.equal(planPrimaryRecovery(result.issues, registry).selected[0].page, 1);
+});
+
+test('empty nontransaction placeholders are harmless but invented transaction tables still fail', () => {
+  const { registry } = buildQualitySources([{ nearTableText: ['公文标题'], tables: [] }]);
+  const table: MappedTable = { page: 1, table: 1, kind: 'other', accountKind: 'unknown', groups: [], ignored: [], fields: {}, directionCodes: null };
+  assert.equal(materializeTableMapping({ tables: [table], typeRules: [] }, registry).complete, true);
+  for (const bad of [{ ...table, groups: [[1]] }, { ...table, kind: 'transactions' }, { ...table, page: 2 }])
+    assert.throws(() => materializeTableMapping({ tables: [bad], typeRules: [] }, registry), /不存在的表格/);
+});
 
 test('a unique literal header corrects a wrong description column only in a uniform layout', () => {
   const { registry } = buildQualitySources([{ nearTableText: [], tables: [{ rows: [

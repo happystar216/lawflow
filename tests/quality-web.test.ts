@@ -77,18 +77,23 @@ test('mapping rejects malformed nontransaction rows before they can become resum
   valid.tables[0].ignored = [{ r: [2], kind: 'other' }];
   validateQualityResult('mapping', valid);
 });
-test('workflow preflights ALL pages first, skips confirmed blank and sends one text-only full list to mapping', async () => {
+for (const omitFirstMapping of [false, true]) test(`workflow preflights all pages and repairs a missing mapping only once (${omitFirstMapping})`, async () => {
   const calls: Array<{ input: QualityRequest; page: number }> = [], rotations: number[] = [];
   const out = await runQualityWorkflow({ totalPages: 2, signal: new AbortController().signal, progress() {},
     preflightImages: async page => ({ images: ['A', 'B', 'C', 'D'], metrics: { darkFraction160: page === 2 ? 0 : .1, darkFraction210: page === 2 ? 0 : .1, hasPdfText: page === 1 } }),
     image: async (_page, rotation) => { rotations.push(rotation); return 'image'; },
-    call: async (input, page) => {
+    call: async (input, page, options) => {
       calls.push({ input, page }); let result: any;
       if (input.stage !== 'preflight') assert.equal(calls.filter(c => c.input.stage === 'preflight').length, 2);
       if (input.stage === 'preflight') result = { pageKind: page === 1 ? 'content' : 'blank', uprightCandidate: page === 1 ? 'B' : 'uncertain', reason: 'test' };
       else if (input.stage === 'primary') result = sourcePage;
       else if (input.stage === 'context') result = { nearTableText: [], tables: [] };
-      else if (input.stage === 'mapping') { assert.equal(input.images, undefined); assert.equal((input.source as any[]).length, 2); result = mapping; }
+      else if (input.stage === 'mapping') {
+        assert.equal(input.images, undefined); assert.equal((input.source as any[]).length, 2);
+        const count = calls.filter(c => c.input.stage === 'mapping').length;
+        assert.equal(options?.refresh, count === 2 ? true : undefined);
+        result = omitFirstMapping && count === 1 ? { tables: [], typeRules: [] } : mapping;
+      }
       else if (input.stage === 'independent') result = { pageType: 'transactions', coverage: 'complete', pageIssues: [], bankName: '某银行', rows: [
         { row: 1, values: ['001234567890', '2026-07-10', '', 'OUT', '10.00', '100.00', '李某', '009876543210'], rawDirection: '支出', issues: [] }] };
       else throw new Error(`Unexpected ${input.stage}`);
@@ -96,7 +101,7 @@ test('workflow preflights ALL pages first, skips confirmed blank and sends one t
     }
   });
   assert.equal(out.result.complete, true); assert.equal(out.result.rows.length, 1);
-  assert.deepEqual(rotations, [90]); assert.equal(calls.filter(c => c.input.stage === 'mapping').length, 1);
+  assert.deepEqual(rotations, [90]); assert.equal(calls.filter(c => c.input.stage === 'mapping').length, omitFirstMapping ? 2 : 1);
   assert.ok(calls.every(c => c.page !== 2 || c.input.stage === 'preflight'));
 });
 test('web bridge preserves all 12 columns and field-specific checks across normalization and human review', () => {

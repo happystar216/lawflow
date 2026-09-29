@@ -13,11 +13,17 @@ export interface MappedTable {
 }
 export interface TableMappingPlan { tables: MappedTable[]; typeRules: Array<{ accountKind: string; text: string; type: string }> }
 
+export function missingMappedTables(mapping: TableMappingPlan, registry: SourceRegistry) {
+  const seen = new Set(mapping.tables.map(t => `${t.page}:${t.table}`));
+  return [...new Set(Object.values(registry.rows).map(r => `${r.page}:${r.table}`))].filter(key => !seen.has(key));
+}
+
 export function materializeTableMapping(mapping: TableMappingPlan, registry: SourceRegistry) {
   if (!Array.isArray(mapping.tables) || !Array.isArray(mapping.typeRules)) throw new Error('Invalid table mapping');
   const plan: AssemblyPlan = { rows: [], ignored: [] };
   const metadata: Array<{ page: number; table: number; order: number; accountKind: string; description: string; directOwner: boolean }> = [];
   const seenTables = new Set<string>();
+  const expectedTables = new Set(Object.values(registry.rows).map(row => `${row.page}:${row.table}`));
   const roleCorrections: Array<{ page: number; table: number; field: string; reason: string }> = [];
   const groupCorrections: Array<{ page: number; table: number; before: number[][]; after: number[][]; basis: string }> = [];
   const columnCorrections: Array<{ page: number; table: number; field: string; sources: number[]; basis: string }> = [];
@@ -34,6 +40,14 @@ export function materializeTableMapping(mapping: TableMappingPlan, registry: Sou
     const tableKey = `${table.page}:${table.table}`;
     if (seenTables.has(tableKey)) throw new Error('Duplicate table mapping');
     seenTables.add(tableKey);
+    // Models sometimes enumerate a header-only/empty page as an empty table.
+    // It creates no source disposition or transaction. Any claimed rows in a
+    // nonexistent table remain a hard error.
+    if (!expectedTables.has(tableKey)) {
+      if (registry.pages.includes(table.page) && ['account', 'other'].includes(table.kind)
+        && !table.groups.length && !table.ignored.length && !table.overrides?.length) continue;
+      throw new Error(`整理引用了不存在的表格：第 ${table.page} 页，表 ${table.table}`);
+    }
     if (!Array.isArray(table.groups) || !Array.isArray(table.ignored) || !table.fields) throw new Error('Malformed table mapping');
     const safeFields = { ...table.fields };
     const partyColumn = combinedPartyColumn(table, registry);
@@ -137,8 +151,9 @@ export function materializeTableMapping(mapping: TableMappingPlan, registry: Sou
         accountKind: table.accountKind, description, directOwner: Boolean(effectiveFields.accountNumber && 'row' in effectiveFields.accountNumber) });
     }
   }
-  const expectedTables = new Set(Object.values(registry.rows).map(row => `${row.page}:${row.table}`));
-  if ([...expectedTables].some(key => !seenTables.has(key)) || [...seenTables].some(key => !expectedTables.has(key))) throw new Error('Table coverage incomplete or invented');
+  // Omitted real tables stay unassigned. The assembler emits REQUIRED source
+  // row issues, triggers bounded recovery and prevents a complete result;
+  // do not discard the entire PDF before that recovery can run.
   const result = assembleFromSources(plan, registry);
   for (const failure of fragmentFailures) result.issues.push({ id: `PARTY_FRAGMENT_${failure.outputRow}_${failure.part}`, code: 'AMBIGUOUS_PARTY_FRAGMENT',
     field: failure.part === 'account' ? 'counterpartyAccount' : 'counterpartyName', severity: 'REQUIRED', outputRows: [failure.outputRow],

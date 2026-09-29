@@ -7,13 +7,13 @@ import { planAccountRecovery } from './accountRecoveryPlan';
 import { planCriticalFieldRecovery } from './criticalFieldRecovery';
 import type { IndependentPage } from './independentComparison';
 import type { FocusedAccounts } from './accountRecovery';
-import type { TableMappingPlan } from './tableMapping';
+import { missingMappedTables, type TableMappingPlan } from './tableMapping';
 
 export interface QualityWorkflowIO {
   totalPages: number;
   preflightImages(page: number): Promise<{ images: string[]; metrics: PageMetrics }>;
   image(page: number, rotation: number, dpi: number): Promise<string>;
-  call(input: QualityRequest, page: number): Promise<ModelReply>;
+  call(input: QualityRequest, page: number, options?: { refresh?: boolean }): Promise<ModelReply>;
   progress(message: string, percent: number, rows?: number): void;
   signal: AbortSignal;
 }
@@ -66,6 +66,12 @@ export async function runQualityWorkflow(io: QualityWorkflowIO) {
   let { registry, source } = buildQualitySources(merged());
   io.progress('按完整原文列表整理账户和流水…', 68);
   let mapping: TableMappingPlan = (await io.call({ stage: 'mapping', source }, 0)).result;
+  if (missingMappedTables(mapping, registry).length) {
+    io.progress('补齐整理时遗漏的原文表格…', 70);
+    // Retry the same full-list request once, bypassing only its cached reply.
+    // A second omission stays a REQUIRED source-row issue, never a silent drop.
+    mapping = (await io.call({ stage: 'mapping', source }, 0, { refresh: true })).result;
+  }
   // A PDF upload can contain multiple banks; do not assume a single issuer from a filename.
   const scope = { singleIssuerDocument: false };
   let result = runQualityTrial(mapping, registry, independent, scope);

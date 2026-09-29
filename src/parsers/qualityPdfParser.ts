@@ -79,7 +79,7 @@ export async function parsePdfWithQualityPipeline(file: File, onProgress: (p: Ge
         return { images, metrics: { darkFraction160: dark160 / pixels, darkFraction210: dark210 / pixels, hasPdfText: await renderer.hasText(page) } };
       },
       image: async (page, rotation, dpi) => { signal.throwIfAborted(); return base64((await renderer.renderPage(page, rotation, dpi / 72)).file); },
-      call: async (input, page) => {
+      call: async (input, page, callOptions) => {
         signal.throwIfAborted();
         const inputSHA256 = await hash(JSON.stringify(input));
         const key = `${status.policySHA256}:${input.stage}:${page}:${inputSHA256}`;
@@ -91,7 +91,7 @@ export async function parsePdfWithQualityPipeline(file: File, onProgress: (p: Ge
         };
         const expectedModel = ['primary', 'context', 'primaryRecovery'].includes(input.stage) ? status.models?.qwen : status.models?.gemini;
         let saved: ModelReply | undefined;
-        try { saved = await options.store.read(key); } catch { warn(); }
+        if (!callOptions?.refresh) try { saved = await options.store.read(key); } catch { warn(); }
         if (saved && saved.policySHA256 === status.policySHA256 && saved.promptSHA256 === status.prompts?.[input.stage] && saved.model === expectedModel) {
           let valid = true;
           try { validateQualityResult(input.stage, saved.result); } catch { valid = false; }
