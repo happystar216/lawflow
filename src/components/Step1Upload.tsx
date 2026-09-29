@@ -697,7 +697,8 @@ export const Step1Upload: React.FC<Step1Props> = ({
               const fileName = firstAccount.fileName;
               const fileTransactionCount = sourceTransactionCounts.get(sourceKey) || 0;
               const fileTransactions = transactions.filter(transaction => sourceIdentity(transaction) === sourceKey);
-              const isQualityPipeline = fileTransactions.some(transaction => transaction.extractionMethod === 'QWEN_GEMINI_QUALITY');
+              const isQualityPipeline = fileAccounts.some(account => account.qualityPipeline)
+                || fileTransactions.some(transaction => transaction.extractionMethod === 'QWEN_GEMINI_QUALITY');
               const fileBusinessAccounts = fileAccounts.filter(account => !isDocumentReviewAccount(account));
               const reviewPages = incompleteRecognitionPages(fileAccounts);
               return (
