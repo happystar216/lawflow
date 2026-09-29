@@ -77,7 +77,7 @@ test('mapping rejects malformed nontransaction rows before they can become resum
   valid.tables[0].ignored = [{ r: [2], kind: 'other' }];
   validateQualityResult('mapping', valid);
 });
-for (const omitFirstMapping of [false, true]) test(`workflow preflights all pages and repairs a missing mapping only once (${omitFirstMapping})`, async () => {
+for (const firstMapping of ['valid', 'missing', 'invented']) test(`workflow preflights all pages and repairs an invalid mapping only once (${firstMapping})`, async () => {
   const calls: Array<{ input: QualityRequest; page: number }> = [], rotations: number[] = [];
   const out = await runQualityWorkflow({ totalPages: 2, signal: new AbortController().signal, progress() {},
     preflightImages: async page => ({ images: ['A', 'B', 'C', 'D'], metrics: { darkFraction160: page === 2 ? 0 : .1, darkFraction210: page === 2 ? 0 : .1, hasPdfText: page === 1 } }),
@@ -92,7 +92,8 @@ for (const omitFirstMapping of [false, true]) test(`workflow preflights all page
         assert.equal(input.images, undefined); assert.equal((input.source as any[]).length, 2);
         const count = calls.filter(c => c.input.stage === 'mapping').length;
         assert.equal(options?.refresh, count === 2 ? true : undefined);
-        result = omitFirstMapping && count === 1 ? { tables: [], typeRules: [] } : mapping;
+        result = count === 1 && firstMapping === 'missing' ? { tables: [], typeRules: [] }
+          : count === 1 && firstMapping === 'invented' ? { ...mapping, tables: [...mapping.tables, { ...mapping.tables[0], table: 2 }] } : mapping;
       }
       else if (input.stage === 'independent') result = { pageType: 'transactions', coverage: 'complete', pageIssues: [], bankName: '某银行', rows: [
         { row: 1, values: ['001234567890', '2026-07-10', '', 'OUT', '10.00', '100.00', '李某', '009876543210'], rawDirection: '支出', issues: [] }] };
@@ -101,7 +102,7 @@ for (const omitFirstMapping of [false, true]) test(`workflow preflights all page
     }
   });
   assert.equal(out.result.complete, true); assert.equal(out.result.rows.length, 1);
-  assert.deepEqual(rotations, [90]); assert.equal(calls.filter(c => c.input.stage === 'mapping').length, omitFirstMapping ? 2 : 1);
+  assert.deepEqual(rotations, [90]); assert.equal(calls.filter(c => c.input.stage === 'mapping').length, firstMapping === 'valid' ? 1 : 2);
   assert.ok(calls.every(c => c.page !== 2 || c.input.stage === 'preflight'));
 });
 test('web bridge preserves all 12 columns and field-specific checks across normalization and human review', () => {

@@ -66,15 +66,19 @@ export async function runQualityWorkflow(io: QualityWorkflowIO) {
   let { registry, source } = buildQualitySources(merged());
   io.progress('按完整原文列表整理账户和流水…', 68);
   let mapping: TableMappingPlan = (await io.call({ stage: 'mapping', source }, 0)).result;
-  if (missingMappedTables(mapping, registry).length) {
-    io.progress('补齐整理时遗漏的原文表格…', 70);
-    // Retry the same full-list request once, bypassing only its cached reply.
-    // A second omission stays a REQUIRED source-row issue, never a silent drop.
-    mapping = (await io.call({ stage: 'mapping', source }, 0, { refresh: true })).result;
-  }
   // A PDF upload can contain multiple banks; do not assume a single issuer from a filename.
   const scope = { singleIssuerDocument: false };
-  let result = runQualityTrial(mapping, registry, independent, scope);
+  let result: ReturnType<typeof runQualityTrial> | undefined;
+  try {
+    if (!missingMappedTables(mapping, registry).length) result = runQualityTrial(mapping, registry, independent, scope);
+  } catch { /* Invalid source references require a fresh mapping, never a guessed repair. */ }
+  if (!result) {
+    io.progress('重新整理遗漏表格或无效来源引用…', 70);
+    // One bounded retry of the same full list bypasses only its cached reply.
+    // A second invalid reference still fails; omissions remain REQUIRED issues.
+    mapping = (await io.call({ stage: 'mapping', source }, 0, { refresh: true })).result;
+    result = runQualityTrial(mapping, registry, independent, scope);
+  }
   const primaryPlan = planPrimaryRecovery(result.pending, registry);
   if (primaryPlan.selected.length) {
     io.progress(`核实 ${primaryPlan.selected.length} 页的行数差异…`, 74);
