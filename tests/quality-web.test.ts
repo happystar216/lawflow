@@ -200,3 +200,36 @@ test('only disputed source pages use the stronger recovery model with the same c
   assert.deepEqual(requested.map(r => r.model), ['qwen3.8-flash', 'qwen3.8-flash', 'qwen3.8-max']);
   assert.ok(requested.every(r => r.messages[0].content.length === 2 && r.messages[0].content[1].image_url.url === 'data:image/jpeg;base64,YQ=='));
 });
+
+test('Qwen streaming preserves split UTF-8, ignores reasoning, and retains final token usage', async () => {
+  const result = { nearTableText: ['测试银行'], tables: [] };
+  const frames = [
+    { choices: [{ delta: { reasoning_content: 'not transcript' }, finish_reason: null }] },
+    { choices: [{ delta: { content: JSON.stringify(result) }, finish_reason: null }] },
+    { choices: [{ delta: {}, finish_reason: 'stop' }] },
+    { choices: [], usage: { prompt_tokens: 123, completion_tokens: 45 } }
+  ];
+  const bytes = new TextEncoder().encode(frames.map(v => `data: ${JSON.stringify(v)}\r\n\r\n`).join('') + 'data: [DONE]');
+  const fetcher = (async (_url: any, init: any) => {
+    const body = JSON.parse(init.body); assert.equal(body.stream, true); assert.equal(body.stream_options.include_usage, true);
+    return new Response(new ReadableStream({ start(controller) {
+      for (let i = 0; i < bytes.length; i += 7) controller.enqueue(bytes.slice(i, i + 7));
+      controller.close();
+    } }), { headers: { 'Content-Type': 'text/event-stream' } });
+  }) as typeof fetch;
+  const reply = await runQualityModel({ stage: 'primaryRecovery', images: ['YQ=='] },
+    { GEMINI_API_KEY: 'test', DASHSCOPE_API_KEY: 'test' }, new AbortController().signal, fetcher);
+  assert.deepEqual(reply.result, result);
+  assert.deepEqual(reply.usage, { prompt_tokens: 123, completion_tokens: 45 });
+  assert.equal(reply.upstreamTransport, 'SSE');
+});
+
+test('an interrupted Qwen stream is never accepted merely because it contains valid JSON', async () => {
+  for (const finish of [null, 'length']) {
+    const fetcher = (async () => new Response('data: ' + JSON.stringify({ choices: [{
+      delta: { content: '{"nearTableText":[],"tables":[]}' }, finish_reason: finish
+    }] }) + '\n\n', { headers: { 'Content-Type': 'text/event-stream' } })) as typeof fetch;
+    await assert.rejects(runQualityModel({ stage: 'primaryRecovery', images: ['YQ=='] },
+      { GEMINI_API_KEY: 'test', DASHSCOPE_API_KEY: 'test' }, new AbortController().signal, fetcher), /未完成/);
+  }
+});

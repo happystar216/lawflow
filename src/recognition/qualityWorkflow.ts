@@ -88,6 +88,7 @@ export async function runQualityWorkflow(io: QualityWorkflowIO) {
   const primaryFailures: Array<{ page: number; reason: string }> = [];
   if (primaryPlan.selected.length) {
     let primaryChanged = false;
+    let primaryCompleted = 0;
     io.progress(`重新读取 ${primaryPlan.selected.length} 页的原文差异…`, 74);
     await parallelPages(primaryPlan.selected.map(p => p.page), async page => {
       const image = await io.image(page, preflight[page - 1].decision.clockwiseRotation, 350);
@@ -104,8 +105,12 @@ export async function runQualityWorkflow(io: QualityWorkflowIO) {
         if (/配置已更新|缺少配置/.test(String(error))) throw error;
         primaryFailures.push({ page, reason: error instanceof Error ? error.message : String(error) });
       }
+      primaryCompleted++;
+      io.progress(`已处理 ${primaryCompleted}/${primaryPlan.selected.length} 页原文差异${primaryFailures.length ? '，未完成的重读已保留原结果' : ''}…`,
+        74 + primaryCompleted / primaryPlan.selected.length * 5);
     });
     if (primaryChanged) {
+      io.progress('根据补充原文重新整理流水…', 79);
       const next = buildQualitySources(merged());
       const rebased = rebaseEmptyPageRecovery(mapping, registry, next.registry);
       if (rebased) mapping = rebased;

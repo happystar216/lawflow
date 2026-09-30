@@ -6,7 +6,7 @@ export type QualityStage = typeof QUALITY_STAGES[number];
 export interface VerbatimPage { nearTableText: string[]; tables: Array<{ rows: string[][] }> }
 export interface PreflightReading { pageKind: 'blank' | 'content' | 'uncertain'; uprightCandidate: 'A' | 'B' | 'C' | 'D' | 'uncertain'; reason: string }
 export interface PageMetrics { darkFraction160: number; darkFraction210: number; hasPdfText: boolean }
-export interface ModelReply { result: any; finishReason: string; model: string; usage?: unknown; promptSHA256: string; policySHA256?: string }
+export interface ModelReply { result: any; finishReason: string; model: string; usage?: unknown; upstreamTransport?: 'SSE' | 'JSON'; promptSHA256: string; policySHA256?: string }
 export const QUALITY_ENDPOINT = '/api/recognize-quality';
 export const QUALITY_POLICY_HEADER = 'x-lawflow-quality-policy';
 export interface QualityRequest { stage: QualityStage; images?: string[]; source?: unknown; mappingFeedback?: string }

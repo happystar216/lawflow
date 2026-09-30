@@ -3,7 +3,8 @@ import { QUALITY_REVISION, QUALITY_STAGES, QUALITY_IMAGE_CONTENT_TYPE, validateQ
 
 export interface QualityEnvironment { GEMINI_API_KEY?: string; GEMINI_MODEL?: string; DASHSCOPE_API_KEY?: string; QWEN_MODEL?: string; QWEN_RECOVERY_MODEL?: string }
 const qwenSettings = { response_format: { type: 'json_object' }, reasoning_effort: 'low',
-  vl_high_resolution_images: true, temperature: 0, max_tokens: 16000 };
+  vl_high_resolution_images: true, temperature: 0, max_tokens: 16000,
+  stream: true, stream_options: { include_usage: true } };
 const geminiSettings = (stage: QualityRequest['stage']) => ({ temperature: 0, thinkingConfig: { thinkingLevel: 'low' },
   responseMimeType: 'application/json', maxOutputTokens: stage === 'mapping' ? 65536 : stage === 'preflight' ? 2048 : 24000 });
 // Gemini 3 per-part resolution preserves more image detail for dense account digits.
@@ -83,15 +84,43 @@ export async function runQualityModel(input: QualityRequest, env: QualityEnviron
   const model = input.stage === 'primaryRecovery' ? env.QWEN_RECOVERY_MODEL || 'qwen3.8-max'
     : (isQwen ? env.QWEN_MODEL : env.GEMINI_MODEL) || (isQwen ? 'qwen3.8-flash' : 'gemini-3.8-flash');
   if (!/^[a-zA-Z0-9._-]+$/.test(model)) throw new Error('模型配置格式错误');
-  let text = '', finishReason = '', usage: unknown;
+  let text = '', finishReason = '', usage: unknown, upstreamTransport: 'SSE' | 'JSON' = 'SSE';
   if (isQwen) {
     const response = await fetcher('https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions', {
       method: 'POST', signal, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${env.DASHSCOPE_API_KEY}` },
       body: qwenBody(input, model, policy.prompt)
     });
     if (!response.ok) throw new Error(`Qwen 服务请求失败（HTTP ${response.status}）`);
-    const value: any = await response.json();
-    text = value.choices?.[0]?.message?.content || ''; finishReason = value.choices?.[0]?.finish_reason || ''; usage = value.usage;
+    if (response.headers.get('Content-Type')?.includes('application/json')) {
+      // Compatibility with a provider that returns an ordinary completed reply.
+      upstreamTransport = 'JSON';
+      const value: any = await response.json();
+      text = value.choices?.[0]?.message?.content || ''; finishReason = value.choices?.[0]?.finish_reason || ''; usage = value.usage;
+    } else {
+      if (!response.body) throw new Error('Qwen 返回空响应');
+      const reader = response.body.getReader(), decoder = new TextDecoder(); let buffer = '';
+      const line = (s: string) => {
+        if (!s.startsWith('data:')) return;
+        const data = s.slice(5).trim(); if (!data || data === '[DONE]') return;
+        const value = JSON.parse(data);
+        if (value.error) throw new Error('Qwen 输出中断，已保留之前的页面进度');
+        usage = value.usage || usage;
+        const choice = value.choices?.[0];
+        finishReason = choice?.finish_reason || finishReason;
+        // Reasoning tokens keep the upstream connection active but are never
+        // mixed into the transcript or exposed as document content.
+        text += choice?.delta?.content || '';
+        if (text.length > 12_000_000) throw new Error('模型结果超过安全大小限制');
+      };
+      try {
+        while (true) {
+          const { value, done } = await reader.read(); if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          let n: number; while ((n = buffer.indexOf('\n')) >= 0) { line(buffer.slice(0, n).trim()); buffer = buffer.slice(n + 1); }
+        }
+        buffer += decoder.decode(); if (buffer.trim()) line(buffer.trim());
+      } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
+    }
     if (finishReason !== 'stop') throw new Error('Qwen 输出未完成，已保留之前的页面进度');
   } else {
     const response = await fetcher(`https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse`, {
@@ -126,5 +155,5 @@ export async function runQualityModel(input: QualityRequest, env: QualityEnviron
   try { result = JSON.parse(text); } catch { throw new Error('模型未返回完整 JSON，未将片段当作成功结果'); }
   if (input.stage === 'context' && result && Object.keys(result).length === 1 && Array.isArray(result.nearTableText)) result.tables = [];
   validateQualityResult(input.stage, result);
-  return { result, finishReason, usage, model, promptSHA256: policy.sha256, policySHA256: (await qualityModelConfig(env)).policySHA256 };
+  return { result, finishReason, usage, model, upstreamTransport, promptSHA256: policy.sha256, policySHA256: (await qualityModelConfig(env)).policySHA256 };
 }
