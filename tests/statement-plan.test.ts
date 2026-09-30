@@ -133,7 +133,7 @@ test('planning batches overlap only for context and preserve continuation across
   try {
     const pages = await requestStatementPlan(source(17));
     assert.equal(pages.length, 17);
-    assert.deepEqual(batches[1].pages.map((page: PlanningPage) => page.page), [8, 9, 10, 11, 12, 13, 14, 15, 16]);
+    assert.deepEqual(batches.find(batch => batch.targetPages[0] === 9).pages.map((page: PlanningPage) => page.page), [8, 9, 10, 11, 12, 13, 14, 15, 16]);
     assert.equal(buildStatementPlan(pages, 17).get(17)?.group.id, 'STATEMENT_P1');
     assert.equal(new Set(pages.map(page => page.page)).size, 17);
   } finally { globalThis.fetch = originalFetch; }

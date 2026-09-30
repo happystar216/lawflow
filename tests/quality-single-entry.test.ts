@@ -61,6 +61,11 @@ test('same replies through the real HTTP route, SSE client and workflow yield id
     const qwen = url.includes('dashscope');
     const prompt = qwen ? body.messages[0].content[0].text : body.contents[0].parts[0].text;
     const stage = Object.entries(qualityPrompts).find(([, p]) => p.prompt === prompt)?.[0] as QualityRequest['stage'];
+    if (!qwen) {
+      const image = body.contents[0].parts.find((p: any) => p.inlineData);
+      if (stage === 'independent') assert.equal(image.mediaResolution.level, 'MEDIA_RESOLUTION_ULTRA_HIGH');
+      if (stage === 'preflight') assert.equal(image.mediaResolution, undefined);
+    }
     const blank = !qwen && body.contents[0].parts.find((p: any) => p.inlineData)?.inlineData.data === 'Yg==';
     const result = responseFor(stage, blank);
     return qwen ? Response.json({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(result) } }] })

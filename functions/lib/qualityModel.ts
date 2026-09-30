@@ -6,11 +6,16 @@ const qwenSettings = { response_format: { type: 'json_object' }, reasoning_effor
   vl_high_resolution_images: true, temperature: 0, max_tokens: 16000 };
 const geminiSettings = (stage: QualityRequest['stage']) => ({ temperature: 0, thinkingConfig: { thinkingLevel: 'low' },
   responseMimeType: 'application/json', maxOutputTokens: stage === 'mapping' ? 65536 : stage === 'preflight' ? 2048 : 24000 });
+// Gemini 3 per-part resolution preserves more image detail for dense account digits.
+// https://ai.google.dev/gemini-api/docs/generate-content/media-resolution
+const geminiImageResolution = (stage: QualityRequest['stage']) =>
+  ['independent', 'accounts', 'critical'].includes(stage) ? 'MEDIA_RESOLUTION_ULTRA_HIGH' : null;
 export async function qualityModelConfig(env: QualityEnvironment) {
   const policy = { revision: QUALITY_REVISION,
     prompts: Object.fromEntries(Object.entries(qualityPrompts).map(([stage, p]) => [stage, p.sha256])),
     models: { gemini: env.GEMINI_MODEL || 'gemini-3.8-flash', qwen: env.QWEN_MODEL || 'qwen3.8-flash' },
-    settings: { qwen: qwenSettings, gemini: Object.fromEntries(QUALITY_STAGES.map(s => [s, geminiSettings(s)])) }
+    settings: { qwen: qwenSettings, gemini: Object.fromEntries(QUALITY_STAGES.map(s => [s, geminiSettings(s)])),
+      geminiImageResolution: Object.fromEntries(QUALITY_STAGES.map(s => [s, geminiImageResolution(s)])) }
   };
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(policy)));
   return { ...policy, policySHA256: Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('') };
@@ -60,7 +65,9 @@ function geminiBody(input: QualityRequest, prompt: string) {
   }
   else input.images!.forEach((data, index) => {
     if (input.stage === 'preflight') parts.push(JSON.stringify({ text: `候选${'ABCD'[index]}` }));
-    parts.push('{"inlineData":{"mimeType":"image/jpeg","data":"' + data + '"}}');
+    const resolution = geminiImageResolution(input.stage);
+    parts.push('{"inlineData":{"mimeType":"image/jpeg","data":"' + data + '"}'
+      + (resolution ? ',"mediaResolution":{"level":' + JSON.stringify(resolution) + '}' : '') + '}');
   });
   const generationConfig = geminiSettings(input.stage);
   return '{"contents":[{"role":"user","parts":[' + parts.join(',') + ']}],"generationConfig":' + JSON.stringify(generationConfig) + '}';

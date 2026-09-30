@@ -21,6 +21,13 @@ export function printedTransactionType(description: string, evidence: string[], 
   if (/分期付款退货/.test(summary)) return result('分期退款', 'PRINTED_INSTALLMENT_REFUND');
   if (/消费退货|消费退款|^退货$|^退款$/.test(summary)) return result('退款', 'PRINTED_PURCHASE_REFUND');
   if (accountKind === 'deposit') {
+    if (direction === 'OUT' && /^(?:电费|水费|电话费|燃气费|个人所得税|社保费|用水费收水费|污水处理费收污水费|住房公积金(?:对公\d+)?)$/.test(summary))
+      return result('缴费', 'EXPLICIT_UTILITY_TAX_OR_SOCIAL_CONTRIBUTION');
+    if (direction === 'OUT' && summary === '实时代收' && has(/^中国(?:电信|移动|联通)(?:股份)?有限公司(?:.{0,20}分公司)?$/))
+      return result('缴费', 'PRINTED_TELECOM_COLLECTION');
+    if (direction === 'OUT' && /^\d{8,32}$/.test(counterpartyAccount)
+      && /^(?:薪资[-—：:]|报销[-—：:]|日常报销费用(?:$|[-—：:])|(?:奖?助学金|津贴)[-—：:]|补贴[-—：:].*工资补助$|往来款$)/.test(summary))
+      return result('账户转账', 'PRINTED_DISBURSEMENT_TO_COUNTERPARTY_ACCOUNT');
     if (direction === 'IN' && summary === '转账收入' && has(/^工资(?:款|收入)?$/))
       return result('工资收入', 'PRINTED_TRANSFER_WITH_EXPLICIT_WAGE_PURPOSE');
     if (direction === 'IN' && summary === '小额普通' && has(/^代发工资业务待付结算款$/))

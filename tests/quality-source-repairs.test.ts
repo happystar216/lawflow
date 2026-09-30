@@ -110,3 +110,14 @@ test('remark evidence supports ordinary transfers without guessing a missing pur
   assert.equal(printedTransactionType('', ['贷款还款', '往来款'], 'OUT', 'deposit', '001234567890')?.type, '贷款还款');
   assert.equal(printedTransactionType('', [], 'OUT', 'deposit', '001234567890'), null);
 });
+
+test('explicit expenses and disbursements use standard types without treating salary payments as salary income', () => {
+  for (const text of ['电费', '个人所得税', '社保费', '用水费 收水费'])
+    assert.equal(printedTransactionType(text, [text], 'OUT', 'deposit')?.type, '缴费');
+  assert.equal(printedTransactionType('实时代收', ['中国电信股份有限公司'], 'OUT', 'deposit')?.type, '缴费');
+  assert.equal(printedTransactionType('实时代收', ['未知公司'], 'OUT', 'deposit'), null);
+  assert.equal(printedTransactionType('薪资-2026年9月份工资', [], 'OUT', 'deposit', '001234567890')?.type, '账户转账');
+  assert.equal(printedTransactionType('薪资-2026年9月份工资', [], 'IN', 'deposit', '001234567890'), null);
+  assert.equal(printedTransactionType('报销-日常费用', [], 'OUT', 'deposit'), null);
+  assert.equal(printedTransactionType('电费', [], 'IN', 'deposit'), null);
+});
