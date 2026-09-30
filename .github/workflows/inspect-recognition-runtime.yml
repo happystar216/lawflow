@@ -1,12 +1,17 @@
 name: Inspect recognition runtime
 on:
   workflow_dispatch:
+    inputs:
+      tail_seconds:
+        description: 'Read sanitized live error outcomes for 0–600 seconds'
+        default: '0'
+        required: true
 permissions:
   contents: read
 jobs:
   inspect:
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 13
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -17,3 +22,13 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: node scripts/inspectRecognitionRuntime.mjs
+      - name: Install the existing deployment CLI for live diagnostics
+        if: inputs.tail_seconds != '0'
+        run: npm ci --ignore-scripts
+      - name: Read sanitized live runtime outcomes
+        if: inputs.tail_seconds != '0'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          TAIL_SECONDS: ${{ inputs.tail_seconds }}
+        run: node scripts/tailRecognitionRuntime.mjs
