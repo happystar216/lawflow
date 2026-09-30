@@ -5,6 +5,10 @@ on:
     branches:
       - main
       - master
+    paths-ignore:
+      - '.github/workflows/inspect-recognition-runtime.yml'
+      - 'scripts/inspectRecognitionRuntime.mjs'
+      - 'scripts/tailRecognitionRuntime.mjs'
   workflow_dispatch:
 
 jobs:

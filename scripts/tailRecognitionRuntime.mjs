@@ -1,40 +1,43 @@
-import { spawn } from 'node:child_process';
-const seconds = Number(process.env.TAIL_SECONDS);
-if (!Number.isInteger(seconds) || seconds < 1 || seconds > 600) throw new Error('Invalid tail duration');
-const child = spawn('node_modules/.bin/wrangler', ['pages', 'deployment', 'tail', '--project-name', 'lawflow', '--environment', 'production', '--format', 'json'], {
-  stdio: ['ignore', 'pipe', 'pipe'], env: process.env
-});
-// Tail records contain request headers. Filter in memory; never store raw logs.
-let record = '', depth = 0, quoted = false, escaped = false;
+// Read ephemeral runtime events; emit only enumerated outcomes and numeric metrics.
+// Request headers, provider messages, exception text and session URLs never leave memory.
 const outcomes = new Set(['ok', 'exception', 'exceededCpu', 'exceededMemory', 'canceled', 'unknown',
   'exceededResources', 'internalError', 'responseStreamDisconnected']);
-const finiteNumber = value => typeof value === 'number' && Number.isFinite(value) ? value : undefined;
-function consume(chunk) {
-  for (const ch of chunk.toString()) {
-    if (!depth) { if (ch !== '{') continue; record = ''; depth = 1; quoted = false; record += ch; continue; }
-    record += ch;
-    if (quoted) {
-      if (escaped) escaped = false;
-      else if (ch === '\\') escaped = true;
-      else if (ch === '"') quoted = false;
-    } else if (ch === '"') quoted = true;
-    else if (ch === '{') depth++;
-    else if (ch === '}') depth--;
-    if (!depth) {
-      try {
-        const r = JSON.parse(record);
-        if (r.outcome) console.log(JSON.stringify({ outcome: outcomes.has(r.outcome) ? r.outcome : 'other',
-          cpuTime: finiteNumber(r.cpuTime), wallTime: finiteNumber(r.wallTime),
-          eventTimestamp: finiteNumber(r.eventTimestamp), status: finiteNumber(r.event?.response?.status) }));
-      } catch { console.log('A runtime diagnostic record could not be decoded'); }
-    }
+const finiteNumber = v => typeof v === 'number' && Number.isFinite(v) ? v : undefined;
+async function main() {
+  const seconds = Number(process.env.TAIL_SECONDS), account = process.env.CLOUDFLARE_ACCOUNT_ID;
+  const token = process.env.CLOUDFLARE_API_TOKEN;
+  if (!Number.isInteger(seconds) || seconds < 1 || seconds > 600 || !account || !token) throw new Error();
+  const root = `https://api.cloudflare.com/client/v4/accounts/${account}/pages/projects/lawflow`;
+  async function api(path, method = 'GET') {
+    const response = await fetch(root + path, { method, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      ...(method === 'POST' ? { body: JSON.stringify({ filters: [] }) } : {}), signal: AbortSignal.timeout(30000) });
+    const value = await response.json();
+    console.log(JSON.stringify({ apiStatus: response.status, errorCodes: value.errors?.map(e => finiteNumber(e.code)).filter(v => v !== undefined) }));
+    if (!response.ok || !value.success) throw new Error();
+    return value.result;
   }
+  const project = await api('');
+  const path = `/deployments/${project.canonical_deployment.id}/tails`;
+  const session = await api(path, 'POST');
+  try {
+    if (new URL(session.url).protocol !== 'wss:') throw new Error();
+    await new Promise((resolve, reject) => {
+      const ws = new WebSocket(session.url, 'trace-v1');
+      const timer = setTimeout(() => { ws.close(); resolve(); }, seconds * 1000);
+      ws.addEventListener('open', () => { ws.send(JSON.stringify({ debug: false })); console.log('Sanitized runtime reader connected'); });
+      ws.addEventListener('message', async event => {
+        try {
+          const text = typeof event.data === 'string' ? event.data : await event.data.text();
+          if (text.length > 2000000) return;
+          const r = JSON.parse(text);
+          if (r.outcome) console.log(JSON.stringify({ outcome: outcomes.has(r.outcome) ? r.outcome : 'other',
+            cpuTime: finiteNumber(r.cpuTime), wallTime: finiteNumber(r.wallTime), eventTimestamp: finiteNumber(r.eventTimestamp),
+            status: finiteNumber(r.event?.response?.status) }));
+        } catch { console.log('Runtime event decoding failed'); }
+      });
+      ws.addEventListener('error', () => { clearTimeout(timer); reject(new Error()); });
+      ws.addEventListener('close', () => { clearTimeout(timer); resolve(); });
+    });
+  } finally { await api(`${path}/${session.id}`, 'DELETE'); }
 }
-child.stdout.on('data', consume);
-// Print only a known error category; provider diagnostics may contain headers.
-child.stderr.on('data', data => {
-  if (/Authentication error|not authorized|permission denied/i.test(data.toString())) console.log('Runtime log access is unavailable with the deployment token');
-});
-console.log('Sanitized runtime log reader started');
-const timer = setTimeout(() => child.kill('SIGTERM'), seconds * 1000);
-child.on('exit', (code, signal) => { clearTimeout(timer); console.log(JSON.stringify({ readerExitCode: code, readerExitSignal: signal })); });
+main().catch(() => { console.log('Runtime reader unavailable; no raw diagnostic data was exported'); process.exitCode = 1; });

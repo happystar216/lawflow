@@ -22,9 +22,6 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: node scripts/inspectRecognitionRuntime.mjs
-      - name: Install the existing deployment CLI for live diagnostics
-        if: inputs.tail_seconds != '0'
-        run: npm ci --ignore-scripts
       - name: Read sanitized live runtime outcomes
         if: inputs.tail_seconds != '0'
         env:
