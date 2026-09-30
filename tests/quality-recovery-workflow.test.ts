@@ -45,3 +45,37 @@ for (const failRecovery of [false, true]) test(`an independently observed second
   assert.deepEqual(requested.slice(0, 2).map(r => r.dpi), [350, 350]);
   assert.notEqual(qualityPrompts.primaryRecovery.sha256, qualityPrompts.primary.sha256);
 });
+
+for (const failure of ['upstream', 'configuration', 'abort']) test(`supplemental account/key failures retain unresolved evidence; ${failure}`, async () => {
+  const controller = new AbortController();
+  const source = { nearTableText: ['001234567890'], tables: [{ rows: [['2026-01-01', '支出', '10', '90', '转账', '测试对方', '009876543210']] }] };
+  const independent = { pageType: 'transactions', coverage: 'complete', pageIssues: [], rows: [
+    { row: 1, values: ['001234567891', '2026-01-01', '', 'OUT', '10.00', '90.00', '测试对方', '009876543210'], rawDirection: '支出', issues: [] }
+  ] };
+  const mapping = { tables: [{ page: 1, table: 1, kind: 'transactions', accountKind: 'deposit', groups: [[1]], ignored: [], directionCodes: null,
+    fields: { accountNumber: { fixed: 1 }, transactionDate: { row: 0, col: 1 }, direction: { row: 0, col: 2 }, amount: { row: 0, col: 3 },
+      balance: { row: 0, col: 4 }, description: { row: 0, col: 5 }, counterpartyName: { row: 0, col: 6 }, counterpartyAccount: { row: 0, col: 7 } }
+  }], typeRules: [] };
+  const task = runQualityWorkflow({ totalPages: 1, signal: controller.signal, progress() {},
+    preflightImages: async () => ({ images: Array(4).fill('YQ=='), metrics: { darkFraction160: .1, darkFraction210: .1, hasPdfText: false } }),
+    image: async () => 'YQ==',
+    call: async input => {
+      if (['accounts', 'critical'].includes(input.stage)) {
+        if (failure === 'abort') controller.abort(new Error('user cancelled'));
+        throw new Error(failure === 'configuration' ? '识别配置已更新，请刷新网页后重试' : '服务请求中断');
+      }
+      const result = input.stage === 'preflight' ? { pageKind: 'content', uprightCandidate: 'A', reason: 'fixture' }
+        : input.stage === 'independent' ? independent : input.stage === 'mapping' ? mapping
+        : input.stage === 'context' ? { nearTableText: [], tables: [] } : source;
+      return { result, finishReason: 'STOP', model: 'fixture', promptSHA256: 'fixture' };
+    }
+  });
+  if (failure !== 'upstream') { await assert.rejects(task, failure === 'abort' ? /user cancelled/ : /配置已更新/); return; }
+  const delivery = await task;
+  assert.equal(delivery.result.rows.length, 1);
+  assert.equal(delivery.result.rows[0].values[0], '001234567890');
+  assert.ok(delivery.result.pending.some(i => i.field === 'accountNumber' && i.severity === 'REQUIRED' && i.outputRows.includes(1)));
+  assert.equal(delivery.recoveryPlans.accounts.failures.length, 1);
+  assert.equal(delivery.recoveryPlans.critical.failures.length, 1);
+  assert.deepEqual(delivery.accounts, {}); assert.deepEqual(delivery.critical, {});
+});

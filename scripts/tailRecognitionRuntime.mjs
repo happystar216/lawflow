@@ -40,4 +40,6 @@ async function main() {
     });
   } finally { await api(`${path}/${session.id}`, 'DELETE'); }
 }
-main().catch(() => { console.log('Runtime reader unavailable; no raw diagnostic data was exported'); process.exitCode = 1; });
+main().then(() => process.exit(0)).catch(() => {
+  console.log('Runtime reader unavailable; no raw diagnostic data was exported'); process.exit(1);
+});

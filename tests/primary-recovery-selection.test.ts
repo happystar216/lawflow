@@ -38,3 +38,30 @@ test('ambiguous duplicate anchors cannot assert unique coverage', () => {
   const result = selectPrimaryRecovery(page([first, first]), page([]), independent);
   assert.equal(result.decision.corroboratedBefore, 0);
 });
+
+test('a stable complete grid can retain one original supported row without discarding the rest of the reread', () => {
+  const header = ['日期', '借方', '贷方', '余额'];
+  const raw = [first, second, ['2026/07/12', '0', '30', '40'], ['2026/07/13', '0', '10', '30']];
+  const original = { nearTableText: ['old header'], tables: [{ rows: [header, ...raw] }] };
+  const reading = { ...independent, rows: raw.map((r, i) => ({ row: i + 1,
+    values: ['', r[0].replaceAll('/', '-'), '', 'OUT', r[2], r[3], '', ''], rawDirection: '', issues: [] })) };
+  const fresh = structuredClone(original); fresh.nearTableText = ['new header']; fresh.tables[0].rows[1][2] = '11.00';
+  const before = JSON.stringify([original, fresh]);
+  const result = selectPrimaryRecovery(original, fresh, reading);
+  assert.notEqual(result.selected, original);
+  assert.deepEqual(result.selected.nearTableText, ['new header']);
+  assert.deepEqual(result.selected.tables[0].rows[1], first);
+  assert.equal(result.decision.corroboratedSelected, 4);
+  assert.deepEqual(result.decision.retainedSourceRows, [{ table: 1, row: 2, independentRow: 1 }]);
+  assert.equal(JSON.stringify([original, fresh]), before);
+  for (const problem of ['date', 'balance', 'header', 'count', 'uncertainty', 'reorder']) {
+    const altered = structuredClone(fresh), alternate = structuredClone(reading);
+    if (problem === 'date') altered.tables[0].rows[1][0] = '2026/08/10';
+    if (problem === 'balance') altered.tables[0].rows[1][3] = '80';
+    if (problem === 'header') altered.tables[0].rows[0][1] = '其他';
+    if (problem === 'count') altered.tables[0].rows.pop();
+    if (problem === 'uncertainty') alternate.coverage = 'uncertain';
+    if (problem === 'reorder') [altered.tables[0].rows[2], altered.tables[0].rows[3]] = [altered.tables[0].rows[3], altered.tables[0].rows[2]];
+    assert.equal(selectPrimaryRecovery(original, altered, alternate).selected, original, problem);
+  }
+});

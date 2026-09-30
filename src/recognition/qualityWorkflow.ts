@@ -123,18 +123,33 @@ export async function runQualityWorkflow(io: QualityWorkflowIO) {
     }
   }
   const accountPlan = planAccountRecovery(result.pending, registry, independent);
+  const accountFailures: Array<{ page: number; reason: string }> = [];
   io.progress(`核实账号归属${accountPlan.selected.length ? `（${accountPlan.selected.length} 页）` : ''}…`, 82, result.rows.length);
   await parallelPages(accountPlan.selected.map(p => p.page), async page => {
-    accounts[page] = (await io.call({ stage: 'accounts', images: [await io.image(page, preflight[page - 1].decision.clockwiseRotation, 350)] }, page)).result;
+    try {
+      accounts[page] = (await io.call({ stage: 'accounts', images: [await io.image(page, preflight[page - 1].decision.clockwiseRotation, 350)] }, page)).result;
+    } catch (error) {
+      check(); if (/配置已更新|缺少配置/.test(String(error))) throw error;
+      accountFailures.push({ page, reason: error instanceof Error ? error.message : String(error) });
+      io.progress(`第 ${page} 页账号补充读取未完成，已保留原结果和待确认提示…`, 82, result!.rows.length);
+    }
   });
   result = runQualityTrial(mapping, registry, independent, scope, accounts);
   const criticalPlan = planCriticalFieldRecovery(result.pending, registry);
+  const criticalFailures: Array<{ page: number; reason: string }> = [];
   io.progress(`核实关键字段差异${criticalPlan.selected.length ? `（${criticalPlan.selected.length} 页）` : ''}…`, 90, result.rows.length);
   await parallelPages(criticalPlan.selected.map(p => p.page), async page => {
-    critical[page] = (await io.call({ stage: 'critical', images: [await io.image(page, preflight[page - 1].decision.clockwiseRotation, 350)] }, page)).result;
+    try {
+      critical[page] = (await io.call({ stage: 'critical', images: [await io.image(page, preflight[page - 1].decision.clockwiseRotation, 350)] }, page)).result;
+    } catch (error) {
+      check(); if (/配置已更新|缺少配置/.test(String(error))) throw error;
+      criticalFailures.push({ page, reason: error instanceof Error ? error.message : String(error) });
+      io.progress(`第 ${page} 页关键字段补充读取未完成，已保留原结果和待确认提示…`, 90, result!.rows.length);
+    }
   });
   check(); result = withAnalysisTypeChecks(runQualityTrial(mapping, registry, independent, scope, accounts, critical), registry);
   io.progress('已完成识别并列出待确认项', 100, result.rows.length);
   return { result, registry, mapping, preflight, primary, context, independent, accounts, critical,
-    recoveryPlans: { primary: { ...primaryPlan, selections: primarySelections, failures: primaryFailures }, accounts: accountPlan, critical: criticalPlan } };
+    recoveryPlans: { primary: { ...primaryPlan, selections: primarySelections, failures: primaryFailures },
+      accounts: { ...accountPlan, failures: accountFailures }, critical: { ...criticalPlan, failures: criticalFailures } } };
 }
