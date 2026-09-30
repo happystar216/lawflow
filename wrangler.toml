@@ -2,6 +2,12 @@ name = "lawflow"
 compatibility_date = "2024-09-23"
 pages_build_output_dir = "dist"
 
+# Full-page images and streamed model responses need a bounded CPU allowance.
+# Network waiting is not CPU time. This does not enable or purchase a plan;
+# Cloudflare rejects this configuration if the existing plan cannot support it.
+[limits]
+cpu_ms = 1000
+
 # Required production secrets / variables (configure in Cloudflare; never commit values):
 # GEMINI_API_KEY     = Gemini API Key（required for the current PDF pipeline）
 # GEMINI_MODEL       = gemini-3.8-flash（optional; this is the code default）
