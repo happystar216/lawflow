@@ -56,7 +56,9 @@ export function qualityToWeb(result: QualityDeliveryInput, registry: SourceRegis
       rawPageNumber: sources[0]?.page, rawRowIndex: sources[0]?.row,
       qualitySourceObservationIds: row.sourceObservationIds, rawText: sources.map(r => r.cells.map(id => registry.cells[id].text).join(' | ')).join('\n'),
       reviewStatus: pending.length ? 'PENDING' : 'AUTO_PASSED',
-      candidateReview: pending.length ? { kind: 'SOURCE_CHECK', requiredFields, differences: [], status: 'PENDING',
+      candidateReview: pending.length ? { kind: 'SOURCE_CHECK', requiredFields,
+        differences: (result.accountCandidateSelections || []).filter(c => c.outputRow === index + 1)
+          .map(c => ({ field: c.field, selected: c.after, alternative: c.before })), status: 'PENDING',
         reason: pending.map(i => i.message).join('；') } : undefined,
       dataQualityIssues: [!transactionDate ? 'INVALID_DATE' as const : undefined, !amount || !Number.isFinite(Number(amount)) ? 'INVALID_AMOUNT' as const : undefined,
         !['IN', 'OUT'].includes(direction) ? 'UNKNOWN_DIRECTION' as const : undefined].filter((x): x is NonNullable<typeof x> => !!x)

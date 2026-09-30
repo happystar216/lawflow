@@ -18,6 +18,7 @@ import { auxiliaryPrintedPurpose } from './auxiliaryPurpose';
 import { combinedPartySuffixColumn } from './columnRecovery';
 import { sourceBalanceChecks } from './sourceBalanceChecks';
 import { recoverNeighborAccountDigits } from './neighborAccountDigits';
+import { selectAccountCandidates } from './accountCandidateSelection';
 
 /** Shared web/replay pipeline; document scope is explicit, never inferred from an account prefix. */
 export function runQualityTrial(mapping: TableMappingPlan, registry: SourceRegistry,
@@ -443,15 +444,23 @@ export function runQualityTrial(mapping: TableMappingPlan, registry: SourceRegis
   }
   const structuralConflict = pending.some(i => ['INDEPENDENT_PAGE_INCOMPLETE', 'INDEPENDENT_ROW_UNMATCHED',
     'INDEPENDENT_EXTRA_OBSERVATION', 'UNRESOLVED_DUPLICATE_VIEWS'].includes(i.code));
+  const outputRows = consolidation.events.map(e => ({ id: e.id, values: [...e.values],
+    sourceObservationIds: e.observations.flatMap(n => rows[n].sourceRows.map(r => `source:${r}`)),
+    observationNumbers: e.observations.map(n => n + 1) }));
+  const accountCandidateSelections = selectAccountCandidates(outputRows, pending, registry,
+    neighborAccounts.pages, neighborCriticalAccounts.pages);
+  for (const candidate of accountCandidateSelections) {
+    outputRows[candidate.outputRow - 1].values[10] = candidate.after;
+    for (const issue of pending) if (issue.field === candidate.field && issue.outputRows.includes(candidate.outputRow))
+      issue.message += `；暂取两次图像读取一致的候选 ${candidate.after}，原文转录为 ${candidate.before}，仍需核对原件`;
+  }
   return { version: 1, scope: options, complete: materialized.complete && !structuralConflict
       && registry.pages.every(p => independent[p]?.coverage === 'complete'),
     observations: rows, metadata: materialized.metadata, transformations, comparison, consolidation, rejectedIssuerEvidence, recoveredOwnerPrefixes,
     accountRecovery: { applied: recovery.applied, skipped: recovery.skipped }, accountBindings, accountInventoryConflicts: accountInventory.unresolved,
     criticalFieldRecovery: { applied: criticalRecovery.applied },
     neighborAccountRecovery: { independent: neighborAccounts.applied, critical: neighborCriticalAccounts.applied },
-    rows: consolidation.events.map(e => ({ id: e.id, values: e.values,
-      sourceObservationIds: e.observations.flatMap(n => rows[n].sourceRows.map(r => `source:${r}`)),
-      observationNumbers: e.observations.map(n => n + 1) })),
+    rows: outputRows, accountCandidateSelections,
     mappingRoleCorrections: materialized.roleCorrections, mappingGroupCorrections: materialized.groupCorrections,
     mappingColumnCorrections: materialized.columnCorrections, pending, resolved };
 }

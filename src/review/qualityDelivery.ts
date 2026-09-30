@@ -1,7 +1,9 @@
 import type { AssemblyIssue, SourceRegistry } from '../recognition/sourceAssembly';
 import type { QualityRow } from '../recognition/acceptanceEvaluation';
+import type { AccountCandidateSelection } from '../recognition/accountCandidateSelection';
 
-export interface QualityDeliveryInput { complete: boolean; rows: QualityRow[]; pending: AssemblyIssue[] }
+export interface QualityDeliveryInput { complete: boolean; rows: QualityRow[]; pending: AssemblyIssue[];
+  accountCandidateSelections?: AccountCandidateSelection[] }
 export interface QualityResolution { issueId: string; status: 'CONFIRMED' | 'CORRECTED' | 'UNRESOLVED';
   reviewer: string; reviewedAt: string; note: string }
 

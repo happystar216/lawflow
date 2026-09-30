@@ -1,4 +1,5 @@
 import { createPdfPageImageRenderer, PDF_RENDER_POLICY } from './pdfPageImageRenderer';
+import { createModelRequestQueue } from '../recognition/modelRequestQueue';
 import type { GeminiProgressInfo } from './geminiPdfParser';
 import { runQualityWorkflow } from '../recognition/qualityWorkflow';
 import { QUALITY_ENDPOINT, QUALITY_POLICY_HEADER, QUALITY_REVISION, qualityWireRequest, validateQualityResult, type ModelReply, type QualityRequest } from '../recognition/qualityProtocol';
@@ -43,6 +44,8 @@ export async function parsePdfWithQualityPipeline(file: File, onProgress: (p: Ge
   options: { store: QualityCheckpointStore; onResumeWarning?: (message: string) => void }) {
   const startedAt = new Date().toISOString();
   const calls: QualityCallRecord[] = [];
+  const schedule = createModelRequestQueue(3, signal);
+  const callFailures: Array<{ stage: string; page: number; attempt: number; at: string; message: string }> = [];
   const config = await fetch(QUALITY_ENDPOINT, { signal, cache: 'no-store' });
   const status = await config.json();
   if (!config.ok || !status.ready) throw new Error(`识别服务尚未配置完整：${(status.missing || []).join('、')}`);
@@ -103,9 +106,16 @@ export async function parsePdfWithQualityPipeline(file: File, onProgress: (p: Ge
         }
         let reply: ModelReply | undefined, attempts = 0;
         for (let attempt = 0; attempt < 3; attempt++) {
-          try { attempts++; reply = await requestQualityModel(input, signal, status.policySHA256); break; }
+          try { attempts++; reply = await schedule(() => requestQualityModel(input, signal, status.policySHA256)); break; }
           catch (error) {
-            signal.throwIfAborted(); if (attempt === 2 || /配置|401|402|403/.test(String(error))) throw error;
+            signal.throwIfAborted();
+            const message = error instanceof Error ? error.message : String(error);
+            callFailures.push({ stage: input.stage, page, attempt: attempts, at: new Date().toISOString(), message });
+            const label = { preflight: '空白页与方向检查', primary: '原文读取', context: '页眉读取', independent: '关键内容读取',
+              mapping: '流水整理', primaryRecovery: '补充原文读取', accounts: '账号归属读取', critical: '关键字段读取' }[input.stage];
+            const location = `${page ? `第 ${page} 页` : '整份文件'}的${label}`;
+            if (attempt === 2 || /配置|401|402|403/.test(message)) throw new Error(`${location}失败（已尝试 ${attempts} 次）：${message}`);
+            onProgress({ statusText: `${location}响应失败，正在第 ${attempts + 1}/3 次尝试…`, percent, totalTransactions: 0, isStreaming: true });
             await new Promise<void>((resolve, reject) => {
               const stop = () => { clearTimeout(timer); reject(signal.reason); };
               const timer = setTimeout(() => { signal.removeEventListener('abort', stop); resolve(); }, 1000 * 2 ** attempt);
@@ -125,7 +135,7 @@ export async function parsePdfWithQualityPipeline(file: File, onProgress: (p: Ge
       sourceSHA256: Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join(''),
       startedAt, completedAt: new Date().toISOString(), runKind: calls.some(c => c.fromCache) ? 'RESUMED' : 'FRESH',
       policySHA256: status.policySHA256, models: status.models, prompts: status.prompts, settings: status.settings,
-      renderer: PDF_RENDER_POLICY, calls };
+      renderer: PDF_RENDER_POLICY, calls, callFailures };
     const evidence = { ...delivery, run };
     await options.store.saveDelivery(evidence);
     return { ...qualityToWeb(delivery.result, delivery.registry, file.name, renderer.totalPages, delivery.mapping), evidence };

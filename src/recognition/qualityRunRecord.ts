@@ -13,6 +13,7 @@ export interface QualityRunManifest {
   startedAt: string; completedAt: string; runKind: 'FRESH' | 'RESUMED';
   policySHA256: string; models: Record<string, string>; prompts: Record<string, string>;
   settings: unknown; renderer: unknown; calls: QualityCallRecord[];
+  callFailures?: Array<{ stage: string; page: number; attempt: number; at: string; message: string }>;
 }
 export interface QualityEvidence {
   result: QualityDeliveryInput; registry: SourceRegistry; run?: QualityRunManifest;
