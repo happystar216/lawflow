@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { runQualityWorkflow } from '../src/recognition/qualityWorkflow';
 import { qualityPrompts } from '../functions/lib/qualityPrompts.generated';
 
-test('an independently observed second statement triggers a full-page reread at source resolution', async () => {
+for (const failRecovery of [false, true]) test(`an independently observed second statement triggers a full-page reread; failure=${failRecovery}`, async () => {
   const first = ['2026-07-10', '支出', '10.00', '90.00', '转账', '测试甲', '009876543210'];
   const second = ['2026-07-11', '支出', '20.00', '70.00', '转账', '测试乙', '009876543211'];
   const table = (rows: string[][]) => ({ nearTableText: ['测试银行', '001234567890'], tables: [{ rows }] });
@@ -22,19 +22,26 @@ test('an independently observed second statement triggers a full-page reread at 
     preflightImages: async () => ({ images: Array(4).fill('YQ=='), metrics: { darkFraction160: .1, darkFraction210: .1, hasPdfText: false } }),
     image: async (_page, _rotation, dpi) => { requested.push({ stage: 'image', dpi }); return 'YQ=='; },
     call: async input => {
+      if (failRecovery && input.stage === 'primaryRecovery') throw new Error('原文表格结构不完整');
       const result = input.stage === 'preflight' ? { pageKind: 'content', uprightCandidate: 'A', reason: 'fixture' }
         : input.stage === 'primary' ? table([first])
         : input.stage === 'primaryRecovery' ? table([first, second])
         : input.stage === 'context' ? { nearTableText: [], tables: [] }
         : input.stage === 'independent' || input.stage === 'critical' ? independent
-        : input.stage === 'mapping' ? map(++mapped === 1 ? [1] : [1, 2])
+        : input.stage === 'mapping' ? map(++mapped === 1 || failRecovery ? [1] : [1, 2])
         : { bankName: '测试银行', identifiers: [], issues: [] };
       return { result, finishReason: 'STOP', model: 'fixture', promptSHA256: 'fixture' };
     }
   });
   assert.deepEqual(delivery.recoveryPlans.primary.selected.map(p => p.page), [1]);
-  assert.deepEqual(delivery.primary[0].tables.map(t => t.rows.length), [2]);
-  assert.equal(delivery.result.rows.length, 2);
+  assert.deepEqual(delivery.primary[0].tables.map(t => t.rows.length), [failRecovery ? 1 : 2]);
+  assert.equal(delivery.result.rows.length, failRecovery ? 1 : 2);
+  if (failRecovery) {
+    assert.equal(mapped, 1, 'failed optional reading must not remap the unchanged original');
+    assert.equal(delivery.recoveryPlans.primary.failures[0].reason, '原文表格结构不完整');
+    assert.equal(delivery.result.complete, false);
+    assert.ok(delivery.result.pending.some(i => i.code === 'INDEPENDENT_EXTRA_OBSERVATION'));
+  }
   assert.deepEqual(requested.slice(0, 2).map(r => r.dpi), [350, 350]);
   assert.notEqual(qualityPrompts.primaryRecovery.sha256, qualityPrompts.primary.sha256);
 });

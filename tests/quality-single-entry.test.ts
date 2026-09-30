@@ -90,6 +90,7 @@ test('changed model configuration is rejected before any provider request', asyn
   t.mock.method(globalThis, 'fetch', () => { throw new Error('must not call a model'); });
   const config = await qualityModelConfig(env);
   const next = { ...env, GEMINI_MODEL: 'another-model' };
+  assert.notEqual((await qualityModelConfig({ ...env, QWEN_RECOVERY_MODEL: 'another-recovery-model' })).policySHA256, config.policySHA256);
   assert.notEqual((await qualityModelConfig(next)).policySHA256, config.policySHA256);
   const response = await onRequestPost({ env: next, request: new Request(`https://test.local${QUALITY_ENDPOINT}`, {
     method: 'POST', headers: { [QUALITY_POLICY_HEADER]: config.policySHA256 }, body: '{}'

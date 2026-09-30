@@ -89,7 +89,8 @@ export async function parsePdfWithQualityPipeline(file: File, onProgress: (p: Ge
             startedAt: callStartedAt, completedAt: new Date().toISOString(), reply: structuredClone(reply) });
           return reply;
         };
-        const expectedModel = ['primary', 'context', 'primaryRecovery'].includes(input.stage) ? status.models?.qwen : status.models?.gemini;
+        const expectedModel = input.stage === 'primaryRecovery' ? status.models?.qwenRecovery
+          : ['primary', 'context'].includes(input.stage) ? status.models?.qwen : status.models?.gemini;
         let saved: ModelReply | undefined;
         if (!callOptions?.refresh) try { saved = await options.store.read(key); } catch { warn(); }
         if (saved && saved.policySHA256 === status.policySHA256 && saved.promptSHA256 === status.prompts?.[input.stage] && saved.model === expectedModel) {

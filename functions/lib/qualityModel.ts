@@ -1,7 +1,7 @@
 import { qualityPrompts } from './qualityPrompts.generated';
 import { QUALITY_REVISION, QUALITY_STAGES, QUALITY_IMAGE_CONTENT_TYPE, validateQualityResult, type QualityRequest, type ModelReply } from '../../src/recognition/qualityProtocol';
 
-export interface QualityEnvironment { GEMINI_API_KEY?: string; GEMINI_MODEL?: string; DASHSCOPE_API_KEY?: string; QWEN_MODEL?: string }
+export interface QualityEnvironment { GEMINI_API_KEY?: string; GEMINI_MODEL?: string; DASHSCOPE_API_KEY?: string; QWEN_MODEL?: string; QWEN_RECOVERY_MODEL?: string }
 const qwenSettings = { response_format: { type: 'json_object' }, reasoning_effort: 'low',
   vl_high_resolution_images: true, temperature: 0, max_tokens: 16000 };
 const geminiSettings = (stage: QualityRequest['stage']) => ({ temperature: 0, thinkingConfig: { thinkingLevel: 'low' },
@@ -13,7 +13,8 @@ const geminiImageResolution = (stage: QualityRequest['stage']) =>
 export async function qualityModelConfig(env: QualityEnvironment) {
   const policy = { revision: QUALITY_REVISION,
     prompts: Object.fromEntries(Object.entries(qualityPrompts).map(([stage, p]) => [stage, p.sha256])),
-    models: { gemini: env.GEMINI_MODEL || 'gemini-3.8-flash', qwen: env.QWEN_MODEL || 'qwen3.8-flash' },
+    models: { gemini: env.GEMINI_MODEL || 'gemini-3.8-flash', qwen: env.QWEN_MODEL || 'qwen3.8-flash',
+      qwenRecovery: env.QWEN_RECOVERY_MODEL || 'qwen3.8-max' },
     settings: { qwen: qwenSettings, gemini: Object.fromEntries(QUALITY_STAGES.map(s => [s, geminiSettings(s)])),
       geminiImageResolution: Object.fromEntries(QUALITY_STAGES.map(s => [s, geminiImageResolution(s)])) }
   };
@@ -79,7 +80,8 @@ export async function runQualityModel(input: QualityRequest, env: QualityEnviron
   if (missing.length) throw new Error(`识别服务缺少配置：${missing.join('、')}`);
   const policy = qualityPrompts[input.stage];
   const isQwen = ['primary', 'context', 'primaryRecovery'].includes(input.stage);
-  const model = (isQwen ? env.QWEN_MODEL : env.GEMINI_MODEL) || (isQwen ? 'qwen3.8-flash' : 'gemini-3.8-flash');
+  const model = input.stage === 'primaryRecovery' ? env.QWEN_RECOVERY_MODEL || 'qwen3.8-max'
+    : (isQwen ? env.QWEN_MODEL : env.GEMINI_MODEL) || (isQwen ? 'qwen3.8-flash' : 'gemini-3.8-flash');
   if (!/^[a-zA-Z0-9._-]+$/.test(model)) throw new Error('模型配置格式错误');
   let text = '', finishReason = '', usage: unknown;
   if (isQwen) {

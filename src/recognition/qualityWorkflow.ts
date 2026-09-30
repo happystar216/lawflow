@@ -85,24 +85,37 @@ export async function runQualityWorkflow(io: QualityWorkflowIO) {
   }
   const primaryPlan = planPrimaryRecovery(result.pending, registry);
   const primarySelections: Record<number, ReturnType<typeof selectPrimaryRecovery>['decision']> = {};
+  const primaryFailures: Array<{ page: number; reason: string }> = [];
   if (primaryPlan.selected.length) {
+    let primaryChanged = false;
     io.progress(`重新读取 ${primaryPlan.selected.length} 页的原文差异…`, 74);
     await parallelPages(primaryPlan.selected.map(p => p.page), async page => {
       const image = await io.image(page, preflight[page - 1].decision.clockwiseRotation, 350);
-      const reread = (await io.call({ stage: 'primaryRecovery', images: [image] }, page)).result;
-      const selection = selectPrimaryRecovery(primary[page - 1], reread, independent[page]);
-      primary[page - 1] = selection.selected;
-      primarySelections[page] = selection.decision;
+      try {
+        const reread = (await io.call({ stage: 'primaryRecovery', images: [image] }, page)).result;
+        const selection = selectPrimaryRecovery(primary[page - 1], reread, independent[page]);
+        primaryChanged ||= selection.selected !== primary[page - 1];
+        primary[page - 1] = selection.selected;
+        primarySelections[page] = selection.decision;
+      } catch (error) {
+        check();
+        // A failed supplemental reading cannot erase a successful original.
+        // Configuration changes still stop the run to avoid mixing policies.
+        if (/配置已更新|缺少配置/.test(String(error))) throw error;
+        primaryFailures.push({ page, reason: error instanceof Error ? error.message : String(error) });
+      }
     });
-    const next = buildQualitySources(merged());
-    const rebased = rebaseEmptyPageRecovery(mapping, registry, next.registry);
-    if (rebased) mapping = rebased;
-    else {
-      const fresh: TableMappingPlan = (await io.call({ stage: 'mapping', source: next.source }, 0)).result;
-      mapping = stabilizeQualityMapping(mapping, fresh, registry, next.registry);
+    if (primaryChanged) {
+      const next = buildQualitySources(merged());
+      const rebased = rebaseEmptyPageRecovery(mapping, registry, next.registry);
+      if (rebased) mapping = rebased;
+      else {
+        const fresh: TableMappingPlan = (await io.call({ stage: 'mapping', source: next.source }, 0)).result;
+        mapping = stabilizeQualityMapping(mapping, fresh, registry, next.registry);
+      }
+      registry = next.registry; source = next.source;
+      result = runQualityTrial(mapping, registry, independent, scope);
     }
-    registry = next.registry; source = next.source;
-    result = runQualityTrial(mapping, registry, independent, scope);
   }
   const accountPlan = planAccountRecovery(result.pending, registry, independent);
   io.progress(`核实账号归属${accountPlan.selected.length ? `（${accountPlan.selected.length} 页）` : ''}…`, 82, result.rows.length);
@@ -118,5 +131,5 @@ export async function runQualityWorkflow(io: QualityWorkflowIO) {
   check(); result = withAnalysisTypeChecks(runQualityTrial(mapping, registry, independent, scope, accounts, critical), registry);
   io.progress('已完成识别并列出待确认项', 100, result.rows.length);
   return { result, registry, mapping, preflight, primary, context, independent, accounts, critical,
-    recoveryPlans: { primary: { ...primaryPlan, selections: primarySelections }, accounts: accountPlan, critical: criticalPlan } };
+    recoveryPlans: { primary: { ...primaryPlan, selections: primarySelections, failures: primaryFailures }, accounts: accountPlan, critical: criticalPlan } };
 }

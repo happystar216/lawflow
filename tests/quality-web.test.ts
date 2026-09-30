@@ -187,3 +187,16 @@ test('user cancellation wins over an earlier network error in another page worke
     call: async () => ({ result: { pageKind: 'blank', uprightCandidate: 'uncertain', reason: 'blank' }, finishReason: 'STOP', model: 'test', promptSHA256: 'test' })
   }), error => error instanceof DOMException && error.name === 'AbortError');
 });
+
+test('only disputed source pages use the stronger recovery model with the same complete image', async () => {
+  const requested: any[] = [];
+  const fetcher = (async (_target: any, init: any) => {
+    requested.push(JSON.parse(init.body));
+    return Response.json({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({ nearTableText: [], tables: [] }) } }] });
+  }) as typeof fetch;
+  const env = { GEMINI_API_KEY: 'test', DASHSCOPE_API_KEY: 'test' };
+  for (const stage of ['primary', 'context', 'primaryRecovery'] as const)
+    await runQualityModel({ stage, images: ['YQ=='] }, env, new AbortController().signal, fetcher);
+  assert.deepEqual(requested.map(r => r.model), ['qwen3.8-flash', 'qwen3.8-flash', 'qwen3.8-max']);
+  assert.ok(requested.every(r => r.messages[0].content.length === 2 && r.messages[0].content[1].image_url.url === 'data:image/jpeg;base64,YQ=='));
+});

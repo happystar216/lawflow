@@ -17,6 +17,7 @@ import { recoverJoinedDirections } from './joinedDirection';
 import { auxiliaryPrintedPurpose } from './auxiliaryPurpose';
 import { combinedPartySuffixColumn } from './columnRecovery';
 import { sourceBalanceChecks } from './sourceBalanceChecks';
+import { recoverNeighborAccountDigits } from './neighborAccountDigits';
 
 /** Shared web/replay pipeline; document scope is explicit, never inferred from an account prefix. */
 export function runQualityTrial(mapping: TableMappingPlan, registry: SourceRegistry,
@@ -36,7 +37,9 @@ export function runQualityTrial(mapping: TableMappingPlan, registry: SourceRegis
     change(repair.index, 5, repair.direction, 'EXPLICIT_DEPOSIT_DEBIT_CREDIT_AMOUNT_COLUMNS', repair.sources.map(id => `cell:${id}`));
     rows[repair.index].fields[5] = repair.sources.map(id => ({ id, text: registry.cells[id].text, normalized: repair.direction }));
   }
-  const criticalRecovery = applyCriticalFieldRecovery(rows, registry, originalIndependent, criticalRereads);
+  const neighborAccounts = recoverNeighborAccountDigits(rows, mapping, registry, originalIndependent);
+  const neighborCriticalAccounts = recoverNeighborAccountDigits(rows, mapping, registry, criticalRereads);
+  const criticalRecovery = applyCriticalFieldRecovery(rows, registry, neighborAccounts.pages, neighborCriticalAccounts.pages);
   const recovery = applyFocusedAccountRecovery(rows, materialized.metadata, registry, criticalRecovery.pages, accountRecovery);
   const independent = recovery.pages;
   for (const repair of recoverJoinedDirections(rows, registry, independent)) {
@@ -445,6 +448,7 @@ export function runQualityTrial(mapping: TableMappingPlan, registry: SourceRegis
     observations: rows, metadata: materialized.metadata, transformations, comparison, consolidation, rejectedIssuerEvidence, recoveredOwnerPrefixes,
     accountRecovery: { applied: recovery.applied, skipped: recovery.skipped }, accountBindings, accountInventoryConflicts: accountInventory.unresolved,
     criticalFieldRecovery: { applied: criticalRecovery.applied },
+    neighborAccountRecovery: { independent: neighborAccounts.applied, critical: neighborCriticalAccounts.applied },
     rows: consolidation.events.map(e => ({ id: e.id, values: e.values,
       sourceObservationIds: e.observations.flatMap(n => rows[n].sourceRows.map(r => `source:${r}`)),
       observationNumbers: e.observations.map(n => n + 1) })),
