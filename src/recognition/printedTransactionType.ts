@@ -21,7 +21,7 @@ export function printedTransactionType(description: string, evidence: string[], 
   if (/分期付款退货/.test(summary)) return result('分期退款', 'PRINTED_INSTALLMENT_REFUND');
   if (/消费退货|消费退款|^退货$|^退款$/.test(summary)) return result('退款', 'PRINTED_PURCHASE_REFUND');
   if (accountKind === 'deposit') {
-    if (direction === 'OUT' && /^(?:电费|水费|电话费|燃气费|个人所得税|社保费|用水费收水费|污水处理费收污水费|住房公积金(?:对公\d+)?)$/.test(summary))
+    if (direction === 'OUT' && /^(?:电费|水费|电话费|燃气费|个人所得税(?:等)?|社保费|用水费收水费|污水处理费收污水费|住房公积金(?:对公\d+)?)$/.test(summary))
       return result('缴费', 'EXPLICIT_UTILITY_TAX_OR_SOCIAL_CONTRIBUTION');
     if (direction === 'OUT' && summary === '实时代收' && has(/^中国(?:电信|移动|联通)(?:股份)?有限公司(?:.{0,20}分公司)?$/))
       return result('缴费', 'PRINTED_TELECOM_COLLECTION');

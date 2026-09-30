@@ -16,6 +16,7 @@ import { recoverOwnerNames } from './ownerNameEvidence';
 import { recoverJoinedDirections } from './joinedDirection';
 import { auxiliaryPrintedPurpose } from './auxiliaryPurpose';
 import { combinedPartySuffixColumn } from './columnRecovery';
+import { sourceBalanceChecks } from './sourceBalanceChecks';
 
 /** Shared web/replay pipeline; document scope is explicit, never inferred from an account prefix. */
 export function runQualityTrial(mapping: TableMappingPlan, registry: SourceRegistry,
@@ -345,6 +346,7 @@ export function runQualityTrial(mapping: TableMappingPlan, registry: SourceRegis
     outputRows: consolidation.events.map((_, i) => i + 1), sourceRows: rows.flatMap(r => r.sourceRows), sourceCells: [],
     message: '上传材料的银行归属与页面明确银行名称不一致，请确认资料归属' });
   const push = (issue: AssemblyIssue) => pending.push({ ...issue, outputRows: [...new Set(issue.outputRows.map(n => eventForObservation.get(n)!).filter(Boolean))] });
+  for (const issue of sourceBalanceChecks(rows, materialized.metadata, registry)) push(issue);
   const printedMissingCounterparty = (n: number) => {
     const row = rows[n - 1], pair = pairForObservation.get(n);
     return row.values[8] === '存款结息' && row.values[9] === row.values[2] && Boolean(row.values[2])

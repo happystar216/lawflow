@@ -112,7 +112,7 @@ test('remark evidence supports ordinary transfers without guessing a missing pur
 });
 
 test('explicit expenses and disbursements use standard types without treating salary payments as salary income', () => {
-  for (const text of ['电费', '个人所得税', '社保费', '用水费 收水费'])
+  for (const text of ['电费', '个人所得税', '个人所得税等', '社保费', '用水费 收水费'])
     assert.equal(printedTransactionType(text, [text], 'OUT', 'deposit')?.type, '缴费');
   assert.equal(printedTransactionType('实时代收', ['中国电信股份有限公司'], 'OUT', 'deposit')?.type, '缴费');
   assert.equal(printedTransactionType('实时代收', ['未知公司'], 'OUT', 'deposit'), null);

@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 const files = {
   preflight: 'geminiPagePreflightV2', primary: 'qwenPagewiseVerbatimV5', context: 'qwenPageContextV1',
-  independent: 'geminiIndependentKeysV7', mapping: 'geminiTableMappingV9', primaryRecovery: 'qwenPagewiseVerbatimRecoveryV1',
+  independent: 'geminiIndependentKeysV7', mapping: 'geminiTableMappingV9', primaryRecovery: 'qwenPagewiseVerbatimRecoveryV2',
   accounts: 'geminiFocusedAccountsV2', critical: 'geminiCriticalColumnsV1'
 };
 const prompts = Object.fromEntries(Object.entries(files).map(([stage, name]) => {
