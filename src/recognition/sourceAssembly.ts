@@ -54,6 +54,10 @@ export function accountFromSource(text: string): string | null {
   if (/^尾号\d{2,8}$/.test(s)) return s;
   // Masking is a fact, not enough information to restore the hidden characters.
   if (/^[\d*＊xX]{8,32}$/.test(s)) return s.replace(/＊/g, '*');
+  // Some payment institutions print an alphanumeric identifier in the account
+  // column. Preserve the whole printed cell; extracting only its digit run
+  // silently changes the identifier.
+  if (/^(?=.{8,32}$)(?=.*\d)(?=.*[A-Za-z])[A-Za-z\d]+$/.test(s)) return s;
   const matches = [...s.matchAll(/(?<!\d)\d{8,32}(?!\d)/g)];
   return matches.length === 1 ? matches[0][0] : null;
 }

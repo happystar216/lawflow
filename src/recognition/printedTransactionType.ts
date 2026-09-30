@@ -21,6 +21,10 @@ export function printedTransactionType(description: string, evidence: string[], 
   if (/分期付款退货/.test(summary)) return result('分期退款', 'PRINTED_INSTALLMENT_REFUND');
   if (/消费退货|消费退款|^退货$|^退款$/.test(summary)) return result('退款', 'PRINTED_PURCHASE_REFUND');
   if (accountKind === 'deposit') {
+    if (direction === 'IN' && summary === '转账收入' && has(/^工资(?:款|收入)?$/))
+      return result('工资收入', 'PRINTED_TRANSFER_WITH_EXPLICIT_WAGE_PURPOSE');
+    if (direction === 'IN' && summary === '小额普通' && has(/^代发工资业务待付结算款$/))
+      return result('工资收入', 'PRINTED_PAYROLL_SETTLEMENT_CREDIT');
     if (!summary && /^\d{8,32}$/.test(counterpartyAccount) && ['IN', 'OUT'].includes(direction) && has(/^往来款$/))
       return result('账户转账', 'PRINTED_CURRENT_ACCOUNT_PAYMENT_WITH_COUNTERPARTY_ACCOUNT');
     if (['IN', 'OUT'].includes(direction) && /^(?:(?:跨行|行内|同行|网银|网上|手机银行)?转[账帐]|网转|他行汇入|跨行汇款|跨行转出|网银跨行汇款跨行转出|电子账户资金转出|网银转款本金|网银支付贷记|网银支付收到轧差通知|网银互联汇兑往账|超网汇兑[来往]账|汇兑往账[（(]直通[）)])$/.test(summary))
@@ -29,7 +33,7 @@ export function printedTransactionType(description: string, evidence: string[], 
     if (direction === 'OUT' && /^(?:现金支取|现金取款|取现|.{1,12}取现)$/.test(summary)) return result('现金支取', 'PRINTED_CASH_WITHDRAWAL');
     if (direction === 'IN' && (/^银联入账|^支付机构提现/.test(summary)
       || has(/(?:微信|零钱|余额宝|支付宝).{0,8}提现/))) return result('第三方支付', 'PRINTED_PAYMENT_SETTLEMENT_OR_WALLET_WITHDRAWAL');
-    if (/^(?:快捷支付|网上支付)/.test(summary) && direction === 'OUT') return result('第三方支付', 'PRINTED_QUICK_PAYMENT');
+    if (/^(?:快捷支付|网上支付|网上快捷支付)/.test(summary) && direction === 'OUT') return result('第三方支付', 'PRINTED_QUICK_PAYMENT');
     if (summary === '入金' && has(/支付宝|财付通|微信|银联|支付有限公司|支付股份有限公司/)) {
       return result('第三方支付', 'PRINTED_PAYMENT_PROVIDER_CREDIT');
     }

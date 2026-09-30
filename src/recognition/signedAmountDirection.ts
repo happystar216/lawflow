@@ -14,7 +14,7 @@ export function recoverSignedIncome(rows: AssembledRow[], mapping: TableMappingP
       || !reading || reading.coverage !== 'complete' || reading.pageIssues.length) continue;
     const labels = table.ignored.filter(i => i.kind === 'header').flatMap(i => i.r)
       .map(id => registry.cells[registry.rows[id]?.cells[selector.col - 1]]?.text.replace(/\s/g, '') || '');
-    if (!labels.some(s => /^(?:交易金额|发生额|发生金额|交易发生额)$/.test(s))) continue;
+    if (!labels.some(s => /^(?:金额|交易金额|发生额|发生金额|交易发生额)$/.test(s))) continue;
     const located = rows.map((row, index) => ({ row, index })).filter(({ row }) => row.sourceRows.some(id => {
       const source = registry.rows[id]; return source.page === table.page && source.table === table.table;
     }));

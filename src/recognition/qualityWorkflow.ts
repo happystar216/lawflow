@@ -86,7 +86,7 @@ export async function runQualityWorkflow(io: QualityWorkflowIO) {
   if (primaryPlan.selected.length) {
     io.progress(`核实 ${primaryPlan.selected.length} 页的行数差异…`, 74);
     await parallelPages(primaryPlan.selected.map(p => p.page), async page => {
-      const image = await io.image(page, preflight[page - 1].decision.clockwiseRotation, 250);
+      const image = await io.image(page, preflight[page - 1].decision.clockwiseRotation, 350);
       primary[page - 1] = (await io.call({ stage: 'primaryRecovery', images: [image] }, page)).result;
     });
     const next = buildQualitySources(merged());

@@ -71,6 +71,10 @@ test('printed deposit transfers are stable without model type dictionaries and r
   assert.equal(printedTransactionType('转账', ['贷款还款'], 'OUT', 'deposit')?.type, '贷款还款');
   assert.equal(printedTransactionType('批处理归还欠款', ['个人贷款每日扣款'], 'OUT', 'deposit')?.type, '贷款还款');
   assert.equal(printedTransactionType('批量还款', ['批量还款'], 'OUT', 'deposit')?.requiresReview, true);
+  assert.equal(printedTransactionType('网上快捷支付', ['网上快捷支付', '财付通'], 'OUT', 'deposit')?.type, '第三方支付');
+  assert.equal(printedTransactionType('转账收入', ['转账收入', '工资款'], 'IN', 'deposit')?.type, '工资收入');
+  assert.equal(printedTransactionType('小额普通', ['小额普通', '代发工资业务待付结算款'], 'IN', 'deposit')?.type, '工资收入');
+  assert.equal(printedTransactionType('跨行转账', ['跨行转账', '农民工工资专用账'], 'IN', 'deposit')?.type, '账户转账');
   assert.equal(printedTransactionType('转账', ['转账'], 'IN', 'credit'), null);
   for (const text of ['代扣业务', '外围批量入帐(批前运行)', '存款', '通过转账存取交易'])
     assert.equal(printedTransactionType(text, [text], 'OUT', 'deposit'), null);

@@ -14,6 +14,8 @@ test('source money is exact, preserves signed balance and rejects malformed or i
 
 test('identities preserve leading zeros and do not choose between an ID and account', () => {
   assert.equal(accountFromSource('001234567890'), '001234567890');
+  assert.equal(accountFromSource('Z2004944000010N'), 'Z2004944000010N');
+  assert.equal(accountFromSource('48429202 N'), '48429202N');
   assert.equal(accountFromSource('身份证 510000200001010011 账号 6222000000001234'), null);
   assert.equal(dateFromSource('2026-07-'), null);
   assert.equal(dateFromSource('2026-02-29'), null);
