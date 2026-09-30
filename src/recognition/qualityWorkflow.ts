@@ -3,6 +3,7 @@ import { withAnalysisTypeChecks } from '../review/qualityDelivery';
 import { buildQualitySources, stabilizeQualityMapping, rebaseEmptyPageRecovery } from './qualitySources';
 import { decidePreflight, type ModelReply, type PageMetrics, type QualityRequest, type VerbatimPage } from './qualityProtocol';
 import { planPrimaryRecovery } from './primaryRecoveryPlan';
+import { selectPrimaryRecovery } from './primaryRecoverySelection';
 import { planAccountRecovery } from './accountRecoveryPlan';
 import { planCriticalFieldRecovery } from './criticalFieldRecovery';
 import type { IndependentPage } from './independentComparison';
@@ -83,11 +84,15 @@ export async function runQualityWorkflow(io: QualityWorkflowIO) {
     result = runQualityTrial(mapping, registry, independent, scope);
   }
   const primaryPlan = planPrimaryRecovery(result.pending, registry);
+  const primarySelections: Record<number, ReturnType<typeof selectPrimaryRecovery>['decision']> = {};
   if (primaryPlan.selected.length) {
     io.progress(`核实 ${primaryPlan.selected.length} 页的行数差异…`, 74);
     await parallelPages(primaryPlan.selected.map(p => p.page), async page => {
       const image = await io.image(page, preflight[page - 1].decision.clockwiseRotation, 350);
-      primary[page - 1] = (await io.call({ stage: 'primaryRecovery', images: [image] }, page)).result;
+      const reread = (await io.call({ stage: 'primaryRecovery', images: [image] }, page)).result;
+      const selection = selectPrimaryRecovery(primary[page - 1], reread, independent[page]);
+      primary[page - 1] = selection.selected;
+      primarySelections[page] = selection.decision;
     });
     const next = buildQualitySources(merged());
     const rebased = rebaseEmptyPageRecovery(mapping, registry, next.registry);
@@ -113,5 +118,5 @@ export async function runQualityWorkflow(io: QualityWorkflowIO) {
   check(); result = withAnalysisTypeChecks(runQualityTrial(mapping, registry, independent, scope, accounts, critical), registry);
   io.progress('已完成识别并列出待确认项', 100, result.rows.length);
   return { result, registry, mapping, preflight, primary, context, independent, accounts, critical,
-    recoveryPlans: { primary: primaryPlan, accounts: accountPlan, critical: criticalPlan } };
+    recoveryPlans: { primary: { ...primaryPlan, selections: primarySelections }, accounts: accountPlan, critical: criticalPlan } };
 }

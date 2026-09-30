@@ -50,7 +50,7 @@ export function moneyFromSource(text: string, absolute = false): string | null {
 
 export function accountFromSource(text: string): string | null {
   if (EMPTY.test(text.trim())) return '';
-  const s = text.replace(/\s/g, '');
+  const s = text.replace(/\s|\\n/g, '');
   if (/^尾号\d{2,8}$/.test(s)) return s;
   // Masking is a fact, not enough information to restore the hidden characters.
   if (/^[\d*＊xX]{8,32}$/.test(s)) return s.replace(/＊/g, '*');

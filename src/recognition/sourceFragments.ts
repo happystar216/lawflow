@@ -7,9 +7,12 @@ export function selectSourceParty(cell: SourceCell, part: 'account' | 'name'): S
   if (/^[\d*＊xX]{8,32}$/.test(cell.text.replace(/\s/g, ''))) {
     return part === 'account' ? [cell.id] : [];
   }
-  const pieces = cell.text.split(/(?:[\/／|｜]|\r?\n|\\n)+/).map(s => s.trim());
+  // A printed slash separates name/account; line wrapping inside the name is
+  // not a third field. Only use newline as the delimiter when no slash exists.
+  const delimiter = /[\/／|｜]/.test(cell.text) ? /[\/／|｜]/ : /(?:\r?\n|\\n)+/;
+  const pieces = cell.text.split(delimiter).map(s => s.replace(/^(?:\s|\\n)+|(?:\s|\\n)+$/g, ''));
   if (pieces.length !== 2) return null;
-  const account = (s: string) => /^[\d*＊xX]{8,32}$/.test(s.replace(/\s/g, ''));
+  const account = (s: string) => /^[\d*＊xX]{8,32}$/.test(s.replace(/\s|\\n/g, ''));
   const name = (s: string) => Boolean(s) && !account(s) && !/^[\d\s*＊]+$/.test(s);
   const index = account(pieces[0]) && (name(pieces[1]) || !pieces[1]) ? 0
     : account(pieces[1]) && (name(pieces[0]) || !pieces[0]) ? 1 : -1;

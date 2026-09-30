@@ -51,3 +51,9 @@ test('a line break immediately before a party separator preserves exact fragment
   }
   assert.equal(selectSourceParty({ id: 1, text: '测试公司/001234567890/009876543210', page: 1, row: 1, column: 1 }, 'account'), null);
 });
+
+test('wrapped company names and account digits preserve their printed slash boundary', () => {
+  const cell = { id: 1, text: '测试公司（普通合伙\\n）/001234\\n567890', page: 1, row: 1, column: 1 };
+  assert.deepEqual(selectSourceParty(cell, 'name'), [{ id: 1, text: '测试公司（普通合伙\\n）' }]);
+  assert.deepEqual(selectSourceParty(cell, 'account'), [{ id: 1, text: '001234\\n567890' }]);
+});

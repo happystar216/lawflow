@@ -121,3 +121,22 @@ test('explicit expenses and disbursements use standard types without treating sa
   assert.equal(printedTransactionType('报销-日常费用', [], 'OUT', 'deposit'), null);
   assert.equal(printedTransactionType('电费', [], 'IN', 'deposit'), null);
 });
+
+test('explicit transfer voucher classifies vendor payments without overriding repayment or guessing from a party name', () => {
+  const classify = (purpose: string, voucher: string, header = '凭证种类') => {
+    const { registry } = buildQualitySources([{ nearTableText: [], tables: [{ rows: [
+      ['日期', '方向', '金额', '余额', '摘要', '对方账号', header],
+      ['2026-01-01', '支出', '10', '90', purpose, '001234567890', voucher]
+    ] }] }]);
+    const table: MappedTable = { page: 1, table: 1, kind: 'transactions', accountKind: 'deposit', groups: [[2]],
+      ignored: [{ r: [1], kind: 'header' }], directionCodes: null,
+      fields: { transactionDate: { row: 0, col: 1 }, direction: { row: 0, col: 2 }, amount: { row: 0, col: 3 }, balance: { row: 0, col: 4 },
+        description: { row: 0, col: 5 }, counterpartyAccount: { row: 0, col: 6 } } };
+    return runQualityTrial({ tables: [table], typeRules: [] }, registry, {}, { singleIssuerDocument: false }).rows[0].values[8];
+  };
+  assert.equal(classify('设备维修费', '网银凭证'), '账户转账');
+  assert.equal(classify('信用卡还款', '网银凭证'), '信用卡还款');
+  assert.equal(classify('还款', '网银凭证'), '');
+  assert.equal(classify('设备维修费', ''), '');
+  assert.equal(classify('设备维修费', '网银凭证', '对方名称'), '');
+});

@@ -200,6 +200,20 @@ export function runQualityTrial(mapping: TableMappingPlan, registry: SourceRegis
     if (printedType && !(printedType.requiresReview && !printedType.type && row.values[8])) {
       change(i, 8, printedType.type, printedType.basis, purposeFields.map(s => `cell:${s.id}`));
     }
+    // A bank transfer voucher establishes the mechanism when no more specific
+    // purpose was classified. Keep its actual source cell in the audit trail.
+    const vouchers = row.sourceRows.flatMap(id => {
+      const sourceRow = registry.rows[id];
+      const table = mapping.tables.find(t => t.page === sourceRow?.page && t.table === sourceRow?.table);
+      const headers = table?.ignored.filter(x => x.kind === 'header').flatMap(x => x.r) || [];
+      return (sourceRow?.cells || []).filter((cell, col) => semanticText(registry.cells[cell].text) === '网银凭证'
+        && headers.some(h => registry.rows[h]?.cells.length === sourceRow.cells.length
+          && /^(?:凭证种类|凭证类型)$/.test(semanticText(registry.cells[registry.rows[h].cells[col]].text))));
+    });
+    if (!row.values[8] && !printedType?.requiresReview && context.accountKind === 'deposit'
+      && ['IN', 'OUT'].includes(row.values[5]) && /^\d{8,32}$/.test(row.values[10]) && vouchers.length) {
+      change(i, 8, '账户转账', 'PRINTED_BANK_TRANSFER_VOUCHER', vouchers.map(id => `cell:${id}`));
+    }
     const contextualLoanRepayment = printedType?.requiresReview && description === '批量还款'
       && context.accountKind === 'deposit' && row.values[5] === 'OUT'
       && /^\d{12,32}$/.test(row.values[0]) && /^\d{12,32}$/.test(row.values[10])
