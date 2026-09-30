@@ -7,7 +7,7 @@ export function selectSourceParty(cell: SourceCell, part: 'account' | 'name'): S
   if (/^[\d*＊xX]{8,32}$/.test(cell.text.replace(/\s/g, ''))) {
     return part === 'account' ? [cell.id] : [];
   }
-  const pieces = cell.text.split(/[\/／|｜]|\r?\n|\\n/).map(s => s.trim());
+  const pieces = cell.text.split(/(?:[\/／|｜]|\r?\n|\\n)+/).map(s => s.trim());
   if (pieces.length !== 2) return null;
   const account = (s: string) => /^[\d*＊xX]{8,32}$/.test(s.replace(/\s/g, ''));
   const name = (s: string) => Boolean(s) && !account(s) && !/^[\d\s*＊]+$/.test(s);

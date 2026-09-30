@@ -1,0 +1,15 @@
+独立读取这一张完整银行材料图片中的全部交易。先从上到下找到所有独立账单及表头，再逐行横向照录。页脚或“共1页”下面仍可能有另一张账单，必须继续读取。输入没有其他模型的答案。
+
+只输出JSON：{"pageType":"transactions|account_info|document|blank|uncertain","coverage":"complete|uncertain","pageIssues":[],"bankName":"原文出具银行或空字符串","ownerNames":[],"ownerIdentifiers":[{"role":"account|card","value":"原文号码"}],"rows":[{"row":1,"values":["本方账号","YYYY-MM-DD","HH:mm:ss","IN或OUT","金额","余额","对方名称","对方账号"],"rawDirection":"原文方向或实际使用的金额列表头","issues":[{"field":"counterpartyAccount","kind":"uncertain|truncated|unreadable","reason":"具体不可辨认的位置"}]}]}
+
+values固定8个字符串；row按整张图片从上到下连续编号。全部实际交易都保留，不合并相似交易；表头、合计、账户清单、页脚、无明细行不算交易。双行共同描述一笔时保持一笔。没有交易时rows=[]，pageType不能为transactions。
+
+先确定本方账号所在位置和每张表的适用范围。明确标为“客户账号”“账户号码”“账号”的号码按原文照抄，即使比常见银行卡号短；不能因为位数或前缀不常见而省略或补位。“客户编号”“客户号”“机构号”“流水号”和身份证不是账号。账号和卡号同时印出时优先账号，卡号另放ownerIdentifiers。禁止从对方账号反推本方账号。
+
+每一行必须分别看清金额列与余额列：借方发生额/支出金额和贷方发生额/收入金额是两个发生额栏，不是余额栏。存款账户借方为OUT、贷方为IN。取本行实际发生的金额，另一侧0.00不能拿来当余额；余额只抄“账户余额/余额”栏。不能从相邻行计算，也不能沿用上一行。原文没有余额写空，原文不是零就不能填零。金额绝对值、余额保留负号，均去千分位并保留两位小数。
+
+“对方户名/账号”或“对方账号/户名”是同一个格里的两项信息。沿斜杠及该格内换行读取完整内容，名称放第7项、账号放第8项；紧邻的“流水号”不是对方账号。即使账号换到名称下方或下一行，也要读完同格。每笔都重新读数字，不沿用前一笔号码，不按常见号码补全。保留前导零、掩码和字母数字支付标识。
+
+交易日期和时间逐行抄录；日期不全不可补年/月/日。对方只抄该笔实际印出的名称或商户，不使用本方户名或渠道代替。没有可见内容写空字符串；有印出的字段但看不清时写可见部分或空字符串，并给该行对应字段标issues，不能把“看不清”当成“原文没有”。issues.field只允许accountNumber/transactionDate/transactionTime/direction/amount/balance/counterpartyName/counterpartyAccount。
+
+不按金额、余额、账号习惯猜字，不扩写名称，不判断交易用途。coverage仅在全部表格和交易均被读取时为complete，否则uncertain并在pageIssues写具体遗漏位置。pageIssues必须为字符串数组。正常空格和不影响读取的朝向不算异常。所有根字段必须存在，不输出Markdown或解释。

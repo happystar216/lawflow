@@ -9,6 +9,7 @@ import { recoverPrintedOwnerPrefixes } from './printedOwnerPrefixes';
 import { semanticText } from './semanticText';
 import { collectAccountIssuers } from './accountIssuerEvidence';
 import { recoverSignedIncome } from './signedAmountDirection';
+import { recoverPairedAmountDirections } from './pairedAmountDirection';
 import { printedTransactionType } from './printedTransactionType';
 import { applyCriticalFieldRecovery } from './criticalFieldRecovery';
 import { recoverOwnerNames } from './ownerNameEvidence';
@@ -22,9 +23,6 @@ export function runQualityTrial(mapping: TableMappingPlan, registry: SourceRegis
   criticalRereads: Record<number, IndependentPage> = {}) {
   const materialized = materializeTableMapping(mapping, registry);
   const rows = structuredClone(materialized.rows);
-  const criticalRecovery = applyCriticalFieldRecovery(rows, registry, originalIndependent, criticalRereads);
-  const recovery = applyFocusedAccountRecovery(rows, materialized.metadata, registry, criticalRecovery.pages, accountRecovery);
-  const independent = recovery.pages;
   const transformations: Array<{ observation: number; field: number; before: string; after: string; basis: string; sources: string[] }> = [];
   const typeUncertainties: number[] = [];
   const financialIncomeUncertainties: number[] = [];
@@ -33,6 +31,13 @@ export function runQualityTrial(mapping: TableMappingPlan, registry: SourceRegis
     transformations.push({ observation: i + 1, field, before: rows[i].values[field], after: value, basis, sources });
     rows[i].values[field] = value;
   };
+  for (const repair of recoverPairedAmountDirections(rows, mapping, registry)) {
+    change(repair.index, 5, repair.direction, 'EXPLICIT_DEPOSIT_DEBIT_CREDIT_AMOUNT_COLUMNS', repair.sources.map(id => `cell:${id}`));
+    rows[repair.index].fields[5] = repair.sources.map(id => ({ id, text: registry.cells[id].text, normalized: repair.direction }));
+  }
+  const criticalRecovery = applyCriticalFieldRecovery(rows, registry, originalIndependent, criticalRereads);
+  const recovery = applyFocusedAccountRecovery(rows, materialized.metadata, registry, criticalRecovery.pages, accountRecovery);
+  const independent = recovery.pages;
   for (const repair of recoverJoinedDirections(rows, registry, independent)) {
     change(repair.observation - 1, 5, repair.value, 'JOINED_PRINTED_DIRECTION_WITH_INDEPENDENT_MARKER', [`cell:${repair.cell}`, repair.source]);
     rows[repair.observation - 1].fields[5] = [{ id: repair.cell, text: repair.marker, normalized: repair.value }];
